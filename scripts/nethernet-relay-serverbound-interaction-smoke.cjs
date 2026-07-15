@@ -123,8 +123,22 @@ const externalContainerPlaceFromGatedCursorRequest = {
     cause: -1
   }]
 }
+const chestCursorToHotbarRequest = {
+  requests: [{
+    request_id: -5,
+    actions: [{
+      type_id: 'place',
+      count: 37,
+      source: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 12 },
+      destination: { slot_type: { container_id: 'hotbar' }, slot: 3, stack_id: 0 }
+    }],
+    custom_names: [],
+    cause: -1
+  }]
+}
 assert.strictEqual(bridgeItemStackRequestTouchesOwnInventoryScreen(standaloneItemStackRequest), true)
 assert.strictEqual(bridgeItemStackRequestTouchesOwnInventoryScreen(externalContainerItemStackRequest), false)
+assert.strictEqual(bridgeItemStackRequestTouchesOwnInventoryScreen(chestCursorToHotbarRequest), true)
 const baseAuthInputPacket = makeBedrockPlayerAuthInputPacket({
   kind: 'movement',
   x: 10,
@@ -194,6 +208,7 @@ function makeRelayPlayerHarness (queueImpl) {
   relayPlayer.pendingBridgeAuthInputItemStackRequests = []
   relayPlayer.bridgeAuthInputItemStackEmbeddingDisabled = false
   relayPlayer.bridgePredictedItemStackIds = new Map()
+  relayPlayer.externalContainerWindowId = null
   relayPlayer.realmInventoryScreenOpen = true
   relayPlayer.realmInventoryScreenWindowId = 2
   relayPlayer.realmInventoryOpenInFlight = false
@@ -330,6 +345,25 @@ withQuietRelayLogs(() => {
   assert.strictEqual(queued[0].name, 'item_stack_request')
   assert.strictEqual(queued[0].params.requests[0].request_id, -5)
   assert.strictEqual(relayPlayer.pendingRealmInventoryOpenItemStackRequests.length, 0)
+})
+
+withQuietRelayLogs(() => {
+  const { relayPlayer, queued } = makeRelayPlayerHarness()
+  relayPlayer.realmInventoryScreenOpen = false
+  relayPlayer.realmInventoryScreenWindowId = null
+  relayPlayer.externalContainerWindowId = 2
+  relayPlayer.bridgePredictedItemStackIds.set('cursor:0', 12)
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream(
+    'item_stack_request',
+    chestCursorToHotbarRequest,
+    'live:chest_cursor_to_hotbar'
+  ), true)
+  assert.strictEqual(queued.length, 1)
+  assert.strictEqual(queued[0].name, 'item_stack_request')
+  assert.strictEqual(queued[0].params.requests[0].request_id, -5)
+  assert.strictEqual(relayPlayer.pendingRealmInventoryOpenItemStackRequests.length, 0)
+  assert.strictEqual(relayPlayer.pendingBridgeToRealmItemStackRequests.has('-5'), true)
 })
 
 withQuietRelayLogs(() => {

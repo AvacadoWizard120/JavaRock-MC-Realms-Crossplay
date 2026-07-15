@@ -3,6 +3,7 @@
 const assert = require('assert')
 const {
   ViaBedrockRelayPlayer,
+  bridgeTrackClientboundInventoryStacks,
   bridgeItemStackRequestSourcePreflightDropDiagnosis,
   bridgeSanitizedItemStackRequestParams,
   clientboundInventoryTransactionDropDiagnosis,
@@ -133,6 +134,82 @@ assert.strictEqual(stackResponse.responses[0].request_id, 44)
 assert.strictEqual(stackResponse.responses[0].containers[0].container_id, 'hotbar_and_inventory')
 assert.strictEqual(stackResponse.responses[0].containers[0].slots[0].stack_network_id, 333)
 assert.strictEqual(stackResponse.entries, undefined)
+
+{
+  const emptyV4 = () => ({
+    network_id: 0,
+    count: 0,
+    metadata: 0,
+    block_runtime_id: 0,
+    extra_data: Buffer.alloc(0)
+  })
+  const gravel = {
+    network_id: 13,
+    count: 37,
+    metadata: 0,
+    net_id_variant: { type: 'item_stack_net_id', id: 12 },
+    block_runtime_id: 1529044762,
+    extra_data: Buffer.alloc(10)
+  }
+  const owner = {
+    server: { downstreamBedrockVersion: '1.26.30' },
+    bridgePredictedItemStackIds: new Map([['cursor:0', 12]]),
+    bridgeAuthoritativeItemsByStackId: new Map(),
+    pendingBridgeToRealmItemStackRequests: new Map([['-5', {
+      request: {
+        request_id: -5,
+        actions: [{
+          type_id: 'place',
+          count: 37,
+          source: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 12 },
+          destination: { slot_type: { container_id: 'hotbar' }, slot: 3, stack_id: 0 }
+        }]
+      }
+    }]]),
+    lastPlayerInventoryContent: {
+      window_id: 'inventory',
+      container: { container_id: 'hotbar_and_inventory' },
+      input: Array.from({ length: 36 }, emptyV4)
+    },
+    lastPlayerUiContent: {
+      window_id: 'ui',
+      container: { container_id: 'container' },
+      input: Array.from({ length: 54 }, (_, slot) => slot === 0 ? gravel : emptyV4())
+    }
+  }
+
+  bridgeTrackClientboundInventoryStacks(owner, 'inventory_content', {
+    window_id: 2,
+    input: Array.from({ length: 54 }, (_, slot) => slot === 30 ? gravel : emptyV4())
+  })
+  bridgeTrackClientboundInventoryStacks(owner, 'item_stack_response', {
+    responses: [{
+      status: 'ok',
+      request_id: -5,
+      containers: [{
+        slot_type: { container_id: 'cursor' },
+        slots: [{ slot: 0, count: 0, item_stack_id: 0 }]
+      }, {
+        slot_type: { container_id: 'hotbar' },
+        slots: [{ slot: 3, count: 37, item_stack_id: 12 }]
+      }]
+    }]
+  })
+
+  assert.strictEqual(owner.lastPlayerUiContent.input[0].network_id, 0)
+  assert.strictEqual(owner.lastPlayerInventoryContent.input[3].network_id, 13)
+  assert.strictEqual(owner.lastPlayerInventoryContent.input[3].count, 37)
+  assert.strictEqual(owner.lastPlayerInventoryContent.input[3].net_id_variant.id, 12)
+  assert.strictEqual(owner.bridgePredictedItemStackIds.has('cursor:0'), false)
+  assert.strictEqual(owner.bridgePredictedItemStackIds.get('hotbar:3'), 12)
+  assert.strictEqual(owner.pendingBridgeToRealmItemStackRequests.has('-5'), false)
+
+  bridgeTrackClientboundInventoryStacks(owner, 'item_stack_response', {
+    responses: [{ status: 49, request_id: -7, containers: [] }]
+  })
+  assert.strictEqual(owner.lastPlayerUiContent.input[0].network_id, 0)
+  assert.strictEqual(owner.lastPlayerInventoryContent.input[3].network_id, 13)
+}
 
 const filteredAttributes = normalizeClientboundEntityNoiseForLocalViaBedrock('update_attributes', {
   attributes: [

@@ -1317,7 +1317,14 @@ function bridgeItemCount (item) {
 function bridgeRawItemStackId (item) {
   if (!item || typeof item !== 'object') return undefined
   const raw = firstNonNull(item.stack_id, item.stackId, item.stack_network_id, item.stackNetworkId, item.item_stack_id, item.itemStackId)
-  const parsed = Number(raw)
+  const nested = raw && typeof raw === 'object'
+    ? firstNonNull(raw.id, raw.stack_id, raw.stackId, raw.value)
+    : raw
+  const variant = firstNonNull(item.net_id_variant, item.netIdVariant)
+  const variantId = variant && typeof variant === 'object'
+    ? firstNonNull(variant.id, variant.stack_id, variant.stackId, variant.item_stack_net_id, variant.itemStackNetId)
+    : undefined
+  const parsed = Number(firstNonNull(nested, variantId))
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
@@ -1672,10 +1679,19 @@ function bridgeRememberPredictedCursorItem (owner, item, stackId = 0) {
   }
 
   const trustedStackId = numberOrDefault(stackId, bridgeItemStackId(item, 0))
-  const normalized = normalizeItemForLocalViaBedrock({
+  const source = {
     ...item,
     ...(trustedStackId ? { stack_id: trustedStackId, has_stack_id: 1 } : {})
-  })
+  }
+  const isItemV4 = item.net_id_variant != null || item.netIdVariant != null || item.extra_data != null || item.extraData != null
+  const normalized = isItemV4
+    ? bridgeCloneInventoryItemForCache({
+        ...source,
+        net_id_variant: trustedStackId
+          ? { type: 'item_stack_net_id', id: trustedStackId }
+          : firstNonNull(item.net_id_variant, item.netIdVariant)
+      })
+    : normalizeItemForLocalViaBedrock(source)
   owner.bridgePredictedCursorItem = normalized
   owner.bridgePredictedCursorItemAt = Date.now()
   bridgeRememberPredictedStackId(owner, bridgeCursorSlotDescriptor(), bridgeItemStackId(normalized, trustedStackId))
@@ -1686,6 +1702,82 @@ function bridgePredictedCursorStorageItem (owner, options = {}) {
   if (isEmptyBedrockItemForBridge(item)) return null
   if (localViaBedrockUsesItemV4(options)) return normalizeItemV4ForLocalViaBedrock(item)
   return normalizeItemForLocalViaBedrock(item)
+}
+
+function bridgeCloneInventoryItemForCache (item = {}) {
+  const out = { ...item }
+  if (Buffer.isBuffer(item.extra_data)) out.extra_data = Buffer.from(item.extra_data)
+  if (Buffer.isBuffer(item.extraData)) out.extraData = Buffer.from(item.extraData)
+  if (item.net_id_variant && typeof item.net_id_variant === 'object') out.net_id_variant = { ...item.net_id_variant }
+  if (item.netIdVariant && typeof item.netIdVariant === 'object') out.netIdVariant = { ...item.netIdVariant }
+  if (item.extra && typeof item.extra === 'object') out.extra = { ...item.extra }
+  return out
+}
+
+function bridgeAuthoritativeItemStackMap (owner) {
+  if (!(owner?.bridgeAuthoritativeItemsByStackId instanceof Map)) {
+    owner.bridgeAuthoritativeItemsByStackId = new Map()
+  }
+  return owner.bridgeAuthoritativeItemsByStackId
+}
+
+function bridgeRememberAuthoritativeItemStack (owner, item) {
+  if (!owner || isEmptyBedrockItemForBridge(item)) return
+  const stackId = bridgeItemStackId(item, 0)
+  if (!stackId || bridgeItemCount(item) <= 0) return
+
+  const map = bridgeAuthoritativeItemStackMap(owner)
+  const key = String(stackId)
+  map.delete(key)
+  map.set(key, bridgeCloneInventoryItemForCache(item))
+  while (map.size > 1024) map.delete(map.keys().next().value)
+}
+
+function bridgeFindAuthoritativeItemStack (owner, stackId) {
+  if (!owner || !stackId) return null
+  const key = String(stackId)
+  const mapped = bridgeAuthoritativeItemStackMap(owner).get(key)
+  if (mapped) return bridgeCloneInventoryItemForCache(mapped)
+
+  for (const packet of [owner.lastPlayerInventoryContent, owner.lastPlayerUiContent]) {
+    const items = Array.isArray(packet?.input) ? packet.input : []
+    const item = items.find(candidate => bridgeItemStackId(candidate, 0) === stackId)
+    if (item) return bridgeCloneInventoryItemForCache(item)
+  }
+  return null
+}
+
+function bridgeOwnerUsesItemV4 (owner, item) {
+  if (item && (item.net_id_variant != null || item.netIdVariant != null || item.extra_data != null || item.extraData != null)) return true
+  let version
+  try {
+    version = typeof owner?.downstreamVersionForCensus === 'function'
+      ? owner.downstreamVersionForCensus()
+      : owner?.server?.downstreamBedrockVersion
+  } catch {}
+  return localViaBedrockUsesItemV4({ localBedrockVersion: /\d/.test(String(version || '')) ? version : undefined })
+}
+
+function bridgeItemForAcceptedStackState (owner, item, count, stackId) {
+  if (count <= 0) {
+    return bridgeOwnerUsesItemV4(owner, item)
+      ? emptyItemV4ForLocalViaBedrock()
+      : emptyItemForLocalViaBedrock()
+  }
+  if (isEmptyBedrockItemForBridge(item)) return null
+
+  if (bridgeOwnerUsesItemV4(owner, item)) {
+    const out = normalizeItemV4ForLocalViaBedrock({ ...item, count })
+    out.count = count
+    out.net_id_variant = { type: 'item_stack_net_id', id: stackId }
+    return out
+  }
+
+  const out = normalizeItemForLocalViaBedrock({ ...item, count, stack_id: stackId, has_stack_id: 1 })
+  out.count = count
+  out.stack_id = stackId
+  out.has_stack_id = 1
+  return out
 }
 
 function bridgeOverlayPredictedCursorStorageItem (owner, name, params = {}, options = {}) {
@@ -1705,14 +1797,18 @@ function bridgeSlotDescriptorFromContainerIdAndSlot (containerId, slot) {
   if (numericSlot < 0) return null
 
   if (normalized === 'hotbar') return { slot_type: { container_id: 'hotbar' }, slot: numericSlot }
-  if (normalized === 'inventory') {
+  if (normalized === 'inventory' || normalized === 'hotbar_and_inventory' || normalized === 'fixed_inventory') {
     if (numericSlot >= 0 && numericSlot <= 8) return { slot_type: { container_id: 'hotbar' }, slot: numericSlot }
     return { slot_type: { container_id: 'inventory' }, slot: numericSlot }
   }
   if (normalized === 'crafting_input' || normalized === 'ui' || normalized === 'player_only_ui' || normalized === '124') {
+    if ((normalized === 'ui' || normalized === 'player_only_ui' || normalized === '124') && numericSlot === 0) {
+      return { slot_type: { container_id: 'cursor' }, slot: 0 }
+    }
     if (numericSlot >= 28 && numericSlot <= 31) return { slot_type: { container_id: 'crafting_input' }, slot: numericSlot }
   }
   if (normalized === 'cursor') return { slot_type: { container_id: 'cursor' }, slot: 0 }
+  if (normalized === 'container') return { slot_type: { container_id: 'container' }, slot: numericSlot }
 
   const windowId = normalizedWindowIdString(containerId)
   if (windowId === 'inventory' || windowId === 'fixed_inventory') {
@@ -1720,9 +1816,79 @@ function bridgeSlotDescriptorFromContainerIdAndSlot (containerId, slot) {
     return { slot_type: { container_id: 'inventory' }, slot: numericSlot }
   }
   if (windowId === 'hotbar') return { slot_type: { container_id: 'hotbar' }, slot: numericSlot }
+  if (windowId === 'ui' && numericSlot === 0) return { slot_type: { container_id: 'cursor' }, slot: 0 }
   if (windowId === 'ui' && numericSlot >= 28 && numericSlot <= 31) return { slot_type: { container_id: 'crafting_input' }, slot: numericSlot }
+  if (windowId === 'container') return { slot_type: { container_id: 'container' }, slot: numericSlot }
 
   return null
+}
+
+function bridgeCachedInventoryItemAtSlot (owner, slotDescriptor) {
+  const containerId = bridgeSlotContainerId(slotDescriptor)
+  const slot = numberOrDefault(slotDescriptor?.slot, -1)
+  if (slot < 0) return null
+  if (containerId === 'cursor') return owner?.lastPlayerUiContent?.input?.[0] || null
+  if (containerId === 'hotbar' || containerId === 'inventory') return owner?.lastPlayerInventoryContent?.input?.[slot] || null
+  if (containerId === 'crafting_input') return owner?.lastPlayerUiContent?.input?.[slot] || null
+  return null
+}
+
+function bridgeSetCachedInventoryItemAtSlot (owner, slotDescriptor, item) {
+  const containerId = bridgeSlotContainerId(slotDescriptor)
+  const slot = numberOrDefault(slotDescriptor?.slot, -1)
+  if (!owner || slot < 0) return false
+
+  let property
+  let cacheSlot = slot
+  if (containerId === 'cursor') {
+    property = 'lastPlayerUiContent'
+    cacheSlot = 0
+  } else if (containerId === 'hotbar' || containerId === 'inventory') {
+    property = 'lastPlayerInventoryContent'
+  } else if (containerId === 'crafting_input') {
+    property = 'lastPlayerUiContent'
+  } else {
+    return false
+  }
+
+  const packet = owner[property]
+  if (!packet) return false
+  const input = Array.isArray(packet.input) ? packet.input.slice() : []
+  input[cacheSlot] = bridgeCloneInventoryItemForCache(item)
+  owner[property] = { ...packet, input }
+  return true
+}
+
+function bridgeApplyAcceptedItemStackResponseToAuthoritativeCache (owner, response = {}) {
+  let applied = 0
+  for (const packet of [owner?.lastPlayerInventoryContent, owner?.lastPlayerUiContent]) {
+    for (const item of Array.isArray(packet?.input) ? packet.input : []) {
+      bridgeRememberAuthoritativeItemStack(owner, item)
+    }
+  }
+  const containers = Array.isArray(response.containers) ? response.containers : []
+  for (const container of containers) {
+    const containerId = firstNonNull(container.slot_type?.container_id, container.container_id, container.containerId)
+    const slots = Array.isArray(container.slots) ? container.slots : []
+    for (const slot of slots) {
+      const slotDescriptor = bridgeSlotDescriptorFromContainerIdAndSlot(containerId, slot.slot)
+      const stackId = numberOrDefault(firstNonNull(slot.item_stack_id, slot.itemStackId, slot.stack_network_id, slot.stackNetworkId, slot.stack_id, slot.stackId), 0)
+      const count = numberOrDefault(slot.count, 0)
+      bridgeTrackStackIdAtLocation(owner, slotDescriptor, stackId, count)
+
+      const cachedItem = count > 0
+        ? bridgeFindAuthoritativeItemStack(owner, stackId)
+        : bridgeCachedInventoryItemAtSlot(owner, slotDescriptor)
+      const item = bridgeItemForAcceptedStackState(owner, cachedItem, count, stackId)
+      if (item && bridgeSetCachedInventoryItemAtSlot(owner, slotDescriptor, item)) applied++
+
+      if (bridgeSlotContainerId(slotDescriptor) === 'cursor') {
+        bridgeRememberPredictedCursorItem(owner, item || emptyItemForLocalViaBedrock(), stackId)
+      }
+      if (item && count > 0) bridgeRememberAuthoritativeItemStack(owner, item)
+    }
+  }
+  return applied
 }
 
 function bridgeTrackStackIdAtLocation (owner, slotDescriptor, stackId, count = 1) {
@@ -1739,6 +1905,7 @@ function bridgeTrackClientboundInventoryStacks (owner, name, params = {}) {
   if (name === 'inventory_slot') {
     const slotDescriptor = bridgeSlotDescriptorFromContainerIdAndSlot(firstNonNull(params.window_id, params.windowId), params.slot)
     const item = params.item || params.new_item || params.newItem || params.slot_item || params.slotItem || {}
+    bridgeRememberAuthoritativeItemStack(owner, item)
     bridgeTrackStackIdAtLocation(owner, slotDescriptor, bridgeItemStackId(item, 0), bridgeItemCount(item))
     return
   }
@@ -1747,9 +1914,10 @@ function bridgeTrackClientboundInventoryStacks (owner, name, params = {}) {
     const items = Array.isArray(params.input) ? params.input : (Array.isArray(params.items) ? params.items : [])
     const windowId = firstNonNull(params.window_id, params.windowId)
     for (let slot = 0; slot < items.length; slot++) {
+      const item = items[slot] || {}
+      bridgeRememberAuthoritativeItemStack(owner, item)
       const slotDescriptor = bridgeSlotDescriptorFromContainerIdAndSlot(windowId, slot)
       if (!slotDescriptor) continue
-      const item = items[slot] || {}
       bridgeTrackStackIdAtLocation(owner, slotDescriptor, bridgeItemStackId(item, 0), bridgeItemCount(item))
     }
     return
@@ -1770,6 +1938,7 @@ function bridgeTrackClientboundInventoryStacks (owner, name, params = {}) {
         }
         continue
       }
+      bridgeApplyAcceptedItemStackResponseToAuthoritativeCache(owner, response)
       const containers = Array.isArray(response.containers) ? response.containers : []
       for (const container of containers) {
         const containerId = firstNonNull(container.slot_type?.container_id, container.container_id, container.containerId)
@@ -3099,6 +3268,7 @@ class ViaBedrockRelayPlayer extends Player {
     this.externalContainerWindowId = null
     this.bridgeNextItemStackRequestId = -3
     this.bridgePredictedItemStackIds = new Map()
+    this.bridgeAuthoritativeItemsByStackId = new Map()
     this.bridgeCraftingRecipeDb = null
     this.bridgeItemNameByNetworkId = new Map()
     this.bridgeNetworkIdByItemName = new Map()
@@ -5067,9 +5237,11 @@ class ViaBedrockRelayPlayer extends Player {
     const hasInventoryOpenGatedStackRequests =
       Array.isArray(this.pendingRealmInventoryOpenItemStackRequests) &&
       this.pendingRealmInventoryOpenItemStackRequests.length > 0
+    const hasExternalContainerOpen = this.externalContainerWindowId != null
     if (
       name === 'item_stack_request' &&
       !this.shouldBypassRealmInventoryOpenGate(context) &&
+      !hasExternalContainerOpen &&
       (hasInventoryOpenGatedStackRequests ||
         (bridgeItemStackRequestTouchesOwnInventoryScreen(params) && !this.realmInventoryScreenOpen))
     ) {
@@ -5687,7 +5859,7 @@ function startNetherNetBedrockRelay (config, info, options = {}) {
   const host = relayConfig.host || '127.0.0.1'
   const port = relayConfig.port || 19133
   const version = relayConfig.version || config.version || '1.26.30'
-  const motd = relayConfig.motd || config.javaLan?.motd || 'JavaRock'
+  const motd = relayConfig.motd || config.javaLan?.motd || 'Bedrock Realm Bridge'
   const levelName = relayConfig.levelName || `${info.realm?.name || 'Realm'} over NetherNet`
   const downstreamMode = normalizeDownstreamMode(options.downstreamMode || relayConfig.downstreamMode)
 
