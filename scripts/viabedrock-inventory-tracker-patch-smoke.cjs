@@ -207,6 +207,22 @@ function assertModernMobEquipmentCodec () {
   }
 }
 
+function assertModernMobArmorEquipmentCodec () {
+  const source = fs.readFileSync(path.join(patchRoot, 'EntityPackets.java'), 'utf8')
+  const start = source.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.MOB_ARMOR_EQUIPMENT')
+  const end = source.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.MOB_EQUIPMENT', start)
+  if (start < 0 || end < 0) throw new Error('could not isolate the MOB_ARMOR_EQUIPMENT translator')
+  const handler = source.slice(start, end)
+
+  const modernReads = handler.match(/wrapper\.read\(itemRewriter\.newItemType\(\)\)/g) || []
+  if (modernReads.length !== 5) {
+    throw new Error(`patched MOB_ARMOR_EQUIPMENT reader must decode all five armor slots with the 1.26.30 ItemV4 codec; found ${modernReads.length}`)
+  }
+  if (handler.includes('wrapper.read(itemRewriter.itemType())')) {
+    throw new Error('patched MOB_ARMOR_EQUIPMENT reader still uses the pre-1.26.30 Item codec')
+  }
+}
+
 function assertCanonicalInventoryInteractionState () {
   const source = fs.readFileSync(path.join(patchRoot, 'InventoryContainer.java'), 'utf8')
   const cloneStart = source.indexOf('public InventoryContainer(UserConnection user, byte containerId')
@@ -619,6 +635,7 @@ assertRenderingBytecode()
 assertFallingBlockEntityData()
 assertModernLevelSoundCodec()
 assertModernMobEquipmentCodec()
+assertModernMobArmorEquipmentCodec()
 assertCanonicalInventoryInteractionState()
 assertChunkLifecycleFixes()
 assertMovementCorrectionRebase()

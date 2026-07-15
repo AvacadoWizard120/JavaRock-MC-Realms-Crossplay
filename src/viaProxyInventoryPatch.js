@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.77-visible-falling-block-entities'
+const PATCH_ID = 'v0.3.78-modern-armor-item-codec'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/packet/UnhandledPackets.class',
   'net/raphimc/viabedrock/protocol/packet/EntityPackets.class',
