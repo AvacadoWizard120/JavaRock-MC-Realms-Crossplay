@@ -12,4 +12,5 @@ Do not move START-JAVAROCK.bat away from the other files.
 No account, token, Realm name, or Realm id is included in this package.
 Use only accounts and Realms you are authorized to access.
 
-For help, read docs/GETTING_STARTED.md in the source repository.
+For help, visit:
+https://github.com/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/blob/main/docs/GETTING_STARTED.md
