@@ -14,12 +14,13 @@ const { runNetherNetJsonRpcProbe } = require('./nethernetJsonRpcSignal')
 const { runNetherNetBedrockProbe } = require('./nethernetBedrockProbe')
 const { printJavaCompatProxyInfo } = require('./javaCompatProxy')
 const { runBedrockPacketRecorder } = require('./bedrockPacketRecorder')
+const { runBridgeGui } = require('./bridgeGui')
 
 installFatalErrorHandlers()
 
 function printUsage () {
   console.log(`
-  JavaRock
+Bedrock Realm Bridge MVP
 
 Commands:
   npm run realm:list
@@ -33,6 +34,7 @@ Commands:
   npm run java-compat:info -- [--viaproxy-jar <path>]
   npm run viaproxy:install
   npm run bridge:dev -- [--realm-index 0 | --realm-id <id> | --realm-invite <code>]
+  npm run bridge:gui
   npm run bridge:dev -- --java-facade-mode via-bedrock-relay --java-compat-mode viaproxy
   npm run nethernet:jsonrpc-probe -- [--realm-index 0 | --realm-id <id>]
   npm run nethernet:bedrock-probe -- [--realm-index 0 | --realm-id <id>]
@@ -56,7 +58,9 @@ Useful flags:
   --bedrock-relay-port <n> Local Bedrock UDP relay port for via-bedrock-relay. Default: 19133.
   --viaproxy-bedrock-target-version <v> ViaProxy Bedrock target label. Default: Bedrock 1.26.30.
   --viaproxy-jar <path>   ViaProxy jar for Java compatibility mode.
-  First login uses Microsoft device-code auth. Tokens are cached in .auth/.
+  --gui-port <n>          Local bridge GUI port. Default: 8765.
+
+First login uses Microsoft device-code auth. Tokens are cached in .auth/.
 `)
 }
 
@@ -110,6 +114,10 @@ async function main () {
 
     case 'bedrock-packet-recorder':
       await runBedrockPacketRecorder(config)
+      break
+
+    case 'bridge-gui':
+      await runBridgeGui(config)
       break
 
     case 'bridge-dev':

@@ -74,6 +74,8 @@ public class ChunkTracker extends StoredObject {
 
     private static final byte[] FULL_LIGHT = new byte[ChunkSectionLight.LIGHT_LENGTH];
     private static final int LIGHT_DOMAIN_WIDTH = 48;
+    private static final int SKY_LIGHT_DOMAIN_MARGIN = 1;
+    private static final int SKY_LIGHT_DOMAIN_WIDTH = 16 + (SKY_LIGHT_DOMAIN_MARGIN * 2);
     private static final float PLAYER_EYE_HEIGHT = 1.62F;
     private static final String[] HORIZONTAL_DIRECTIONS = {"north", "east", "south", "west"};
     private static final int[] HORIZONTAL_X = {0, 1, 0, -1};
@@ -92,6 +94,7 @@ public class ChunkTracker extends StoredObject {
     private final LongSet dirtyChunks = new LongOpenHashSet();
     private final LongSet sentChunks = new LongOpenHashSet();
     private final Long2ObjectMap<BlockLightData> blockLightCache = new Long2ObjectOpenHashMap<>();
+    private final Long2ObjectMap<BlockLightData> skyLightCache = new Long2ObjectOpenHashMap<>();
     private final Long2ObjectMap<Set<BlockPosition>> pendingItemFramesByChunk = new Long2ObjectOpenHashMap<>();
     private final Int2IntMap blockEmissionCache = new Int2IntOpenHashMap();
     private final Int2IntMap blockOpacityCache = new Int2IntOpenHashMap();
@@ -268,6 +271,16 @@ public class ChunkTracker extends StoredObject {
         final BedrockBlockEntity previous = chunk.getBlockEntityAt(bedrockBlockEntity.position());
         chunk.removeBlockEntityAt(bedrockBlockEntity.position());
         chunk.blockEntities().add(bedrockBlockEntity);
+        final BlockStateRewriter blockStateRewriter = this.user().get(BlockStateRewriter.class);
+        final int blockState = this.getBlockState(bedrockBlockEntity.position());
+        if (CustomBlockTags.ITEM_FRAME.equals(blockStateRewriter.tag(blockState))
+                && this.spawnedItemFrames.contains(bedrockBlockEntity.position())) {
+            this.user().get(EntityTracker.class).updateItemFrame(
+                    bedrockBlockEntity.position(),
+                    blockStateRewriter.blockState(blockState),
+                    bedrockBlockEntity.tag()
+            );
+        }
         if (this.isChestBlockEntity(previous) || this.isChestBlockEntity(bedrockBlockEntity)) {
             this.markChestChunksDirty(previous);
             this.markChestChunksDirty(bedrockBlockEntity);
@@ -413,7 +426,12 @@ public class ChunkTracker extends StoredObject {
             this.markLoadedChunksDirtyAround(chunkX, chunkZ, true);
 
             if (CustomBlockTags.ITEM_FRAME.equals(tag)) {
-                entityTracker.spawnItemFrame(blockPosition, blockStateRewriter.blockState(blockState));
+                final BedrockBlockEntity bedrockBlockEntity = this.getBlockEntity(blockPosition);
+                entityTracker.spawnItemFrame(
+                        blockPosition,
+                        blockStateRewriter.blockState(blockState),
+                        bedrockBlockEntity != null ? bedrockBlockEntity.tag() : null
+                );
                 this.spawnedItemFrames.add(blockPosition);
             } else if (BlockEntityRewriter.isBlockEntity(tag)) {
                 final BedrockBlockEntity bedrockBlockEntity = this.getBlockEntity(blockPosition);
@@ -462,19 +480,18 @@ public class ChunkTracker extends StoredObject {
         if (firstSend) this.invalidateBlockLightAround(chunkX, chunkZ);
 
         final Chunk remappedChunk = this.remapChunk(chunk);
+        final BlockLightData skyLight = this.getSkyLight(chunk);
         final BlockLightData blockLight = this.getBlockLight(chunk);
 
         final PacketWrapper levelChunkWithLight = PacketWrapper.create(ClientboundPackets26_1.LEVEL_CHUNK_WITH_LIGHT, this.user());
-        final BitSet lightMask = new BitSet();
-        lightMask.set(0, remappedChunk.getSections().length + 2);
         levelChunkWithLight.write(this.chunkType, remappedChunk); // chunk
-        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, lightMask.toLongArray()); // sky light mask
+        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, skyLight.mask()); // sky light mask
         levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, blockLight.mask()); // block light mask
-        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, new long[0]); // empty sky light mask
+        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, skyLight.emptyMask()); // empty sky light mask
         levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, blockLight.emptyMask()); // empty block light mask
-        levelChunkWithLight.write(Types.VAR_INT, remappedChunk.getSections().length + 2); // sky light length
-        for (int i = 0; i < remappedChunk.getSections().length + 2; i++) {
-            levelChunkWithLight.write(Types.BYTE_ARRAY_PRIMITIVE, FULL_LIGHT.clone()); // sky light
+        levelChunkWithLight.write(Types.VAR_INT, skyLight.arrays().length); // sky light length
+        for (byte[] skyLightArray : skyLight.arrays()) {
+            levelChunkWithLight.write(Types.BYTE_ARRAY_PRIMITIVE, skyLightArray);
         }
         levelChunkWithLight.write(Types.VAR_INT, blockLight.arrays().length); // block light length
         for (byte[] blockLightArray : blockLight.arrays()) {
@@ -937,8 +954,14 @@ public class ChunkTracker extends StoredObject {
 
         final BlockStateRewriter blockStateRewriter = this.user().get(BlockStateRewriter.class);
         for (BlockPosition position : frames) {
-            if (!this.spawnedItemFrames.add(position)) continue;
-            entityTracker.spawnItemFrame(position, blockStateRewriter.blockState(this.getBlockState(position)));
+            final BlockState blockState = blockStateRewriter.blockState(this.getBlockState(position));
+            final BedrockBlockEntity blockEntity = this.getBlockEntity(position);
+            final CompoundTag frameTag = blockEntity != null ? blockEntity.tag() : null;
+            if (this.spawnedItemFrames.add(position)) {
+                entityTracker.spawnItemFrame(position, blockState, frameTag);
+            } else {
+                entityTracker.updateItemFrame(position, blockState, frameTag);
+            }
         }
     }
 
@@ -981,6 +1004,143 @@ public class ChunkTracker extends StoredObject {
         final BlockLightData blockLight = this.createBlockLightData(light, chunk.getSections().length);
         this.blockLightCache.put(chunkKey, blockLight);
         return blockLight;
+    }
+
+    private BlockLightData getSkyLight(final BedrockChunk chunk) {
+        final long chunkKey = ChunkPosition.chunkKey(chunk.getX(), chunk.getZ());
+        final BlockLightData cached = this.skyLightCache.get(chunkKey);
+        if (cached != null) return cached;
+
+        final int sectionCount = chunk.getSections().length;
+        if (this.dimension != Dimension.OVERWORLD) {
+            final BlockLightData skyLight = emptyLightData(sectionCount);
+            this.skyLightCache.put(chunkKey, skyLight);
+            return skyLight;
+        }
+
+        final int domainSize = SKY_LIGHT_DOMAIN_WIDTH * SKY_LIGHT_DOMAIN_WIDTH * this.worldHeight;
+        final byte[] light = new byte[domainSize];
+        final byte[] opacity = new byte[domainSize];
+        Arrays.fill(opacity, (byte) 15);
+
+        final int originX = (chunk.getX() << 4) - SKY_LIGHT_DOMAIN_MARGIN;
+        final int originZ = (chunk.getZ() << 4) - SKY_LIGHT_DOMAIN_MARGIN;
+        for (int localZ = 0; localZ < SKY_LIGHT_DOMAIN_WIDTH; localZ++) {
+            for (int localX = 0; localX < SKY_LIGHT_DOMAIN_WIDTH; localX++) {
+                final int absoluteX = originX + localX;
+                final int absoluteZ = originZ + localZ;
+                if (this.getChunk(absoluteX >> 4, absoluteZ >> 4) == null) continue;
+
+                int skyLevel = 15;
+                for (int localY = this.worldHeight - 1; localY >= 0; localY--) {
+                    final int absoluteY = this.minY + localY;
+                    final int packedPosition = packSkyLightPosition(localX, localY, localZ);
+                    final int blockOpacity = this.blockOpacityAt(absoluteX, absoluteY, absoluteZ);
+                    opacity[packedPosition] = (byte) blockOpacity;
+                    if (blockOpacity >= 15) {
+                        skyLevel = 0;
+                    } else if (blockOpacity > 0) {
+                        skyLevel = Math.max(0, skyLevel - blockOpacity);
+                    }
+                    light[packedPosition] = (byte) skyLevel;
+                }
+            }
+        }
+
+        final IntArrayList queue = new IntArrayList();
+        for (int localY = 0; localY < this.worldHeight; localY++) {
+            for (int localZ = 1; localZ < SKY_LIGHT_DOMAIN_WIDTH - 1; localZ++) {
+                for (int localX = 1; localX < SKY_LIGHT_DOMAIN_WIDTH - 1; localX++) {
+                    final int packedPosition = packSkyLightPosition(localX, localY, localZ);
+                    final int skyLevel = light[packedPosition] & 15;
+                    if (skyLevel <= 1) continue;
+                    if ((light[packedPosition - 1] & 15) < skyLevel - 1
+                            || (light[packedPosition + 1] & 15) < skyLevel - 1
+                            || (light[packedPosition - SKY_LIGHT_DOMAIN_WIDTH] & 15) < skyLevel - 1
+                            || (light[packedPosition + SKY_LIGHT_DOMAIN_WIDTH] & 15) < skyLevel - 1) {
+                        queue.add(packedPosition);
+                    }
+                }
+            }
+        }
+
+        int queueIndex = 0;
+        while (queueIndex < queue.size()) {
+            final int packedPosition = queue.getInt(queueIndex++);
+            final int sourceLight = light[packedPosition] & 15;
+            if (sourceLight <= 1) continue;
+
+            final int localX = packedPosition % SKY_LIGHT_DOMAIN_WIDTH;
+            final int yAndZ = packedPosition / SKY_LIGHT_DOMAIN_WIDTH;
+            final int localZ = yAndZ % SKY_LIGHT_DOMAIN_WIDTH;
+            final int localY = yAndZ / SKY_LIGHT_DOMAIN_WIDTH;
+            this.propagateSkyLight(localX - 1, localY, localZ, sourceLight, light, opacity, queue);
+            this.propagateSkyLight(localX + 1, localY, localZ, sourceLight, light, opacity, queue);
+            this.propagateSkyLight(localX, localY - 1, localZ, sourceLight, light, opacity, queue);
+            this.propagateSkyLight(localX, localY + 1, localZ, sourceLight, light, opacity, queue);
+            this.propagateSkyLight(localX, localY, localZ - 1, sourceLight, light, opacity, queue);
+            this.propagateSkyLight(localX, localY, localZ + 1, sourceLight, light, opacity, queue);
+        }
+
+        final BlockLightData skyLight = this.createSkyLightData(light, sectionCount);
+        this.skyLightCache.put(chunkKey, skyLight);
+        return skyLight;
+    }
+
+    private void propagateSkyLight(final int localX, final int localY, final int localZ, final int sourceLight,
+                                   final byte[] light, final byte[] opacity, final IntArrayList queue) {
+        if (localX < 0 || localX >= SKY_LIGHT_DOMAIN_WIDTH || localZ < 0 || localZ >= SKY_LIGHT_DOMAIN_WIDTH
+                || localY < 0 || localY >= this.worldHeight) {
+            return;
+        }
+
+        final int packedPosition = packSkyLightPosition(localX, localY, localZ);
+        final int nextLight = sourceLight - Math.max(1, opacity[packedPosition] & 15);
+        if (nextLight <= (light[packedPosition] & 15)) return;
+        light[packedPosition] = (byte) nextLight;
+        queue.add(packedPosition);
+    }
+
+    private BlockLightData createSkyLightData(final byte[] light, final int sectionCount) {
+        final byte[][] sectionLight = new byte[sectionCount][];
+        for (int localY = 0; localY < this.worldHeight; localY++) {
+            final int sectionIndex = localY >> 4;
+            for (int localZ = 0; localZ < 16; localZ++) {
+                for (int localX = 0; localX < 16; localX++) {
+                    final int lightLevel = light[packSkyLightPosition(
+                            localX + SKY_LIGHT_DOMAIN_MARGIN,
+                            localY,
+                            localZ + SKY_LIGHT_DOMAIN_MARGIN
+                    )] & 15;
+                    if (lightLevel == 0) continue;
+
+                    byte[] data = sectionLight[sectionIndex];
+                    if (data == null) data = sectionLight[sectionIndex] = new byte[ChunkSectionLight.LIGHT_LENGTH];
+                    setLightNibble(data, ((localY & 15) << 8) | (localZ << 4) | localX, lightLevel);
+                }
+            }
+        }
+
+        final BitSet mask = new BitSet(sectionCount + 2);
+        final BitSet emptyMask = new BitSet(sectionCount + 2);
+        emptyMask.set(0, sectionCount + 2);
+        final List<byte[]> arrays = new ArrayList<>();
+        for (int sectionIndex = 0; sectionIndex < sectionCount; sectionIndex++) {
+            if (sectionLight[sectionIndex] == null) continue;
+            mask.set(sectionIndex + 1);
+            emptyMask.clear(sectionIndex + 1);
+            arrays.add(sectionLight[sectionIndex]);
+        }
+        mask.set(sectionCount + 1);
+        emptyMask.clear(sectionCount + 1);
+        arrays.add(FULL_LIGHT.clone());
+        return new BlockLightData(mask.toLongArray(), emptyMask.toLongArray(), arrays.toArray(byte[][]::new));
+    }
+
+    private static BlockLightData emptyLightData(final int sectionCount) {
+        final BitSet emptyMask = new BitSet(sectionCount + 2);
+        emptyMask.set(0, sectionCount + 2);
+        return new BlockLightData(new long[0], emptyMask.toLongArray(), new byte[0][]);
     }
 
     private void addBlockLightSources(final int targetChunkX, final int targetChunkZ, final Int2IntMap light, final IntArrayList queue) {
@@ -1089,14 +1249,8 @@ public class ChunkTracker extends StoredObject {
                 data = sectionLight[sectionIndex] = new byte[ChunkSectionLight.LIGHT_LENGTH];
             }
 
-            final int nibbleIndex = ((localY & 15) << 8) | ((localZ & 15) << 4) | (localX & 15);
-            final int byteIndex = nibbleIndex >> 1;
             final int lightLevel = entry.getIntValue() & 15;
-            if ((nibbleIndex & 1) == 0) {
-                data[byteIndex] = (byte) ((data[byteIndex] & 0xF0) | lightLevel);
-            } else {
-                data[byteIndex] = (byte) ((data[byteIndex] & 0x0F) | (lightLevel << 4));
-            }
+            setLightNibble(data, ((localY & 15) << 8) | ((localZ & 15) << 4) | (localX & 15), lightLevel);
         }
 
         final BitSet mask = new BitSet(sectionCount + 2);
@@ -1116,10 +1270,24 @@ public class ChunkTracker extends StoredObject {
         return ((localY * LIGHT_DOMAIN_WIDTH) + localZ) * LIGHT_DOMAIN_WIDTH + localX;
     }
 
+    private static int packSkyLightPosition(final int localX, final int localY, final int localZ) {
+        return ((localY * SKY_LIGHT_DOMAIN_WIDTH) + localZ) * SKY_LIGHT_DOMAIN_WIDTH + localX;
+    }
+
+    private static void setLightNibble(final byte[] data, final int nibbleIndex, final int lightLevel) {
+        final int byteIndex = nibbleIndex >> 1;
+        if ((nibbleIndex & 1) == 0) {
+            data[byteIndex] = (byte) ((data[byteIndex] & 0xF0) | lightLevel);
+        } else {
+            data[byteIndex] = (byte) ((data[byteIndex] & 0x0F) | (lightLevel << 4));
+        }
+    }
+
     private void invalidateBlockLightAround(final int chunkX, final int chunkZ) {
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
                 this.blockLightCache.remove(ChunkPosition.chunkKey(chunkX + dx, chunkZ + dz));
+                this.skyLightCache.remove(ChunkPosition.chunkKey(chunkX + dx, chunkZ + dz));
             }
         }
     }

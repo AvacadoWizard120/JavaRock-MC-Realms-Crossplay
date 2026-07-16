@@ -87,7 +87,7 @@ function requestJson (url, timeoutMs) {
     const request = https.get(url, {
       headers: {
         accept: 'application/vnd.github+json',
-        'user-agent': 'javarock-mc-realms-crossplay'
+        'user-agent': 'bedrock-realm-bridge-mvp'
       },
       timeout: timeoutMs
     }, response => {
@@ -122,7 +122,7 @@ function requestJson (url, timeoutMs) {
 function downloadFile (url, dest, timeoutMs) {
   return new Promise((resolve, reject) => {
     const request = https.get(url, {
-      headers: { 'user-agent': 'javarock-mc-realms-crossplay' },
+      headers: { 'user-agent': 'bedrock-realm-bridge-mvp' },
       timeout: timeoutMs
     }, response => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
@@ -229,7 +229,7 @@ async function installViaProxy (args = parseArgs()) {
   if (fs.existsSync(args.dest) && !args.force) {
     console.log('[viaproxy] Destination already exists. Use --force to replace it.')
     const patch = compileViaBedrockPatch(args.dest)
-    console.log('[viaproxy] Setup complete.')
+    console.log('[viaproxy] Next: npm run bridge:desktop-gui')
     return { installed: false, release, asset, dest: args.dest, patch }
   }
 
@@ -247,7 +247,7 @@ async function installViaProxy (args = parseArgs()) {
 
   console.log('[viaproxy] Installed.')
   const patch = compileViaBedrockPatch(args.dest)
-  console.log('[viaproxy] Setup complete.')
+  console.log('[viaproxy] Next: npm run bridge:desktop-gui')
   return { installed: true, release, asset, dest: args.dest, patch }
 }
 

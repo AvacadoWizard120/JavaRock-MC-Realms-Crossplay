@@ -240,6 +240,14 @@ public class ClientPlayerEntity extends PlayerEntity {
         return new Position3f(this.position.x() + dx, this.position.y() + dy, this.position.z() + dz);
     }
 
+    public boolean isWaitingForPositionSync() {
+        return this.waitingForPositionSync;
+    }
+
+    public void beginPositionSync() {
+        this.waitingForPositionSync = true;
+    }
+
     public boolean prevOnGround() {
         return this.prevOnGround;
     }

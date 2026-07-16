@@ -112,7 +112,7 @@ async function runViaBedrockRelay (config, runtimeStatus) {
 }
 
 async function runStatusFacade (config, runtimeStatus) {
-      let statusText = 'JavaRock - Realm lookup did not complete'
+  let statusText = 'Bedrock Realm Bridge - Realm lookup did not complete'
   let loginDisconnectText = 'The local Java facade is running, but the Bedrock Realm endpoint was not resolved.'
 
   try {

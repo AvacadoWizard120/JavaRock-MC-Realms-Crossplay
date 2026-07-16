@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.78-modern-armor-item-codec'
+const PATCH_ID = 'v0.3.81-item-frame-interaction-movement-sync'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/packet/UnhandledPackets.class',
   'net/raphimc/viabedrock/protocol/packet/EntityPackets.class',
@@ -25,6 +25,8 @@ const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/api/model/entity/ClientPlayerEntity$BlockBreakingInfo.class',
   'net/raphimc/viabedrock/api/model/entity/ClientPlayerEntity$DimensionChangeInfo.class',
   'net/raphimc/viabedrock/protocol/storage/InventoryTracker.class',
+  'net/raphimc/viabedrock/protocol/storage/EntityTracker.class',
+  'net/raphimc/viabedrock/protocol/storage/EntityTracker$ItemFrameInteraction.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$BlockLightData.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$SubChunkPosition.class',
@@ -50,6 +52,7 @@ const PATCH_SOURCE_RELATIVE_PATHS = [
   'ClientPlayerEntity.java',
   'ClientPlayerPackets.java',
   'Container.java',
+  'EntityTracker.java',
   'EntityPackets.java',
   'InventoryContainer.java',
   'InventoryTracker.java',
@@ -367,7 +370,7 @@ function ensureViaProxyInventoryPatch (sourceJar, runDir) {
     patchClasses: patchClassSignatures(),
     patchSources: patchSourceSignatures(),
     tool: result.command,
-      note: 'Patches ViaBedrock entity, chunk, inventory, and interaction translation. v0.3.77 maps Bedrock falling-block VARIANT metadata to the Java ADD_ENTITY block-state payload so gravel and sand remain visible while falling. It retains ordered native inventory acknowledgements, accepted-slot reconstruction, initial item-frame discovery, Realm-native chest Take/Place requests, complete Java left/right QUICK_CRAFT lifecycles, partial-Take request-id chaining, the Java 26.1 slot codec, double-chest promotion, derived block rendering/light, player 2x2 crafting, and live crafting_data behavior. Classes are compiled against the real ViaProxy/ViaBedrock jar to keep packet enum descriptors compatible.'
+      note: 'Patches ViaBedrock entity, chunk, inventory, and interaction translation. It maps Bedrock falling-block metadata, item-frame block-entity contents and rotation, terrain-derived sky and block light, ordered native inventory acknowledgements, accepted-slot reconstruction, Realm-native chest Take/Place requests, Java QUICK_CRAFT lifecycles, double-chest promotion, derived block rendering, player 2x2 crafting, and live crafting_data behavior. Classes are compiled against the real ViaProxy/ViaBedrock jar to keep packet enum descriptors compatible.'
   })
 
   console.log(`[java-compat] Created ViaProxy inventory-patched jar: ${patchedJar}`)

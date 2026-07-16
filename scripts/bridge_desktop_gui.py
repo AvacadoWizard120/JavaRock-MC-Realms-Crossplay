@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native desktop launcher for JavaRock."""
+"""Small native desktop launcher for Bedrock Realm Bridge."""
 
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ def parse_realms(output: str) -> list[dict]:
 class BridgeDesktopGui:
     def __init__(self) -> None:
         self.root = tk.Tk()
-        self.root.title("JavaRock")
+        self.root.title("Bedrock Realm Bridge")
         self.root.geometry("980x680")
         self.root.minsize(760, 520)
 
@@ -194,7 +194,6 @@ class BridgeDesktopGui:
         self.target_version_var = tk.StringVar(value="Bedrock 1.26.30")
         self.upstream_version_var = tk.StringVar(value="1.26.30")
         self.run_checks_var = tk.BooleanVar(value=False)
-        self.run_checks_available = (PROJECT_ROOT / "run-checked-bridge-latest.ps1").exists()
         self.dark_mode_var = tk.BooleanVar(value=bool(preferences.get("darkMode", False)))
         self.bridge_pid_var = tk.StringVar(value="-")
         self.via_pid_var = tk.StringVar(value="-")
@@ -236,7 +235,7 @@ class BridgeDesktopGui:
         top = ttk.Frame(self.root, padding=(12, 10))
         top.grid(row=0, column=0, sticky="ew")
         top.columnconfigure(0, weight=1)
-        ttk.Label(top, text="JavaRock", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(top, text="Bedrock Realm Bridge", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(
             top,
             text="Dark mode",
@@ -299,8 +298,7 @@ class BridgeDesktopGui:
         ttk.Entry(controls, textvariable=self.upstream_version_var).grid(row=3, column=3, sticky="ew", padx=(0, 8))
 
         self.run_checks_button = ttk.Checkbutton(controls, text="Run smoke suite first", variable=self.run_checks_var)
-        if self.run_checks_available:
-            self.run_checks_button.grid(row=3, column=4, sticky="w")
+        self.run_checks_button.grid(row=3, column=4, sticky="w")
 
         self.start_button = ttk.Button(controls, text="Start", command=self.start_bridge)
         self.start_button.grid(row=4, column=0, sticky="ew", pady=(12, 0), padx=(0, 8))
@@ -569,9 +567,7 @@ class BridgeDesktopGui:
     def on_mode_selected(self, _event=None) -> None:
         recorder = self.mode_var.get() == "Bedrock packet recorder"
         self.target_version_entry.configure(state="disabled" if recorder else "normal")
-        if not self.run_checks_available:
-            self.run_checks_var.set(False)
-        self.run_checks_button.configure(state="disabled" if recorder or not self.run_checks_available else "normal")
+        self.run_checks_button.configure(state="disabled" if recorder else "normal")
         self.start_button.configure(text="Start Recorder" if recorder else "Start Bridge")
         if self.state_var.get() == "stopped":
             self.join_var.set("127.0.0.1:19133" if recorder else "localhost:25565")

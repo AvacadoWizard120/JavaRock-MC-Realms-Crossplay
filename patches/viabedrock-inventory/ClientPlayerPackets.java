@@ -39,9 +39,16 @@ import net.raphimc.viabedrock.protocol.ClientboundBedrockPackets;
 import net.raphimc.viabedrock.protocol.ServerboundBedrockPackets;
 import net.raphimc.viabedrock.protocol.data.ProtocolConstants;
 import net.raphimc.viabedrock.protocol.data.enums.Direction;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ItemUseInventoryTransaction_TriggerType;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.*;
 import net.raphimc.viabedrock.protocol.data.enums.java.*;
 import net.raphimc.viabedrock.protocol.data.enums.java.generated.*;
+import net.raphimc.viabedrock.experimental.model.inventory.BedrockInventoryTransaction;
+import net.raphimc.viabedrock.experimental.model.inventory.InventoryActionData;
+import net.raphimc.viabedrock.experimental.model.inventory.InventorySource;
+import net.raphimc.viabedrock.experimental.model.inventory.InventoryTransactionData;
+import net.raphimc.viabedrock.experimental.rewriter.InventoryTransactionRewriter;
+import net.raphimc.viabedrock.protocol.model.BedrockItem;
 import net.raphimc.viabedrock.protocol.model.Position2f;
 import net.raphimc.viabedrock.protocol.model.Position3f;
 import net.raphimc.viabedrock.protocol.rewriter.GameTypeRewriter;
@@ -49,6 +56,7 @@ import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
 import net.raphimc.viabedrock.protocol.storage.*;
 import net.raphimc.viabedrock.protocol.types.BedrockTypes;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -183,11 +191,23 @@ public class ClientPlayerPackets {
                         return;
                     }
 
+                    if (clientPlayer.isWaitingForPositionSync()) {
+                        wrapper.cancel();
+                        return;
+                    }
+
                     // Bedrock corrections target a historical auth-input tick. Preserve
                     // the Java movement submitted since that tick by applying only the
                     // correction offset to the current position.
-                    clientPlayer.setPosition(clientPlayer.rebaseMovementCorrection(position, tick));
+                    final boolean hardPositionSync = onGround
+                            && !clientPlayer.isOnGround()
+                            && Math.abs(position.y() - clientPlayer.position().y()) > 2F;
+                    final Position3f correctedPosition = hardPositionSync
+                            ? position
+                            : clientPlayer.rebaseMovementCorrection(position, tick);
+                    clientPlayer.setPosition(correctedPosition);
                     clientPlayer.setOnGround(onGround);
+                    clientPlayer.beginPositionSync();
                     clientPlayer.writePlayerPositionPacketToClient(wrapper, Relative.union(Relative.ROTATION, Relative.VELOCITY), true);
                 }
                 case Vehicle -> wrapper.cancel();
@@ -365,6 +385,18 @@ public class ClientPlayerPackets {
             final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
             final InventoryContainer inventoryContainer = wrapper.user().get(InventoryTracker.class).getInventoryContainer();
             final int entityId = wrapper.read(Types.VAR_INT); // entity id
+            final EntityTracker.ItemFrameInteraction itemFrame = entityTracker.getItemFrameByJid(entityId);
+            if (itemFrame != null) {
+                wrapper.cancel();
+                final ClientPlayerEntity clientPlayer = entityTracker.getClientPlayer();
+                clientPlayer.addAuthInputData(PlayerAuthInputPacket_InputData.MissedSwing);
+                clientPlayer.addAuthInputBlockAction(new ClientPlayerEntity.AuthInputBlockAction(PlayerActionType.StartDestroyBlock, itemFrame.position(), itemFrame.direction()));
+                clientPlayer.addAuthInputBlockAction(new ClientPlayerEntity.AuthInputBlockAction(PlayerActionType.AbortDestroyBlock, itemFrame.position(), 0));
+                entityTracker.predictItemFrameRemoval(entityId);
+                clientPlayer.cancelNextSwingPacket();
+                return;
+            }
+
             final Entity entity = entityTracker.getEntityByJid(entityId);
             if (entity == null) {
                 wrapper.cancel();
@@ -388,13 +420,22 @@ public class ClientPlayerPackets {
             final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
             final InventoryContainer inventoryContainer = wrapper.user().get(InventoryTracker.class).getInventoryContainer();
             final int entityId = wrapper.read(Types.VAR_INT); // entity id
-            final Entity entity = entityTracker.getEntityByJid(entityId);
-            if (entity == null) {
+            final InteractionHand hand = InteractionHand.values()[wrapper.read(Types.VAR_INT)]; // hand
+            if (hand != InteractionHand.MAIN_HAND) {
                 wrapper.cancel();
                 return;
             }
-            final InteractionHand hand = InteractionHand.values()[wrapper.read(Types.VAR_INT)]; // hand
-            if (hand != InteractionHand.MAIN_HAND) {
+            final Vector3d location = wrapper.read(Types.LOW_PRECISION_VECTOR); // location
+            wrapper.read(Types.BOOLEAN); // using secondary action
+
+            final EntityTracker.ItemFrameInteraction itemFrame = entityTracker.getItemFrameByJid(entityId);
+            if (itemFrame != null) {
+                writeItemFrameInteraction(wrapper, entityId, itemFrame, location, entityTracker, inventoryContainer);
+                return;
+            }
+
+            final Entity entity = entityTracker.getEntityByJid(entityId);
+            if (entity == null) {
                 wrapper.cancel();
                 return;
             }
@@ -409,9 +450,7 @@ public class ClientPlayerPackets {
             wrapper.write(BedrockTypes.VAR_INT, (int) inventoryContainer.getSelectedHotbarSlot()); // hotbar slot
             wrapper.write(wrapper.user().get(ItemRewriter.class).itemType(), inventoryContainer.getSelectedHotbarItem()); // held item
             wrapper.write(BedrockTypes.POSITION_3F, entityTracker.getClientPlayer().position()); // player position
-            final Vector3d location = wrapper.read(Types.LOW_PRECISION_VECTOR); // location
             wrapper.write(BedrockTypes.POSITION_3F, entity.position().add((float) location.x(), (float) location.y(), (float) location.z())); // click position
-            wrapper.read(Types.BOOLEAN); // using secondary action
         });
         protocol.registerServerbound(ServerboundPackets26_1.MOVE_PLAYER_STATUS_ONLY, null, wrapper -> {
             wrapper.cancel();
@@ -610,6 +649,67 @@ public class ClientPlayerPackets {
                 clientPlayer.addAuthInputData(PlayerAuthInputPacket_InputData.MissedSwing);
             }
         });
+    }
+
+    private static void writeItemFrameInteraction(final PacketWrapper wrapper, final int javaId, final EntityTracker.ItemFrameInteraction itemFrame, final Vector3d location, final EntityTracker entityTracker, final InventoryContainer inventoryContainer) {
+        final BedrockItem heldItem = inventoryContainer.getSelectedHotbarItem();
+        List<InventoryActionData> actions = null;
+        if (!itemFrame.hasItem() && !heldItem.isEmpty() && entityTracker.getClientPlayer().javaGameMode() != GameMode.CREATIVE) {
+            BedrockItem predictedItem = heldItem.copy();
+            predictedItem.setAmount(predictedItem.amount() - 1);
+            if (predictedItem.amount() <= 0) predictedItem = BedrockItem.empty();
+            actions = List.of(new InventoryActionData(
+                    new InventorySource(InventorySourceType.ContainerInventory, ContainerID.CONTAINER_ID_INVENTORY.getValue(), InventorySource_InventorySourceFlags.NoFlag),
+                    inventoryContainer.getSelectedHotbarSlot(),
+                    heldItem,
+                    predictedItem
+            ));
+        }
+
+        final BedrockInventoryTransaction transaction = new BedrockInventoryTransaction(
+                0,
+                null,
+                actions,
+                ComplexInventoryTransaction_Type.ItemUseTransaction,
+                new InventoryTransactionData.UseItemTransactionData(
+                        ItemUseInventoryTransaction_ActionType.Place,
+                        ItemUseInventoryTransaction_TriggerType.PlayerInput,
+                        itemFrame.position(),
+                        itemFrame.direction(),
+                        inventoryContainer.getSelectedHotbarSlot(),
+                        heldItem,
+                        entityTracker.getClientPlayer().position(),
+                        itemFrameClickPosition(itemFrame.direction(), location),
+                        wrapper.user().get(ChunkTracker.class).getBlockState(itemFrame.position()),
+                        ItemUseInventoryTransaction_PredictedResult.Success,
+                        ItemUseInventoryTransaction_ClientCooldownState.Off
+                )
+        );
+        wrapper.write(wrapper.user().get(InventoryTransactionRewriter.class).getInventoryTransactionType(), transaction);
+        if (itemFrame.hasItem()) {
+            entityTracker.predictItemFrameRotation(javaId);
+        } else if (!heldItem.isEmpty()) {
+            entityTracker.predictItemFrameInsertion(javaId, heldItem);
+        }
+    }
+
+    private static Position3f itemFrameClickPosition(final int direction, final Vector3d location) {
+        float x = clampItemFrameCoordinate((float) location.x() + 0.5F);
+        float y = clampItemFrameCoordinate((float) location.y() + 0.5F);
+        float z = clampItemFrameCoordinate((float) location.z() + 0.5F);
+        switch (direction) {
+            case 0 -> y = 0.9375F;
+            case 1 -> y = 0.0625F;
+            case 2 -> z = 0.9375F;
+            case 3 -> z = 0.0625F;
+            case 4 -> x = 0.9375F;
+            case 5 -> x = 0.0625F;
+        }
+        return new Position3f(x, y, z);
+    }
+
+    private static float clampItemFrameCoordinate(final float value) {
+        return Math.max(0.0625F, Math.min(0.9375F, value));
     }
 
 }

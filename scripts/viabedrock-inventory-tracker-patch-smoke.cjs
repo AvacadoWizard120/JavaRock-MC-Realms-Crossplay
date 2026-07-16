@@ -121,7 +121,7 @@ function assertRenderingBytecode () {
   const chunkTrackerClass = bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/ChunkTracker.class')
   const result = run('javap', ['-c', '-p', chunkTrackerClass])
   const text = `${result.stdout || ''}${result.stderr || ''}`
-  for (const marker of ['getBlockLight', 'resolveDerivedJavaBlockState', 'resolveDoorBlockState', 'syncItemFramesAfterChunkSend', 'getPairedChestPosition', 'spawnSafetyPosition', 'BridgeBlockRendering.emission', 'BlockLightData.mask']) {
+  for (const marker of ['getSkyLight', 'createSkyLightData', 'getBlockLight', 'resolveDerivedJavaBlockState', 'resolveDoorBlockState', 'syncItemFramesAfterChunkSend', 'getPairedChestPosition', 'spawnSafetyPosition', 'BridgeBlockRendering.emission', 'BlockLightData.mask']) {
     if (!text.includes(marker)) throw new Error(`patched ChunkTracker.class is missing rendering marker: ${marker}`)
   }
 
@@ -130,6 +130,72 @@ function assertRenderingBytecode () {
   const worldEffectText = `${worldEffectResult.stdout || ''}${worldEffectResult.stderr || ''}`
   for (const marker of ['sendPairedChestBlockEvent', 'ChunkTracker.getPairedChestPosition']) {
     if (!worldEffectText.includes(marker)) throw new Error(`patched WorldEffectPackets.class is missing paired-chest marker: ${marker}`)
+  }
+}
+
+function assertItemFrameMetadata () {
+  const entitySource = fs.readFileSync(path.join(patchRoot, 'EntityTracker.java'), 'utf8')
+  for (const marker of [
+    'spawnItemFrame(final BlockPosition position, final BlockState blockState, final CompoundTag frameTag)',
+    'updateItemFrame(final BlockPosition position, final BlockState blockState, final CompoundTag frameTag)',
+    'private final Int2ObjectMap<ItemFrameInteraction> itemFrameInteractions',
+    'public ItemFrameInteraction getItemFrameByJid',
+    'public record ItemFrameInteraction(BlockPosition position, int direction, boolean hasItem, int rotation, EntityTypes26_2 javaType)',
+    'public void predictItemFrameRemoval',
+    'public void predictItemFrameRotation',
+    'public void predictItemFrameInsertion',
+    'frameTag.getCompoundTag("Item")',
+    'frameTag.getNumberTag("ItemRotation")',
+    'rotation.asFloat() / 45F',
+    'VersionedTypes.V26_2.entityDataTypes.itemType',
+    'VersionedTypes.V26_2.entityDataTypes.varIntType',
+    'ClientboundPackets26_1.SET_ENTITY_DATA'
+  ]) {
+    if (!entitySource.includes(marker)) throw new Error(`patched EntityTracker.java is missing item-frame metadata marker: ${marker}`)
+  }
+
+  const chunkSource = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
+  for (const marker of [
+    'entityTracker.spawnItemFrame(position, blockState, frameTag)',
+    'entityTracker.updateItemFrame(position, blockState, frameTag)',
+    'this.user().get(EntityTracker.class).updateItemFrame(',
+    'final BlockLightData skyLight = this.getSkyLight(chunk)',
+    'skyLight.emptyMask()',
+    'private BlockLightData createSkyLightData'
+  ]) {
+    if (!chunkSource.includes(marker)) throw new Error(`patched ChunkTracker.java is missing frame/light marker: ${marker}`)
+  }
+
+  const entityClassPath = 'net/raphimc/viabedrock/protocol/storage/EntityTracker.class'
+  const interactionClassPath = 'net/raphimc/viabedrock/protocol/storage/EntityTracker$ItemFrameInteraction.class'
+  if (!CLASS_RELATIVE_PATHS.includes(entityClassPath)) throw new Error('EntityTracker.class is not registered in the ViaProxy patch')
+  if (!CLASS_RELATIVE_PATHS.includes(interactionClassPath)) throw new Error('EntityTracker$ItemFrameInteraction.class is not registered in the ViaProxy patch')
+  if (!PATCH_SOURCE_RELATIVE_PATHS.includes('EntityTracker.java')) throw new Error('EntityTracker.java is not registered in the ViaProxy patch')
+
+  const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(entityClassPath)]).stdout
+  for (const marker of ['updateItemFrame', 'javaItemFrameItem', 'itemFrameRotation', 'getItemFrameByJid', 'predictItemFrameRemoval', 'predictItemFrameRotation', 'predictItemFrameInsertion', 'ItemFrameInteraction', 'SET_ENTITY_DATA']) {
+    if (!bytecode.includes(marker)) throw new Error(`patched EntityTracker.class is missing item-frame bytecode: ${marker}`)
+  }
+
+  const playerPacketsSource = fs.readFileSync(path.join(patchRoot, 'ClientPlayerPackets.java'), 'utf8')
+  for (const marker of [
+    'writeItemFrameInteraction(wrapper, entityId, itemFrame, location, entityTracker, inventoryContainer)',
+    'ItemUseInventoryTransaction_ActionType.Place',
+    'ItemUseInventoryTransaction_TriggerType.PlayerInput',
+    'PlayerAuthInputPacket_InputData.MissedSwing',
+    'PlayerActionType.StartDestroyBlock',
+    'PlayerActionType.AbortDestroyBlock',
+    'getBlockState(itemFrame.position())',
+    'entityTracker.predictItemFrameRemoval(entityId)',
+    'entityTracker.predictItemFrameRotation(javaId)',
+    'entityTracker.predictItemFrameInsertion(javaId, heldItem)'
+  ]) {
+    if (!playerPacketsSource.includes(marker)) throw new Error(`patched ClientPlayerPackets.java is missing item-frame interaction marker: ${marker}`)
+  }
+
+  const packetsBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath('net/raphimc/viabedrock/protocol/packet/ClientPlayerPackets.class')]).stdout
+  for (const marker of ['writeItemFrameInteraction', 'getItemFrameByJid', 'StartDestroyBlock', 'AbortDestroyBlock', 'ItemUseTransaction']) {
+    if (!packetsBytecode.includes(marker)) throw new Error(`patched ClientPlayerPackets.class is missing item-frame interaction bytecode: ${marker}`)
   }
 }
 
@@ -326,11 +392,21 @@ function assertMovementCorrectionRebase () {
     'private final NavigableMap<Long, Position3f> movementPositionHistory',
     'this.movementPositionHistory.put((long) this.age(), this.position)',
     'public Position3f rebaseMovementCorrection',
-    'this.movementPositionHistory.tailMap(tick, true).entrySet()'
+    'this.movementPositionHistory.tailMap(tick, true).entrySet()',
+    'public boolean isWaitingForPositionSync()',
+    'public void beginPositionSync()'
   ]) {
     if (!entitySource.includes(marker)) throw new Error(`patched ClientPlayerEntity.java is missing movement-rewind marker: ${marker}`)
   }
-  if (!packetsSource.includes('clientPlayer.setPosition(clientPlayer.rebaseMovementCorrection(position, tick))')) {
+  for (const marker of [
+    'if (clientPlayer.isWaitingForPositionSync())',
+    'Math.abs(position.y() - clientPlayer.position().y()) > 2F',
+    'clientPlayer.rebaseMovementCorrection(position, tick)',
+    'clientPlayer.beginPositionSync()'
+  ]) {
+    if (!packetsSource.includes(marker)) throw new Error(`patched ClientPlayerPackets.java is missing movement-sync marker: ${marker}`)
+  }
+  if (packetsSource.includes('clientPlayer.setPosition(clientPlayer.rebaseMovementCorrection(position, tick))')) {
     throw new Error('patched ClientPlayerPackets.java still teleports Java directly to a historical Bedrock correction')
   }
 
@@ -338,11 +414,11 @@ function assertMovementCorrectionRebase () {
   const packetsClass = bundledPatchedClassPath('net/raphimc/viabedrock/protocol/packet/ClientPlayerPackets.class')
   const entityBytecode = run('javap', ['-c', '-p', entityClass]).stdout
   const packetsBytecode = run('javap', ['-c', '-p', packetsClass]).stdout
-  if (!entityBytecode.includes('rebaseMovementCorrection')) {
-    throw new Error('patched ClientPlayerEntity.class is missing movement correction rebasing')
+  for (const marker of ['rebaseMovementCorrection', 'isWaitingForPositionSync', 'beginPositionSync']) {
+    if (!entityBytecode.includes(marker)) throw new Error(`patched ClientPlayerEntity.class is missing movement correction marker: ${marker}`)
   }
-  if (!packetsBytecode.includes('ClientPlayerEntity.rebaseMovementCorrection')) {
-    throw new Error('patched ClientPlayerPackets.class does not use movement correction rebasing')
+  for (const marker of ['ClientPlayerEntity.rebaseMovementCorrection', 'ClientPlayerEntity.isWaitingForPositionSync', 'ClientPlayerEntity.beginPositionSync']) {
+    if (!packetsBytecode.includes(marker)) throw new Error(`patched ClientPlayerPackets.class is missing movement correction marker: ${marker}`)
   }
 }
 
@@ -562,6 +638,7 @@ function assertRenderingBehavior () {
     fs.writeFileSync(sourcePath, `
 package net.raphimc.viabedrock.protocol.storage;
 
+import com.viaversion.nbt.tag.CompoundTag;
 import net.raphimc.viabedrock.api.model.BlockState;
 
 public final class BridgeBlockRenderingSmoke {
@@ -578,6 +655,7 @@ public final class BridgeBlockRenderingSmoke {
         check(BridgeBlockRendering.opacity(state("minecraft:stone")) == 15, "stone opacity");
         check(BridgeBlockRendering.opacity(state("minecraft:glass")) == 0, "glass opacity");
         check(BridgeBlockRendering.opacity(state("minecraft:water[level=0]")) == 1, "water opacity");
+        check(BridgeBlockRendering.opacity(state("minecraft:chest[facing=north,type=single,waterlogged=false]")) == 0, "chest opacity");
         check(BridgeBlockRendering.emission(state("minecraft:torch")) == 14, "torch emission");
         check(BridgeBlockRendering.emission(state("minecraft:redstone_lamp[lit=false]")) == 0, "unlit lamp emission");
         check(BridgeBlockRendering.emission(state("minecraft:redstone_lamp[lit=true]")) == 15, "lit lamp emission");
@@ -610,6 +688,13 @@ public final class BridgeBlockRenderingSmoke {
         check("true".equals(door.get("open")), "lower door open state wins");
         check("west".equals(door.get("facing")), "lower door facing wins");
         check("right".equals(door.get("hinge")), "upper door hinge wins");
+
+        CompoundTag frame = new CompoundTag();
+        frame.putFloat("ItemRotation", 225F);
+        check(EntityTracker.itemFrameRotation(frame) == 5, "Bedrock frame degrees to Java rotation");
+        frame.putFloat("ItemRotation", -45F);
+        check(EntityTracker.itemFrameRotation(frame) == 7, "negative frame rotation normalization");
+        check(EntityTracker.itemFrameRotation(new CompoundTag()) == 0, "missing frame rotation");
     }
 }
 `)
@@ -632,6 +717,7 @@ assertNoStalePlayerPickupStrings()
 assertNormalItemSnapshotTypes()
 assertRenderingDataCurrent()
 assertRenderingBytecode()
+assertItemFrameMetadata()
 assertFallingBlockEntityData()
 assertModernLevelSoundCodec()
 assertModernMobEquipmentCodec()

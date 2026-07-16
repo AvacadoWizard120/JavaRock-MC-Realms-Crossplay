@@ -27,7 +27,7 @@ async function main () {
   const server = new Server()
   const client = new Client(server.networkId, '127.0.0.1')
 
-  server.setAdvertisement(Buffer.from('JavaRock NetherNet loopback'))
+  server.setAdvertisement(Buffer.from('Bedrock Realm Bridge NetherNet loopback'))
 
   await server.listen()
 
