@@ -296,8 +296,8 @@ function startJavaLanStatusServer (config, overrides = {}) {
     motd: config.javaLan.motd,
     javaVersionName: config.javaLan.versionName || javaVersion.name,
     javaProtocolVersion: config.javaLan.protocolVersion || javaVersion.protocol,
-    statusText: overrides.statusText || 'JavaRock - waiting for Bedrock puppet transport',
-    loginDisconnectText: overrides.loginDisconnectText || 'JavaRock is visible, but gameplay translation is not connected yet.'
+    statusText: overrides.statusText || 'Bedrock Realm Bridge - waiting for Bedrock puppet transport',
+    loginDisconnectText: overrides.loginDisconnectText || 'Bedrock Realm Bridge is visible, but gameplay translation is not connected yet.'
   }
   if (typeof overrides.onLoginStart === 'function') options.onLoginStart = overrides.onLoginStart
 

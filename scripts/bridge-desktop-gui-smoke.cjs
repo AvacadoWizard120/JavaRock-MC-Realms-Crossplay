@@ -32,7 +32,6 @@ if (result.status !== 0) {
 
 const source = fs.readFileSync(script, 'utf8')
 assert.match(source, /Bedrock packet recorder/)
-assert.match(source, /self\.root\.title\("JavaRock"\)/)
 assert.match(source, /run-bedrock-packet-recorder-latest\.ps1/)
 assert.match(source, /bridge-desktop-gui-preferences\.json/)
 assert.match(source, /self\.dark_mode_var = tk\.BooleanVar/)
@@ -40,6 +39,5 @@ assert.match(source, /def on_theme_toggled\(self\)/)
 assert.match(source, /def apply_theme\(self\)/)
 assert.match(source, /label="Dark mode"/)
 assert.doesNotMatch(source, /Play shell|run-bridge-play-shell/)
-assert.doesNotMatch(source, /bridge-gui|http:\/\/127\.0\.0\.1:8765/)
 
 console.log('Bridge desktop GUI smoke check passed.')

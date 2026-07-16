@@ -23,20 +23,19 @@ Working or partially working:
 - Microsoft account profiles and Realm selection
 - Realm transport through NetherNet/WebRTC
 - Terrain, basic entities, movement, and block interaction
-- Player inventory and basic containers
+- Player inventory, chests, and double-chest transfers
 - Connected block states such as fences and double chests
+- Item frames, including item display, rotation, insertion, and removal
+- Block lighting and falling sand or gravel animation
 - Chat and command translation
 - Bedrock packet recording for protocol debugging
 
 Known problem areas:
 
-- Complex inventory clicks and drag actions
-- Double-chest transactions
-- Crafting and workstation menus
-- Item frames and some other entities
-- Falling-block animation
-- Lighting
-- Movement prediction corrections
+- Some inventory drag and right-click edge cases
+- Recipe book data, player crafting, and workstation menus
+- Movement prediction corrections can cause rubber-banding
+- Doors can take too long to show their new state
 
 Minecraft, ViaProxy, or ViaBedrock updates may introduce new protocol problems.
 
