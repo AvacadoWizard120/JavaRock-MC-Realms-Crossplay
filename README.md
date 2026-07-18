@@ -28,12 +28,12 @@ Working or partially working:
 - Item frames, including item display, rotation, insertion, and removal
 - Block lighting and falling sand or gravel animation
 - Chat and command translation
+- Recipe book syncing and 2x2 or crafting-table recipes
 - Bedrock packet recording for protocol debugging
 
 Known problem areas:
 
-- Some inventory drag and right-click edge cases
-- Recipe book data, player crafting, and workstation menus
+- Fast or unusual inventory drag, right-click, and crafting sequences can still desync
 - Movement prediction corrections can cause rubber-banding
 - Doors can take too long to show their new state
 

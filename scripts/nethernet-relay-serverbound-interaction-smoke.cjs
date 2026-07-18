@@ -233,6 +233,54 @@ function withQuietRelayLogs (fn) {
   }
 }
 
+withQuietRelayLogs(() => {
+  const sentUpstream = []
+  const { relayPlayer } = makeRelayPlayerHarness((name, params) => sentUpstream.push({ name, params }))
+  const sentDownstream = []
+  relayPlayer.queue = (name, packet) => sentDownstream.push({ name, packet })
+
+  const craftingTable = {
+    network_id: 58,
+    name: 'minecraft:crafting_table',
+    count: 1,
+    metadata: 0,
+    block_runtime_id: 1752181952
+  }
+  const placement = {
+    transaction: {
+      transaction_type: 'item_use',
+      actions: [{
+        source_type: 'container',
+        window_id: 0,
+        slot: 6,
+        old_item: craftingTable,
+        new_item: { network_id: 0 }
+      }],
+      transaction_data: {
+        action_type: 'click_block',
+        block_position: { x: 83, y: 63, z: 669 },
+        face: 1,
+        hotbar_slot: 6,
+        held_item: craftingTable,
+        player_pos: { x: 83.5, y: 65, z: 669.5 },
+        click_pos: { x: 0.5, y: 1, z: 0.5 },
+        block_runtime_id: 0
+      }
+    }
+  }
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('inventory_transaction', placement, 'live:crafting_table_place'), true)
+  assert.strictEqual(sentUpstream.length, 1)
+  assert.strictEqual(sentUpstream[0].name, 'inventory_transaction')
+  assert.strictEqual(sentDownstream.length, 1)
+  assert.strictEqual(sentDownstream[0].name, 'inventory_slot')
+  assert.strictEqual(sentDownstream[0].packet.window_id, 0)
+  assert.strictEqual(sentDownstream[0].packet.slot, 6)
+  assert.strictEqual(sentDownstream[0].packet.container.container_id, 'hotbar_and_inventory')
+  assert.strictEqual(sentDownstream[0].packet.item.network_id, 0)
+  assert.strictEqual(relayPlayer.bridgePredictedItemStackIds.has('hotbar:6'), false)
+})
+
 const equipmentOwner = {
   upstream: { entityId: 1 },
   bridgeItemNameByNetworkId: new Map([['5', 'minecraft:oak_planks']])
@@ -315,6 +363,7 @@ withQuietRelayLogs(() => {
   assert.strictEqual(records[0].event.diagnostic.packet_name, 'mob_equipment')
   assert.strictEqual(records[0].event.diagnostic.first_bytes_hex, '1f')
   assert.strictEqual(records[0].event.diagnostic.raw_bytes_base64, 'Hw==')
+  assert.strictEqual(records[0].event.diagnostic.raw_bytes_hex, '1f')
 })
 
 withQuietRelayLogs(() => {

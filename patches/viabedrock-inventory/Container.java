@@ -165,9 +165,12 @@ public abstract class Container {
             this.bridgeAuthoritativeStackIds[slot] = bridgeStackIdOrZero(item);
         }
         this.onSlotChanged(slot, oldItem, item);
-        if (this.type == ContainerType.CONTAINER && !this.bridgeApplyingJavaClick && !this.bridgeApplyingBulkContent) {
+        if ((this.type == ContainerType.CONTAINER || this.type == ContainerType.INVENTORY) &&
+                !this.bridgeApplyingJavaClick && !this.bridgeApplyingBulkContent) {
             this.bridgeSendJavaContainerSetSlot(slot);
             // Cancel ViaBedrock's stock V26_2 item writer after replacing it with the V26_1 packet-stage codec.
+            // This also covers player-item durability updates, which may carry components that V26_2 encodes
+            // differently and otherwise leave unread bytes in a 26.1-stage CONTAINER_SET_SLOT packet.
             return false;
         }
         return true;
@@ -230,7 +233,7 @@ public abstract class Container {
             slotUpdate.write(VersionedTypes.V26_1.item(), this.getJavaItem(slot));
             slotUpdate.send(BedrockProtocol.class);
             ViaBedrock.getPlatform().getLogger().log(Level.INFO,
-                    "[BedrockRealmBridge] replaced authoritative container slot update" +
+                    "[BedrockRealmBridge] replaced authoritative inventory slot update" +
                             " javaContainerId=" + (this.javaContainerId() & 0xFF) +
                             " slot=" + this.javaSlot(slot) +
                             " javaStateId=" + stateId);
@@ -247,7 +250,9 @@ public abstract class Container {
     public ContainerType type() { return this.type; }
     public TextComponent title() { return this.title; }
     public BlockPosition position() { return this.position; }
-    public boolean isValidBlockTag(String tag) { return this.validBlockTags.contains(tag); }
+    public boolean isValidBlockTag(String tag) {
+        return tag != null && this.validBlockTags.contains(tag);
+    }
     public int bridgeAuthoritativeStackId(int slot) {
         if (slot < 0 || slot >= this.bridgeAuthoritativeStackIds.length) return 0;
         return this.bridgeAuthoritativeStackIds[slot];

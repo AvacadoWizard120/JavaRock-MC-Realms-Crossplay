@@ -142,6 +142,14 @@ public class InventoryTracker extends StoredObject {
             this.pendingCloseContainer = null;
             return;
         }
+        if (container instanceof InventoryContainer inventory && inventory.bridgeIsCraftingTable()) {
+            try {
+                inventory.bridgeReturnCraftingGridToInventory("crafting_table_close_return_3x3_grid");
+            } catch (Throwable t) {
+                ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
+                        "[BedrockRealmBridge] failed to return 3x3 crafting grid items while closing crafting table", t);
+            }
+        }
         if (this.pendingCloseContainer != null) {
             ViaBedrock.getPlatform().getLogger().log(Level.INFO,
                     "[BedrockRealmBridge] ignored overlapping container close while pendingClose=true pending=" +
@@ -174,6 +182,7 @@ public class InventoryTracker extends StoredObject {
     }
 
     public void tick() {
+        RecipeBookTracker.get(this.user()).tick();
         if (this.currentContainer == null || this.currentContainer.position() == null) return;
         if (this.currentContainer.type() == ContainerType.INVENTORY) return;
 

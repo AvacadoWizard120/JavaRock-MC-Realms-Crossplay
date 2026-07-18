@@ -737,6 +737,9 @@ class PacketCensus {
     this.focusTraceNames = parseNameSet(options.focusTraceNames || process.env.PACKET_CENSUS_FOCUS_TRACE_NAMES, DEFAULT_FOCUS_TRACE_PACKET_NAMES)
     this.focusTraceFullNames = parseNameSet(options.focusTraceFullNames || process.env.PACKET_CENSUS_FOCUS_TRACE_FULL_NAMES, DEFAULT_FOCUS_TRACE_FULL_PACKET_NAMES)
     this.focusTraceEventsWritten = 0
+    this.rawJournalEnabled = options.rawJournalEnabled ?? boolEnv('PACKET_CENSUS_RAW_JOURNAL', false)
+    this.rawPacketsWritten = 0
+    this.rawBytesWritten = 0
     this.highValueNames = new Set(DEFAULT_HIGH_VALUE_PACKET_NAMES)
     this.eventAlwaysNames = new Set(DEFAULT_EVENT_ALWAYS_PACKET_NAMES)
     this.highVolumeEventNames = new Set(DEFAULT_HIGH_VOLUME_EVENT_PACKET_NAMES)
@@ -767,11 +770,13 @@ class PacketCensus {
     this.sqliteWarningShown = false
     this.eventsFile = path.join(this.dir, `events-${this.runId}.jsonl`)
     this.focusTraceFile = path.join(this.dir, `inventory-trace-${this.runId}.jsonl`)
+    this.rawJournalFile = path.join(this.dir, `raw-packets-${this.runId}.jsonl`)
     this.summaryFile = path.join(this.dir, `run-summary-${this.runId}.json`)
     this.samplesDir = path.join(this.dir, 'samples')
     this.writeBuffers = {
       events: { file: this.eventsFile, chunks: [], bytes: 0 },
-      focus: { file: this.focusTraceFile, chunks: [], bytes: 0 }
+      focus: { file: this.focusTraceFile, chunks: [], bytes: 0 },
+      raw: { file: this.rawJournalFile, chunks: [], bytes: 0 }
     }
     this.db = this.loadExistingDb()
     this.sqlite = undefined
@@ -804,10 +809,13 @@ class PacketCensus {
         event_count: 0,
         events_written: 0,
         focus_trace_events_written: 0,
+        raw_packets_written: 0,
+        raw_bytes_written: 0,
         event_mode: this.eventMode,
         high_volume_event_every: this.highVolumeEventEvery,
         events_file: path.relative(this.dir, this.eventsFile).replace(/\\/g, '/'),
         focus_trace_file: this.focusTraceEnabled ? path.relative(this.dir, this.focusTraceFile).replace(/\\/g, '/') : undefined,
+        raw_journal_file: this.rawJournalEnabled ? path.relative(this.dir, this.rawJournalFile).replace(/\\/g, '/') : undefined,
         summary_file: path.relative(this.dir, this.summaryFile).replace(/\\/g, '/')
       }
       this.withSqlite('recordRunStart', this.db.runs[this.runId])
@@ -818,6 +826,11 @@ class PacketCensus {
       if (this.focusTraceEnabled) {
         fs.writeFileSync(this.focusTraceFile, '', { flag: 'a' })
         console.log(`[packet-census] Inventory trace: ${this.focusTraceFile}`)
+      }
+      if (this.rawJournalEnabled) {
+        fs.writeFileSync(this.rawJournalFile, '', { flag: 'a' })
+        console.log(`[packet-census] Lossless raw journal: ${this.rawJournalFile}`)
+        console.warn('[packet-census] The raw journal is intentionally unredacted and may contain player/account data. Keep it private.')
       }
       this.bufferFlushTimer = setInterval(() => this.flushBufferedFiles(), this.bufferFlushMs)
       this.bufferFlushTimer.unref?.()
@@ -852,6 +865,34 @@ class PacketCensus {
     if (!this.enabled) return
     this.flushBufferedTarget('events')
     this.flushBufferedTarget('focus')
+    this.flushBufferedTarget('raw')
+  }
+
+  recordRawPacket (partial = {}) {
+    if (!this.enabled || this.closed || !this.rawJournalEnabled || !Buffer.isBuffer(partial.raw)) return
+    const raw = partial.raw
+    const entry = {
+      schema_version: 1,
+      run_id: this.runId,
+      raw_sequence: ++this.rawPacketsWritten,
+      at: new Date().toISOString(),
+      capture_profile: this.captureProfile,
+      direction: partial.direction || 'unknown',
+      context: partial.context,
+      source_version: partial.source_version,
+      target_version: partial.target_version,
+      bytes: raw.length,
+      sha256: crypto.createHash('sha256').update(raw).digest('hex'),
+      raw_base64: raw.toString('base64')
+    }
+    this.rawBytesWritten += raw.length
+    this.appendBufferedLine('raw', safeStringify(entry, 0) + '\n')
+    const run = this.db.runs[this.runId]
+    if (run) {
+      run.raw_packets_written = this.rawPacketsWritten
+      run.raw_bytes_written = this.rawBytesWritten
+    }
+    return entry.raw_sequence
   }
 
   queueSqliteEvent (entry) {
@@ -1140,6 +1181,8 @@ class PacketCensus {
       this.db.runs[this.runId].event_count = this.eventsSeen
       this.db.runs[this.runId].events_written = this.eventsWritten
       this.db.runs[this.runId].focus_trace_events_written = this.focusTraceEventsWritten
+      this.db.runs[this.runId].raw_packets_written = this.rawPacketsWritten
+      this.db.runs[this.runId].raw_bytes_written = this.rawBytesWritten
       this.db.runs[this.runId].close_reason = reason == null ? 'closed' : String(reason)
     }
     this.db.updated_at = now
@@ -1172,10 +1215,13 @@ class PacketCensus {
       event_count: this.eventsSeen,
       events_written: this.eventsWritten,
       focus_trace_events_written: this.focusTraceEventsWritten,
+      raw_packets_written: this.rawPacketsWritten,
+      raw_bytes_written: this.rawBytesWritten,
       event_mode: this.eventMode,
       high_volume_event_every: this.highVolumeEventEvery,
       events_file: this.eventsFile,
       focus_trace_file: this.focusTraceEnabled ? this.focusTraceFile : undefined,
+      raw_journal_file: this.rawJournalEnabled ? this.rawJournalFile : undefined,
       census_file: this.dbFile,
       sqlite_file: this.sqliteFile,
       recent_events: this.recentEvents.slice(-this.eventWindowSize),
@@ -1202,6 +1248,7 @@ function createPacketCensusFromConfig (config, options = {}) {
     captureProfile: config?.packetCensus?.captureProfile || process.env.PACKET_CENSUS_PROFILE || process.env.PACKET_CENSUS_CAPTURE_PROFILE,
     sourceLabel: config?.packetCensus?.sourceLabel || process.env.PACKET_CENSUS_SOURCE_LABEL,
     targetLabel: config?.packetCensus?.targetLabel || process.env.PACKET_CENSUS_TARGET_LABEL,
+    rawJournalEnabled: config?.packetCensus?.rawJournalEnabled,
     sqliteEnabled: config?.packetCensus?.sqliteEnabled,
     sqliteFile: config?.packetCensus?.sqliteFile || process.env.PACKET_CENSUS_SQLITE_FILE,
     ...options

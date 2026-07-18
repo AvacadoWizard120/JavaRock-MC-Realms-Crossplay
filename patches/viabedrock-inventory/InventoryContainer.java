@@ -7,7 +7,10 @@ import com.viaversion.viaversion.api.minecraft.item.StructuredItem;
 import com.viaversion.viaversion.api.protocol.packet.PacketWrapper;
 import com.viaversion.viaversion.api.type.Types;
 import com.viaversion.viaversion.api.type.types.version.VersionedTypes;
+import com.viaversion.viaversion.libs.fastutil.ints.IntSortedSet;
 import com.viaversion.viaversion.libs.mcstructs.text.TextComponent;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -16,6 +19,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import com.viaversion.viaversion.libs.gson.JsonArray;
 import com.viaversion.viaversion.libs.gson.JsonElement;
 import com.viaversion.viaversion.libs.gson.JsonObject;
@@ -39,10 +43,13 @@ import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InteractPack
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySourceType;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySource_InventorySourceFlags;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ItemStackRequestActionType;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ItemStackNetResult;
 import net.raphimc.viabedrock.protocol.model.FullContainerName;
 import net.raphimc.viabedrock.protocol.data.enums.java.generated.ContainerInput;
 import net.raphimc.viabedrock.protocol.model.BedrockItem;
+import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
 import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
+import net.raphimc.viabedrock.protocol.storage.ChunkTracker;
 import net.raphimc.viabedrock.protocol.storage.EntityTracker;
 import net.raphimc.viabedrock.protocol.storage.InventoryTracker;
 import net.raphimc.viabedrock.protocol.types.BedrockTypes;
@@ -50,6 +57,7 @@ import net.raphimc.viabedrock.protocol.types.BedrockTypes;
 public class InventoryContainer extends Container {
     private byte selectedHotbarSlot;
     private final InventoryContainer bridgeCanonicalInventory;
+    private final boolean bridgeCraftingTable;
 
     // Bridge patch cursor model. Vanilla ViaBedrock 3.4.11 does not implement
     // Container.handleClick for the built-in player inventory, so Java clicks are
@@ -74,6 +82,7 @@ public class InventoryContainer extends Container {
     public InventoryContainer(UserConnection user) {
         super(user, (byte) ContainerID.CONTAINER_ID_INVENTORY.getValue(), ContainerType.INVENTORY, null, null, 36);
         this.bridgeCanonicalInventory = this;
+        this.bridgeCraftingTable = false;
         this.selectedHotbarSlot = 0;
         this.carriedItem = BedrockItem.empty();
         this.bridgeJavaStateId = 0;
@@ -81,14 +90,26 @@ public class InventoryContainer extends Container {
         this.bridgeLatestNativeRequestId = 0;
         this.bridgePendingNativeRequests = new HashMap<>();
         this.bridgeLatestNativeRequestBySlot = new HashMap<>();
-        this.bridgeLastKnownCraftingGrid = emptyFour();
+        this.bridgeLastKnownCraftingGrid = emptyCraftingMemory();
         this.bridgeClearCarriedSource();
         this.bridgeClearPendingCraft();
     }
 
     public InventoryContainer(UserConnection user, byte containerId, BlockPosition position, InventoryContainer inventoryContainer) {
-        super(user, containerId, inventoryContainer.type, inventoryContainer.title, position, inventoryContainer.items, inventoryContainer.validBlockTags);
+        this(user, containerId, inventoryContainer.title, position, inventoryContainer, false);
+    }
+
+    public InventoryContainer(UserConnection user, byte containerId, TextComponent title, BlockPosition position, InventoryContainer inventoryContainer, boolean craftingTable) {
+        super(
+                user,
+                containerId,
+                craftingTable ? ContainerType.WORKBENCH : inventoryContainer.type,
+                craftingTable ? title : inventoryContainer.title,
+                position,
+                inventoryContainer.items,
+                craftingTable ? Set.of("crafting_table") : inventoryContainer.validBlockTags);
         this.bridgeCanonicalInventory = inventoryContainer.bridgeCanonicalInventory;
+        this.bridgeCraftingTable = craftingTable;
         this.selectedHotbarSlot = this.bridgeCanonicalInventory.selectedHotbarSlot;
         this.carriedItem = safeCopy(this.bridgeCanonicalInventory.carriedItem);
         this.bridgeJavaStateId = this.bridgeCanonicalInventory.bridgeJavaStateId;
@@ -107,12 +128,43 @@ public class InventoryContainer extends Container {
         this.bridgeLastKnownCraftingGrid = this.bridgeCanonicalInventory.bridgeLastKnownCraftingGrid;
     }
 
+    @Override
+    public boolean isValidBlockTag(String tag) {
+        if (!this.bridgeCraftingTable) return super.isValidBlockTag(tag);
+        if ("crafting_table".equals(tag)) return true;
+        if (this.position == null) return false;
+
+        try {
+            final BlockStateRewriter blockStateRewriter = this.user.get(BlockStateRewriter.class);
+            final IntSortedSet craftingTableStates = blockStateRewriter.validBlockStates("minecraft:crafting_table");
+            final int blockState = this.user.get(ChunkTracker.class).getBlockState(this.position);
+            return craftingTableStates != null && craftingTableStates.contains(blockState);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     public Item[] getJavaItems() {
         InventoryTracker tracker = this.user.get(InventoryTracker.class);
+        InventoryContainer activeCraftingTable = this.bridgeActiveCraftingTable();
+        if (!this.bridgeCraftingTable && activeCraftingTable != null && activeCraftingTable != this) {
+            return activeCraftingTable.getJavaItems();
+        }
         Item[] ownItems = super.getJavaItems();
+        HudContainer hudContainer = tracker.getHudContainer();
+        if (this.bridgeCraftingTable) {
+            Item[] javaItems = StructuredItem.emptyArray(46);
+            System.arraycopy(ownItems, 9, javaItems, 10, 27);
+            System.arraycopy(ownItems, 0, javaItems, 37, 9);
+            for (int i = 0; i < 9; i++) {
+                javaItems[1 + i] = hudContainer.getJavaItem(32 + i);
+            }
+            BedrockItem craftOutput = this.bridgeCraftingOutput();
+            if (!isEmpty(craftOutput)) javaItems[0] = this.user.get(ItemRewriter.class).javaItem(craftOutput);
+            return javaItems;
+        }
         Item[] armorItems = tracker.getArmorContainer().getActualJavaItems();
         Item[] offhandItems = tracker.getOffhandContainer().getActualJavaItems();
-        HudContainer hudContainer = tracker.getHudContainer();
         Item[] javaItems = StructuredItem.emptyArray(46);
         System.arraycopy(armorItems, 0, javaItems, 5, armorItems.length);
         System.arraycopy(ownItems, 9, javaItems, 9, 27);
@@ -121,7 +173,7 @@ public class InventoryContainer extends Container {
         for (int i = 0; i < 4; i++) {
             javaItems[1 + i] = hudContainer.getJavaItem(28 + i);
         }
-        BedrockItem craftOutput = this.bridgeCraftingOutput2x2();
+        BedrockItem craftOutput = this.bridgeCraftingOutput();
         if (!isEmpty(craftOutput)) {
             javaItems[0] = this.user.get(ItemRewriter.class).javaItem(craftOutput);
         }
@@ -138,12 +190,48 @@ public class InventoryContainer extends Container {
     }
 
     public int javaSlot(int slot) {
+        if (this.bridgeUsesCraftingTableLayout()) {
+            if (slot < 9) return 37 + slot;
+            return slot + 1;
+        }
         if (slot < 9) return 36 + slot;
         return super.javaSlot(slot);
     }
 
     public byte javaContainerId() {
+        InventoryContainer activeCraftingTable = this.bridgeActiveCraftingTable();
+        if (this.bridgeCraftingTable) return this.containerId;
+        if (activeCraftingTable != null) return activeCraftingTable.containerId;
         return (byte) ContainerID.CONTAINER_ID_INVENTORY.getValue();
+    }
+
+    public boolean bridgeIsCraftingTable() {
+        return this.bridgeCraftingTable;
+    }
+
+    private InventoryContainer bridgeActiveCraftingTable() {
+        InventoryTracker tracker = this.user.get(InventoryTracker.class);
+        if (tracker == null) return null;
+        Container current = tracker.getCurrentContainer();
+        if (current instanceof InventoryContainer inventory && inventory.bridgeCraftingTable) return inventory;
+        return null;
+    }
+
+    private boolean bridgeUsesCraftingTableLayout() {
+        return this.bridgeCraftingTable || this.bridgeActiveCraftingTable() != null;
+    }
+
+    private int bridgeCraftingGridWidth() {
+        return this.bridgeCraftingTable ? 3 : 2;
+    }
+
+    private int bridgeCraftingGridSize() {
+        int width = this.bridgeCraftingGridWidth();
+        return width * width;
+    }
+
+    private int bridgeCraftingGridUiBase() {
+        return this.bridgeCraftingTable ? 32 : 28;
     }
 
     public byte getSelectedHotbarSlot() {
@@ -643,7 +731,7 @@ public class InventoryContainer extends Container {
         // prevents repeated output clicks from duplicating against stale grid state.
         if (button != 0 && button != 1) return false;
 
-        CraftRecipe recipe = this.bridgeCraftingRecipe2x2();
+        CraftRecipe recipe = this.bridgeCraftingRecipe();
         if (recipe == null || isEmpty(recipe.output)) {
             this.publishJavaInventorySnapshot("craft_output_no_recipe");
             return true;
@@ -658,7 +746,7 @@ public class InventoryContainer extends Container {
                 this.publishJavaInventorySnapshot("craft_output_quick_move_cursor_busy");
                 return true;
             }
-            return this.bridgeCommitCraftDirectToInventory(recipe, "craft_2x2_quick_move");
+            return this.bridgeCommitCraftDirectToInventory(recipe, this.bridgeCraftingTable ? "craft_3x3_quick_move" : "craft_2x2_quick_move");
         }
 
         if (!isEmpty(this.carriedItem)) {
@@ -680,47 +768,20 @@ public class InventoryContainer extends Container {
     }
 
     private boolean bridgePickupCraftResultToCursor(CraftRecipe recipe, boolean appendToCursor) {
-        InventoryTracker tracker = this.user.get(InventoryTracker.class);
-        HudContainer hud = tracker.getHudContainer();
-        BedrockItem[] inputBefore = new BedrockItem[4];
-        BedrockItem[] inputAfter = new BedrockItem[4];
-        List<InventoryActionData> actions = new ArrayList<>();
-        for (int i = 0; i < 4; i++) {
-            int uiSlot = 28 + i;
-            BedrockItem before = safeCopy(hud.getItem(uiSlot));
-            BedrockItem after = before.copy();
-            int consume = recipe.consume[i];
-            if (consume > 0) {
-                after.setAmount(before.amount() - consume);
-                if (after.amount() <= 0) after = BedrockItem.empty();
-                after = bridgeLocalPredictionForContainerSlot(ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot, after);
-            }
-            inputBefore[i] = before;
-            inputAfter[i] = after;
-            if (consume > 0) actions.add(rawContainerAction(hud, ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot, before, after));
-            hud.setItem(uiSlot, after.copy());
-            this.bridgeRememberCraftingGridSlotIfApplicable(ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot, after);
-        }
-
         BedrockItem cursorBefore = safeCopy(this.carriedItem);
-        BedrockItem cursor = appendToCursor ? cursorBefore.copy() : BedrockItem.empty();
-        if (isEmpty(cursor)) {
-            cursor = recipe.output.copy();
+        BedrockItem cursorAfter = appendToCursor ? cursorBefore.copy() : BedrockItem.empty();
+        if (isEmpty(cursorAfter)) {
+            cursorAfter = recipe.output.copy();
         } else {
-            cursor.setAmount(cursor.amount() + recipe.output.amount());
+            cursorAfter.setAmount(cursorAfter.amount() + recipe.output.amount());
         }
-        actions.add(cursorAction(0, cursorBefore, cursor));
-        this.bridgeSetSharedCarriedItem(cursor);
-        this.bridgeClearCarriedSource();
-        this.bridgeSetPendingCraft(recipe, inputBefore, inputAfter);
-        this.sendNormalInventoryTransaction(actions, "craft_2x2_pickup_to_cursor");
-        this.publishJavaInventorySnapshot("craft_2x2_pickup_local_deferred");
-        ViaBedrock.getPlatform().getLogger().log(Level.INFO,
-                "[BedrockRealmBridge] deferred local 2x2 craft pickup recipe=" + recipe.name +
-                        " outputIdentifier=" + recipe.output.identifier() +
-                        " outputAmount=" + recipe.output.amount() +
-                        " cursorAmount=" + this.carriedItem.amount());
-        return true;
+        return this.bridgeSendNativeCraftRequest(
+                recipe,
+                null,
+                cursorBefore,
+                cursorAfter,
+                1,
+                this.bridgeCraftingTable ? "craft_3x3_pickup_to_cursor" : "craft_2x2_pickup_to_cursor");
     }
 
     private boolean bridgeCommitCraftDirectToInventory(CraftRecipe recipe, String reason) {
@@ -729,42 +790,157 @@ public class InventoryContainer extends Container {
             this.publishJavaInventorySnapshot(reason + ":no_inventory_space");
             return true;
         }
-        InventoryTracker tracker = this.user.get(InventoryTracker.class);
-        HudContainer hud = tracker.getHudContainer();
         BedrockItem destBefore = safeCopy(dest.container.getItem(dest.bedrockSlot));
         BedrockItem destAfter = recipe.output.copy();
         if (!isEmpty(destBefore) && canStack(destBefore, recipe.output)) {
             destAfter = destBefore.copy();
-            destAfter.setAmount(destBefore.amount() + recipe.output.amount());
         }
+        int craftCount = this.bridgeMaxCraftCountForSingleDestination(recipe, destBefore);
+        if (craftCount <= 0) {
+            this.publishJavaInventorySnapshot(reason + ":no_inventory_space");
+            return true;
+        }
+        destAfter.setAmount((isEmpty(destBefore) ? 0 : destBefore.amount()) + recipe.output.amount() * craftCount);
+        return this.bridgeSendNativeCraftRequest(recipe, dest, destBefore, destAfter, craftCount, reason);
+    }
 
-        List<InventoryActionData> actions = new ArrayList<>();
-        for (int i = 0; i < 4; i++) {
+    private int bridgeMaxCraftCountForSingleDestination(CraftRecipe recipe, BedrockItem destinationBefore) {
+        if (recipe == null || recipe.consume == null || isEmpty(recipe.output) || recipe.output.amount() <= 0) return 0;
+        InventoryTracker tracker = this.user.get(InventoryTracker.class);
+        HudContainer hud = tracker.getHudContainer();
+        int craftCount = 255;
+        int gridSize = this.bridgeCraftingGridSize();
+        int uiBase = this.bridgeCraftingGridUiBase();
+        if (recipe.consume.length < gridSize) return 0;
+        for (int i = 0; i < gridSize; i++) {
             int consume = recipe.consume[i];
             if (consume <= 0) continue;
-            int uiSlot = 28 + i;
+            craftCount = Math.min(craftCount, amountOrZero(hud.getItem(uiBase + i)) / consume);
+        }
+        int destinationAmount = isEmpty(destinationBefore) ? 0 : destinationBefore.amount();
+        craftCount = Math.min(craftCount, (64 - destinationAmount) / recipe.output.amount());
+        return Math.max(0, craftCount);
+    }
+
+    private boolean bridgeSendNativeCraftRequest(
+            CraftRecipe recipe,
+            ClickSlot resultDestination,
+            BedrockItem resultBefore,
+            BedrockItem resultAfter,
+            int craftCount,
+            String reason) {
+        if (recipe == null || recipe.networkId <= 0 || isEmpty(recipe.output) || craftCount <= 0 || craftCount > 255) {
+            this.publishJavaInventorySnapshot(reason + ":missing_recipe_network_id");
+            return true;
+        }
+
+        InventoryTracker tracker = this.user.get(InventoryTracker.class);
+        HudContainer hud = tracker.getHudContainer();
+        int requestId = this.nextItemStackRequestId();
+        List<ClickSlot> changedSlots = new ArrayList<>();
+        List<BedrockItem> predictedItems = new ArrayList<>();
+        List<BridgeNativeStackSlot> consumeSources = new ArrayList<>();
+        List<Integer> consumeCounts = new ArrayList<>();
+
+        int gridSize = this.bridgeCraftingGridSize();
+        int uiBase = this.bridgeCraftingGridUiBase();
+        if (recipe.consume == null || recipe.consume.length < gridSize) {
+            this.publishJavaInventorySnapshot(reason + ":recipe_grid_size_mismatch");
+            return true;
+        }
+        for (int i = 0; i < gridSize; i++) {
+            int consume = recipe.consume[i] * craftCount;
+            if (consume <= 0) continue;
+            int uiSlot = uiBase + i;
+            ClickSlot clickSlot = new ClickSlot(
+                    hud,
+                    ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(),
+                    uiSlot);
             BedrockItem before = safeCopy(hud.getItem(uiSlot));
+            BridgeNativeStackSlot source = bridgeStackSlotFromClickSlot(clickSlot, before);
+            if (source == null || source.stackId == 0 || before.amount() < consume) {
+                this.publishJavaInventorySnapshot(reason + ":crafting_grid_not_authoritative");
+                return true;
+            }
+
             BedrockItem after = before.copy();
             after.setAmount(before.amount() - consume);
-            if (after.amount() <= 0) after = BedrockItem.empty();
-            after = bridgeLocalPredictionForContainerSlot(ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot, after);
-            actions.add(rawContainerAction(hud, ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot, before, after));
-            hud.setItem(uiSlot, after.copy());
-            this.bridgeRememberCraftingGridSlotIfApplicable(ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot, after);
+            if (after.amount() <= 0) {
+                after = BedrockItem.empty();
+            } else {
+                after.setNetId(Integer.valueOf(requestId));
+            }
+            changedSlots.add(clickSlot);
+            predictedItems.add(after);
+            consumeSources.add(source);
+            consumeCounts.add(Integer.valueOf(consume));
         }
-        actions.add(rawContainerAction(dest.container, dest.sourceContainerId, dest.bedrockSlot, destBefore, destAfter));
-        dest.container.setItem(dest.bedrockSlot, destAfter.copy());
-        this.bridgeSetSharedCarriedItem(BedrockItem.empty());
+        if (consumeSources.isEmpty()) {
+            this.publishJavaInventorySnapshot(reason + ":no_consumed_inputs");
+            return true;
+        }
+
+        BridgeNativeStackSlot nativeResultDestination;
+        ItemStackRequestActionType resultActionType;
+        BedrockItem cursorBefore = safeCopy(this.carriedItem);
+        BedrockItem cursorAfter = cursorBefore.copy();
+        if (resultDestination == null) {
+            nativeResultDestination = BridgeNativeStackSlot.cursor(resultBefore);
+            resultActionType = ItemStackRequestActionType.Take;
+            cursorBefore = safeCopy(resultBefore);
+            cursorAfter = safeCopy(resultAfter);
+            if (!isEmpty(cursorAfter)) cursorAfter.setNetId(Integer.valueOf(requestId));
+        } else {
+            nativeResultDestination = bridgeStackSlotFromClickSlot(resultDestination, resultBefore);
+            resultActionType = ItemStackRequestActionType.Place;
+            if (nativeResultDestination == null || (!isEmpty(resultBefore) && nativeResultDestination.stackId == 0)) {
+                this.publishJavaInventorySnapshot(reason + ":destination_not_authoritative");
+                return true;
+            }
+            BedrockItem predictedResult = safeCopy(resultAfter);
+            if (!isEmpty(predictedResult)) predictedResult.setNetId(Integer.valueOf(requestId));
+            changedSlots.add(resultDestination);
+            predictedItems.add(predictedResult);
+        }
+
+        this.bridgeSetLatestNativeRequestId(requestId);
+        this.bridgeRememberPendingNativeRequest(
+                requestId,
+                changedSlots,
+                predictedItems,
+                cursorBefore,
+                cursorAfter);
+        this.sendNativeCraftItemStackRequest(
+                requestId,
+                recipe,
+                consumeCounts,
+                consumeSources,
+                resultActionType,
+                nativeResultDestination,
+                craftCount);
+
+        for (int i = 0; i < changedSlots.size(); i++) {
+            ClickSlot clickSlot = changedSlots.get(i);
+            BedrockItem predicted = safeCopy(predictedItems.get(i));
+            clickSlot.container.setItem(clickSlot.bedrockSlot, predicted);
+            this.bridgeRememberCraftingGridSlotIfApplicable(
+                    clickSlot.sourceContainerId,
+                    clickSlot.bedrockSlot,
+                    predicted);
+        }
+        this.bridgeSetSharedCarriedItem(cursorAfter);
         this.bridgeClearCarriedSource();
         this.bridgeClearPendingCraft();
-        this.sendNormalInventoryTransaction(actions, reason);
         this.publishJavaInventorySnapshot(reason);
         ViaBedrock.getPlatform().getLogger().log(Level.INFO,
-                "[BedrockRealmBridge] committed local 2x2 craft direct recipe=" + recipe.name +
-                        " outputIdentifier=" + recipe.output.identifier() +
-                        " outputAmount=" + recipe.output.amount() +
-                        " destContainerId=" + dest.sourceContainerId +
-                        " destSlot=" + dest.bedrockSlot);
+                "[BedrockRealmBridge] sent native " + this.bridgeCraftingGridWidth() + "x" + this.bridgeCraftingGridWidth() + " craft item_stack_request" +
+                        " reason=" + reason +
+                        " requestId=" + requestId +
+                        " recipe=" + recipe.name +
+                        " recipeNetworkId=" + recipe.networkId +
+                        " timesCrafted=" + craftCount +
+                        " consumeActions=" + consumeSources.size() +
+                        " resultAction=" + resultActionType.name());
         return true;
     }
 
@@ -826,44 +1002,383 @@ public class InventoryContainer extends Container {
         return null;
     }
 
-    private BedrockItem bridgeCraftingOutput2x2() {
-        CraftRecipe recipe = this.bridgeCraftingRecipe2x2();
+    private BedrockItem bridgeCraftingOutput() {
+        CraftRecipe recipe = this.bridgeCraftingRecipe();
         if (recipe == null || !this.bridgeCraftingRecipeInputsHaveServerNetIds(recipe)) return BedrockItem.empty();
         return recipe.output.copy();
     }
 
     private boolean bridgeCraftingRecipeInputsHaveServerNetIds(CraftRecipe recipe) {
-        if (recipe == null || recipe.consume == null || recipe.consume.length < 4) return false;
+        int gridSize = this.bridgeCraftingGridSize();
+        int uiBase = this.bridgeCraftingGridUiBase();
+        if (recipe == null || recipe.consume == null || recipe.consume.length < gridSize) return false;
         InventoryTracker tracker = this.user.get(InventoryTracker.class);
         HudContainer hud = tracker.getHudContainer();
         boolean consumedAny = false;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < gridSize; i++) {
             int consume = recipe.consume[i];
             if (consume <= 0) continue;
             consumedAny = true;
-            BedrockItem item = safeCopy(hud.getItem(28 + i));
+            BedrockItem item = safeCopy(hud.getItem(uiBase + i));
             Integer netId = isEmpty(item) ? null : item.netId();
-            if (isEmpty(item) || amountOrZero(item) < consume || netId == null || netId.intValue() <= 0) {
+            if (isEmpty(item) || amountOrZero(item) < consume || netId == null || netId.intValue() == 0) {
                 return false;
             }
         }
         return consumedAny;
     }
 
-    private CraftRecipe bridgeCraftingRecipe2x2() {
-        BedrockItem[] grid = this.bridgeCraftingGrid2x2();
+    private CraftRecipe bridgeCraftingRecipe() {
+        BedrockItem[] grid = this.bridgeCraftingGrid();
         CraftRecipe dynamic = BridgeRecipeDatabase.match(this, grid);
         if (dynamic != null) return dynamic;
-        if (BridgeRecipeDatabase.hasServerRecipeDatabase()) return null;
+        if (BridgeRecipeDatabase.hasServerRecipeDatabase(this)) return null;
+        if (this.bridgeCraftingTable) return null;
         return this.bridgeFallbackCraftingRecipe2x2(grid);
     }
 
-    private BedrockItem[] bridgeCraftingGrid2x2() {
+    private BedrockItem[] bridgeCraftingGrid() {
         InventoryTracker tracker = this.user.get(InventoryTracker.class);
         HudContainer hud = tracker.getHudContainer();
-        BedrockItem[] grid = new BedrockItem[4];
-        for (int i = 0; i < 4; i++) grid[i] = safeCopy(hud.getItem(28 + i));
+        int gridSize = this.bridgeCraftingGridSize();
+        int uiBase = this.bridgeCraftingGridUiBase();
+        BedrockItem[] grid = new BedrockItem[gridSize];
+        for (int i = 0; i < gridSize; i++) grid[i] = safeCopy(hud.getItem(uiBase + i));
         return grid;
+    }
+
+    public boolean bridgePlaceRecipeFromBook(
+            String recipeName,
+            boolean shaped,
+            int width,
+            int height,
+            List<int[]> ingredients,
+            List<Integer> ingredientCounts,
+            boolean useMaxItems) {
+        if (ingredients == null || ingredientCounts == null || ingredients.size() != ingredientCounts.size()) {
+            return false;
+        }
+        if (!isEmpty(this.carriedItem)) {
+            this.publishJavaInventorySnapshot("recipe_book_place_cursor_busy");
+            return true;
+        }
+
+        InventoryTracker tracker = this.user.get(InventoryTracker.class);
+        HudContainer hud = tracker.getHudContainer();
+        int gridWidth = this.bridgeCraftingGridWidth();
+        int gridSize = this.bridgeCraftingGridSize();
+        int uiBase = this.bridgeCraftingGridUiBase();
+
+        int[] ingredientForGrid = new int[gridSize];
+        for (int i = 0; i < ingredientForGrid.length; i++) ingredientForGrid[i] = -1;
+        if (shaped) {
+            if (width < 1 || height < 1 || width > gridWidth || height > gridWidth || ingredients.size() != width * height) {
+                this.publishJavaInventorySnapshot("recipe_book_place_recipe_too_large");
+                return true;
+            }
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int ingredientIndex = y * width + x;
+                    if (ingredients.get(ingredientIndex).length > 0) {
+                        ingredientForGrid[y * gridWidth + x] = ingredientIndex;
+                    }
+                }
+            }
+        } else {
+            int gridIndex = 0;
+            for (int ingredientIndex = 0; ingredientIndex < ingredients.size(); ingredientIndex++) {
+                if (ingredients.get(ingredientIndex).length == 0) continue;
+                if (gridIndex >= gridSize) {
+                    this.publishJavaInventorySnapshot("recipe_book_place_recipe_too_large");
+                    return true;
+                }
+                ingredientForGrid[gridIndex++] = ingredientIndex;
+            }
+        }
+
+        BedrockItem[] simulatedInventory = new BedrockItem[36];
+        for (int slot = 0; slot < simulatedInventory.length; slot++) {
+            simulatedInventory[slot] = safeCopy(this.getItem(slot));
+        }
+        BedrockItem[] simulatedGrid = new BedrockItem[gridSize];
+        for (int gridIndex = 0; gridIndex < gridSize; gridIndex++) {
+            simulatedGrid[gridIndex] = safeCopy(hud.getItem(uiBase + gridIndex));
+        }
+
+        List<BridgeRecipeBookMove> clearMoves = new ArrayList<>();
+        int clearedStacks = 0;
+        for (int gridIndex = 0; gridIndex < gridSize; gridIndex++) {
+            if (isEmpty(simulatedGrid[gridIndex])) continue;
+            clearedStacks++;
+            while (!isEmpty(simulatedGrid[gridIndex])) {
+                int destinationSlot = bridgeFindRecipeBookInventoryTarget(simulatedInventory, simulatedGrid[gridIndex]);
+                if (destinationSlot < 0) {
+                    this.publishJavaInventorySnapshot("recipe_book_replace_grid_no_inventory_space");
+                    return true;
+                }
+
+                BedrockItem sourceBefore = safeCopy(simulatedGrid[gridIndex]);
+                BedrockItem destinationBefore = safeCopy(simulatedInventory[destinationSlot]);
+                int room = bridgeMaxStackSize(sourceBefore) - amountOrZero(destinationBefore);
+                int count = Math.min(sourceBefore.amount(), room);
+                if (count <= 0) {
+                    this.publishJavaInventorySnapshot("recipe_book_replace_grid_no_inventory_space");
+                    return true;
+                }
+
+                clearMoves.add(new BridgeRecipeBookMove(
+                        new ClickSlot(hud, ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiBase + gridIndex),
+                        this.playerInventorySlot(destinationSlot),
+                        count));
+                simulatedGrid[gridIndex] = bridgeMoveSourceAfter(sourceBefore, count);
+                simulatedInventory[destinationSlot] = bridgeMoveDestinationAfter(sourceBefore, destinationBefore, count);
+            }
+        }
+
+        int maxMultiplier = 64;
+        for (int gridIndex = 0; gridIndex < gridSize; gridIndex++) {
+            int ingredientIndex = ingredientForGrid[gridIndex];
+            if (ingredientIndex < 0) continue;
+            int required = Math.max(1, ingredientCounts.get(ingredientIndex).intValue());
+            maxMultiplier = Math.min(maxMultiplier, 64 / required);
+        }
+        if (!useMaxItems) maxMultiplier = 1;
+
+        BridgeRecipeBookAllocation allocation = null;
+        if (useMaxItems) {
+            int low = 1;
+            int high = Math.max(1, maxMultiplier);
+            while (low <= high) {
+                int candidateMultiplier = low + ((high - low) / 2);
+                BridgeRecipeBookAllocation candidate = this.bridgeAllocateRecipeBookIngredients(
+                        simulatedInventory,
+                        hud,
+                        uiBase,
+                        ingredientForGrid,
+                        ingredients,
+                        ingredientCounts,
+                        candidateMultiplier);
+                if (candidate != null) {
+                    allocation = candidate;
+                    low = candidateMultiplier + 1;
+                } else {
+                    high = candidateMultiplier - 1;
+                }
+            }
+        } else {
+            allocation = this.bridgeAllocateRecipeBookIngredients(
+                    simulatedInventory,
+                    hud,
+                    uiBase,
+                    ingredientForGrid,
+                    ingredients,
+                    ingredientCounts,
+                    1);
+        }
+        if (allocation == null) {
+            this.publishJavaInventorySnapshot("recipe_book_place_missing_ingredients");
+            return true;
+        }
+
+        List<BridgeRecipeBookMove> moves = new ArrayList<>(clearMoves);
+        moves.addAll(allocation.moves);
+        if (allocation.moves.isEmpty()) {
+            this.publishJavaInventorySnapshot("recipe_book_place_no_ingredients");
+            return true;
+        }
+        if (!this.bridgeExecuteRecipeBookMoves(moves)) {
+            this.publishJavaInventorySnapshot("recipe_book_place_source_changed");
+            return true;
+        }
+        this.bridgeClearCarriedSource();
+        this.bridgeClearPendingCraft();
+        this.publishJavaInventorySnapshot("recipe_book_place");
+        ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                "[BedrockRealmBridge] placed Java recipe-book selection into " + gridWidth + "x" + gridWidth + " grid" +
+                        " recipe=" + recipeName +
+                        " clearedStacks=" + clearedStacks +
+                        " ingredientMoves=" + allocation.moves.size() +
+                        " craftMultiplier=" + allocation.multiplier +
+                        " requests=" + moves.size() +
+                        " useMaxItems=" + useMaxItems);
+        return true;
+    }
+
+    private int bridgeFindRecipeBookInventoryTarget(BedrockItem[] inventory, BedrockItem moving) {
+        for (int slot = 0; slot < inventory.length; slot++) {
+            BedrockItem existing = inventory[slot];
+            if (canStack(existing, moving) && existing.amount() < bridgeMaxStackSize(existing)) return slot;
+        }
+        for (int slot = 0; slot < inventory.length; slot++) {
+            if (isEmpty(inventory[slot])) return slot;
+        }
+        return -1;
+    }
+
+    private BridgeRecipeBookAllocation bridgeAllocateRecipeBookIngredients(
+            BedrockItem[] sourceInventory,
+            HudContainer hud,
+            int uiBase,
+            int[] ingredientForGrid,
+            List<int[]> ingredients,
+            List<Integer> ingredientCounts,
+            int multiplier) {
+        BedrockItem[] simulatedInventory = new BedrockItem[sourceInventory.length];
+        for (int slot = 0; slot < sourceInventory.length; slot++) {
+            simulatedInventory[slot] = safeCopy(sourceInventory[slot]);
+        }
+
+        List<Integer> targetGridIndices = new ArrayList<>();
+        for (int gridIndex = 0; gridIndex < ingredientForGrid.length; gridIndex++) {
+            if (ingredientForGrid[gridIndex] >= 0) targetGridIndices.add(Integer.valueOf(gridIndex));
+        }
+        targetGridIndices.sort((left, right) -> {
+            int leftIngredient = ingredientForGrid[left.intValue()];
+            int rightIngredient = ingredientForGrid[right.intValue()];
+            return Integer.compare(ingredients.get(leftIngredient).length, ingredients.get(rightIngredient).length);
+        });
+
+        List<BridgeRecipeBookMove> moves = new ArrayList<>();
+        for (Integer targetGridIndex : targetGridIndices) {
+            int gridIndex = targetGridIndex.intValue();
+            int ingredientIndex = ingredientForGrid[gridIndex];
+            int needed = Math.max(1, ingredientCounts.get(ingredientIndex).intValue()) * multiplier;
+            int[] allowedItemIds = ingredients.get(ingredientIndex);
+            BedrockItem prototype = null;
+
+            for (int sourceSlot = 0; sourceSlot < simulatedInventory.length && prototype == null; sourceSlot++) {
+                BedrockItem candidate = simulatedInventory[sourceSlot];
+                Integer stackId = isEmpty(candidate) ? null : candidate.netId();
+                if (isEmpty(candidate) || stackId == null || stackId.intValue() == 0) continue;
+                if (!bridgeContainsItemId(allowedItemIds, this.bridgeJavaItemId(candidate))) continue;
+                int available = 0;
+                for (BedrockItem possible : simulatedInventory) {
+                    if (canStack(candidate, possible)) available += possible.amount();
+                }
+                if (available >= needed && needed <= bridgeMaxStackSize(candidate)) prototype = candidate.copy();
+            }
+            if (prototype == null) return null;
+
+            int remaining = needed;
+            for (int sourceSlot = 0; sourceSlot < simulatedInventory.length && remaining > 0; sourceSlot++) {
+                BedrockItem sourceBefore = simulatedInventory[sourceSlot];
+                if (!canStack(prototype, sourceBefore)) continue;
+                int count = Math.min(remaining, sourceBefore.amount());
+                moves.add(new BridgeRecipeBookMove(
+                        this.playerInventorySlot(sourceSlot),
+                        new ClickSlot(hud, ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiBase + gridIndex),
+                        count));
+                simulatedInventory[sourceSlot] = bridgeMoveSourceAfter(sourceBefore, count);
+                remaining -= count;
+            }
+            if (remaining > 0) return null;
+        }
+        return new BridgeRecipeBookAllocation(multiplier, moves);
+    }
+
+    private boolean bridgeExecuteRecipeBookMoves(List<BridgeRecipeBookMove> moves) {
+        List<Integer> requestIds = new ArrayList<>();
+        List<ItemStackRequestActionType> actionTypes = new ArrayList<>();
+        List<Integer> moveCounts = new ArrayList<>();
+        List<BridgeNativeStackSlot> sources = new ArrayList<>();
+        List<BridgeNativeStackSlot> destinations = new ArrayList<>();
+        Map<String, Integer> chainedStackIds = new HashMap<>();
+
+        for (BridgeRecipeBookMove move : moves) {
+            BedrockItem sourceBefore = safeCopy(move.source.container.getItem(move.source.bedrockSlot));
+            BedrockItem destinationBefore = safeCopy(move.destination.container.getItem(move.destination.bedrockSlot));
+            if (isEmpty(sourceBefore) || sourceBefore.amount() < move.count) return false;
+            if (!isEmpty(destinationBefore) && !canStack(sourceBefore, destinationBefore)) return false;
+            if (amountOrZero(destinationBefore) + move.count > bridgeMaxStackSize(sourceBefore)) return false;
+
+            BridgeNativeStackSlot sourceBase = bridgeRecipeBookStackSlot(move.source, sourceBefore);
+            BridgeNativeStackSlot destinationBase = bridgeRecipeBookStackSlot(move.destination, destinationBefore);
+            if (sourceBase == null || destinationBase == null) return false;
+            int sourceStackId = chainedStackIds.getOrDefault(sourceBase.key(), Integer.valueOf(sourceBase.stackId)).intValue();
+            int destinationStackId = chainedStackIds.getOrDefault(destinationBase.key(), Integer.valueOf(destinationBase.stackId)).intValue();
+            if (sourceStackId == 0) return false;
+
+            int requestId = this.nextItemStackRequestId();
+            BedrockItem sourceAfter = bridgeMoveSourceAfter(sourceBefore, move.count);
+            BedrockItem destinationAfter = bridgeMoveDestinationAfter(sourceBefore, destinationBefore, move.count);
+            if (!isEmpty(sourceAfter)) sourceAfter.setNetId(Integer.valueOf(requestId));
+            if (!isEmpty(destinationAfter)) destinationAfter.setNetId(Integer.valueOf(requestId));
+
+            this.bridgeSetLatestNativeRequestId(requestId);
+            this.bridgeRememberPendingNativeRequest(
+                    requestId,
+                    List.of(move.source, move.destination),
+                    List.of(sourceAfter, destinationAfter),
+                    BedrockItem.empty(),
+                    BedrockItem.empty());
+            move.source.container.setItem(move.source.bedrockSlot, safeCopy(sourceAfter));
+            move.destination.container.setItem(move.destination.bedrockSlot, safeCopy(destinationAfter));
+            this.bridgeRememberCraftingGridSlotIfApplicable(
+                    move.source.sourceContainerId,
+                    move.source.bedrockSlot,
+                    sourceAfter);
+            this.bridgeRememberCraftingGridSlotIfApplicable(
+                    move.destination.sourceContainerId,
+                    move.destination.bedrockSlot,
+                    destinationAfter);
+
+            chainedStackIds.put(sourceBase.key(), Integer.valueOf(requestId));
+            chainedStackIds.put(destinationBase.key(), Integer.valueOf(requestId));
+            requestIds.add(Integer.valueOf(requestId));
+            actionTypes.add(ItemStackRequestActionType.Place);
+            moveCounts.add(Integer.valueOf(move.count));
+            sources.add(new BridgeNativeStackSlot(sourceBase.containerName, sourceBase.slot, sourceStackId));
+            destinations.add(new BridgeNativeStackSlot(destinationBase.containerName, destinationBase.slot, destinationStackId));
+        }
+        this.sendBatchedItemStackRequestMoves(requestIds, actionTypes, moveCounts, sources, destinations);
+        return true;
+    }
+
+    private static BridgeNativeStackSlot bridgeRecipeBookStackSlot(ClickSlot clickSlot, BedrockItem item) {
+        if (clickSlot == null) return null;
+        ContainerEnumName name;
+        if (clickSlot.container instanceof HudContainer && clickSlot.bedrockSlot == 0) {
+            name = ContainerEnumName.CursorContainer;
+        } else if (clickSlot.sourceContainerId == ContainerID.CONTAINER_ID_INVENTORY.getValue()) {
+            name = ContainerEnumName.CombinedHotbarAndInventoryContainer;
+        } else if (clickSlot.sourceContainerId == ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue()
+                && clickSlot.bedrockSlot >= 28 && clickSlot.bedrockSlot <= 40) {
+            name = ContainerEnumName.CraftingInputContainer;
+        } else {
+            return null;
+        }
+        int stackId = isEmpty(item) || item.netId() == null ? 0 : item.netId().intValue();
+        return new BridgeNativeStackSlot(name, clickSlot.bedrockSlot, stackId);
+    }
+
+    private static BedrockItem bridgeMoveSourceAfter(BedrockItem sourceBefore, int count) {
+        if (isEmpty(sourceBefore) || sourceBefore.amount() <= count) return BedrockItem.empty();
+        BedrockItem sourceAfter = sourceBefore.copy();
+        sourceAfter.setAmount(sourceBefore.amount() - count);
+        return sourceAfter;
+    }
+
+    private static BedrockItem bridgeMoveDestinationAfter(BedrockItem sourceBefore, BedrockItem destinationBefore, int count) {
+        BedrockItem destinationAfter = isEmpty(destinationBefore) ? sourceBefore.copy() : destinationBefore.copy();
+        destinationAfter.setAmount(amountOrZero(destinationBefore) + count);
+        return destinationAfter;
+    }
+
+    private int bridgeJavaItemId(BedrockItem item) {
+        try {
+            Item javaItem = this.user.get(ItemRewriter.class).javaItem(item);
+            return javaItem == null || Item.isEmpty(javaItem) ? -1 : javaItem.identifier();
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private static boolean bridgeContainsItemId(int[] itemIds, int itemId) {
+        if (itemIds == null || itemId < 0) return false;
+        for (int candidate : itemIds) {
+            if (candidate == itemId) return true;
+        }
+        return false;
     }
 
     private CraftRecipe bridgeFallbackCraftingRecipe2x2(BedrockItem[] grid) {
@@ -883,7 +1398,7 @@ public class InventoryContainer extends Container {
                 if (ids[i] == null) continue;
                 String planks = bridgePlanksForLog(ids[i]);
                 if (planks != null) {
-                    return new CraftRecipe("fallback_log_to_planks", bridgeCreateItem(planks, 4), new int[] { i == 0 ? 1 : 0, i == 1 ? 1 : 0, i == 2 ? 1 : 0, i == 3 ? 1 : 0 });
+                    return new CraftRecipe("fallback_log_to_planks", 0, bridgeCreateItem(planks, 4), new int[] { i == 0 ? 1 : 0, i == 1 ? 1 : 0, i == 2 ? 1 : 0, i == 3 ? 1 : 0 });
                 }
             }
             return null;
@@ -892,16 +1407,16 @@ public class InventoryContainer extends Container {
         if (occupied == 2) {
             // Java 2x2 grid layout: [0,1] / [2,3]. Sticks use a vertical pair.
             if (ids[0] != null && ids[2] != null && isPlanks(ids[0]) && isPlanks(ids[2])) {
-                return new CraftRecipe("fallback_planks_to_sticks_left_column", bridgeCreateItem("minecraft:stick", 4), new int[] { 1, 0, 1, 0 });
+                return new CraftRecipe("fallback_planks_to_sticks_left_column", 0, bridgeCreateItem("minecraft:stick", 4), new int[] { 1, 0, 1, 0 });
             }
             if (ids[1] != null && ids[3] != null && isPlanks(ids[1]) && isPlanks(ids[3])) {
-                return new CraftRecipe("fallback_planks_to_sticks_right_column", bridgeCreateItem("minecraft:stick", 4), new int[] { 0, 1, 0, 1 });
+                return new CraftRecipe("fallback_planks_to_sticks_right_column", 0, bridgeCreateItem("minecraft:stick", 4), new int[] { 0, 1, 0, 1 });
             }
             return null;
         }
 
         if (occupied == 4 && isPlanks(ids[0]) && isPlanks(ids[1]) && isPlanks(ids[2]) && isPlanks(ids[3])) {
-            return new CraftRecipe("fallback_planks_to_crafting_table", bridgeCreateItem("minecraft:crafting_table", 1), new int[] { 1, 1, 1, 1 });
+            return new CraftRecipe("fallback_planks_to_crafting_table", 0, bridgeCreateItem("minecraft:crafting_table", 1), new int[] { 1, 1, 1, 1 });
         }
 
         return null;
@@ -1194,6 +1709,33 @@ public class InventoryContainer extends Container {
         wrapper.sendToServer(BedrockProtocol.class);
     }
 
+    private void sendBatchedItemStackRequestMoves(
+            List<Integer> requestIds,
+            List<ItemStackRequestActionType> actionTypes,
+            List<Integer> counts,
+            List<BridgeNativeStackSlot> sources,
+            List<BridgeNativeStackSlot> destinations) {
+        if (requestIds.size() != actionTypes.size() ||
+                requestIds.size() != counts.size() ||
+                requestIds.size() != sources.size() ||
+                requestIds.size() != destinations.size()) {
+            throw new IllegalArgumentException("mismatched item stack request move batch");
+        }
+        PacketWrapper wrapper = PacketWrapper.create(ServerboundBedrockPackets.ITEM_STACK_REQUEST, this.user);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, requestIds.size());
+        for (int index = 0; index < requestIds.size(); index++) {
+            wrapper.write(BedrockTypes.VAR_INT, requestIds.get(index).intValue());
+            wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
+            wrapper.write(Types.BYTE, (byte) actionTypes.get(index).getValue());
+            wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, counts.get(index).intValue())));
+            this.writeStackRequestSlot(wrapper, sources.get(index));
+            this.writeStackRequestSlot(wrapper, destinations.get(index));
+            wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0);
+            wrapper.write(BedrockTypes.INT_LE, -1);
+        }
+        wrapper.sendToServer(BedrockProtocol.class);
+    }
+
     private void sendItemStackRequestTakes(int requestId, List<Integer> counts, List<BridgeNativeStackSlot> sources, BridgeNativeStackSlot destination) {
         PacketWrapper wrapper = PacketWrapper.create(ServerboundBedrockPackets.ITEM_STACK_REQUEST, this.user);
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
@@ -1208,6 +1750,82 @@ public class InventoryContainer extends Container {
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0);
         wrapper.write(BedrockTypes.INT_LE, -1);
         wrapper.sendToServer(BedrockProtocol.class);
+    }
+
+    private void sendNativeCraftItemStackRequest(
+            int requestId,
+            CraftRecipe recipe,
+            List<Integer> consumeCounts,
+            List<BridgeNativeStackSlot> consumeSources,
+            ItemStackRequestActionType resultActionType,
+            BridgeNativeStackSlot resultDestination,
+            int craftCount) {
+        PacketWrapper wrapper = PacketWrapper.create(ServerboundBedrockPackets.ITEM_STACK_REQUEST, this.user);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
+        wrapper.write(BedrockTypes.VAR_INT, requestId);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, consumeSources.size() + 3);
+
+        wrapper.write(Types.BYTE, (byte) ItemStackRequestActionType.CraftRecipe.getValue());
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, recipe.networkId);
+        wrapper.write(Types.BYTE, (byte) craftCount);
+
+        wrapper.write(Types.BYTE, (byte) ItemStackRequestActionType.CraftResults_DEPRECATEDASKTYLAING.getValue());
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
+        BedrockItem result = recipe.output.copy();
+        result.setNetId(null);
+        this.writeLegacyCraftResultItem(wrapper, result);
+        wrapper.write(Types.BYTE, (byte) 1);
+
+        for (int index = 0; index < consumeSources.size(); index++) {
+            wrapper.write(Types.BYTE, (byte) ItemStackRequestActionType.Consume.getValue());
+            wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, consumeCounts.get(index).intValue())));
+            this.writeStackRequestSlot(wrapper, consumeSources.get(index));
+        }
+
+        wrapper.write(Types.BYTE, (byte) resultActionType.getValue());
+        wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, recipe.output.amount() * craftCount)));
+        this.writeStackRequestSlot(wrapper, new BridgeNativeStackSlot(
+                ContainerEnumName.CreatedOutputContainer,
+                50,
+                requestId));
+        this.writeStackRequestSlot(wrapper, resultDestination);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0);
+        wrapper.write(BedrockTypes.INT_LE, -1);
+        wrapper.sendToServer(BedrockProtocol.class);
+    }
+
+    private void writeLegacyCraftResultItem(PacketWrapper wrapper, BedrockItem item) {
+        ByteBuf encoded = Unpooled.buffer();
+        try {
+            // CraftResultsDeprecated uses ItemLegacy. ViaBedrock's ordinary
+            // item type always includes the inventory stack-ID presence byte,
+            // which ItemLegacy omits. Reuse the tested item encoder for the
+            // rest of the shape and remove only that marker.
+            this.user.get(ItemRewriter.class).itemType().write(encoded, item);
+            ByteBuf cursor = encoded.duplicate();
+            int identifier = BedrockTypes.VAR_INT.read(cursor);
+            if (identifier == 0) {
+                wrapper.write(Types.REMAINING_BYTES, new byte[] { 0 });
+                return;
+            }
+
+            cursor.skipBytes(2); // count (unsigned short LE)
+            BedrockTypes.UNSIGNED_VAR_INT.read(cursor); // metadata
+            int markerOffset = cursor.readerIndex();
+            if (!cursor.isReadable() || encoded.getByte(markerOffset) != 0) {
+                throw new IllegalStateException("Craft result item did not contain the expected empty stack-ID marker");
+            }
+
+            int start = encoded.readerIndex();
+            int prefixLength = markerOffset - start;
+            int suffixLength = encoded.writerIndex() - markerOffset - 1;
+            byte[] legacyItem = new byte[prefixLength + suffixLength];
+            encoded.getBytes(start, legacyItem, 0, prefixLength);
+            encoded.getBytes(markerOffset + 1, legacyItem, prefixLength, suffixLength);
+            wrapper.write(Types.REMAINING_BYTES, legacyItem);
+        } finally {
+            encoded.release();
+        }
     }
 
     private void writeStackRequestSlot(PacketWrapper wrapper, BridgeNativeStackSlot slot) {
@@ -1228,10 +1846,12 @@ public class InventoryContainer extends Container {
                 int requestId = wrapper.read(BedrockTypes.VAR_INT);
                 if (status != 0) {
                     if (this.bridgeRollbackPendingNativeRequest(requestId)) rolledBackRequests++;
+                    final ItemStackNetResult statusName = ItemStackNetResult.getByValue(status);
                     ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
                             "[BedrockRealmBridge] Realm rejected native item_stack_request" +
                                     " requestId=" + requestId +
-                                    " status=" + status);
+                                    " status=" + status +
+                                    " statusName=" + (statusName == null ? "unknown" : statusName.name()));
                     continue;
                 }
 
@@ -1583,56 +2203,118 @@ public class InventoryContainer extends Container {
         return new BedrockItem[] { BedrockItem.empty(), BedrockItem.empty(), BedrockItem.empty(), BedrockItem.empty() };
     }
 
+    private static BedrockItem[] emptyCraftingMemory() {
+        return BedrockItem.emptyArray(54);
+    }
+
     private void bridgeRememberCraftingGridSlotIfApplicable(int sourceContainerId, int bedrockSlot, BedrockItem item) {
-        if (sourceContainerId != ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue() || bedrockSlot < 28 || bedrockSlot > 31) return;
-        if (this.bridgeLastKnownCraftingGrid == null || this.bridgeLastKnownCraftingGrid.length < 4) this.bridgeLastKnownCraftingGrid = emptyFour();
-        this.bridgeLastKnownCraftingGrid[bedrockSlot - 28] = safeCopy(item);
+        if (sourceContainerId != ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue() || bedrockSlot < 28 || bedrockSlot > 40) return;
+        if (this.bridgeLastKnownCraftingGrid == null || this.bridgeLastKnownCraftingGrid.length < 54) {
+            this.bridgeLastKnownCraftingGrid = emptyCraftingMemory();
+            if (this.bridgeCanonicalInventory != this) this.bridgeCanonicalInventory.bridgeLastKnownCraftingGrid = this.bridgeLastKnownCraftingGrid;
+        }
+        this.bridgeLastKnownCraftingGrid[bedrockSlot] = safeCopy(item);
     }
 
     private BedrockItem bridgeCraftingGridItemForReturn(HudContainer hud, int uiSlot) {
         BedrockItem hudItem = safeCopy(hud.getItem(uiSlot));
         if (!isEmpty(hudItem)) return hudItem;
-        if (this.bridgeLastKnownCraftingGrid == null || uiSlot < 28 || uiSlot > 31) return BedrockItem.empty();
-        return safeCopy(this.bridgeLastKnownCraftingGrid[uiSlot - 28]);
+        if (this.bridgeLastKnownCraftingGrid == null || uiSlot < 28 || uiSlot > 40 || uiSlot >= this.bridgeLastKnownCraftingGrid.length) return BedrockItem.empty();
+        return safeCopy(this.bridgeLastKnownCraftingGrid[uiSlot]);
     }
 
     public boolean bridgeReturnCraftingGridToInventory(String reason) {
         this.bridgeSyncCarriedItemFromHud(reason + ":before_close");
         InventoryTracker tracker = this.user.get(InventoryTracker.class);
         HudContainer hud = tracker.getHudContainer();
-        List<InventoryActionData> actions = new ArrayList<>();
-        int moved = 0;
-        for (int i = 0; i < 4; i++) {
-            int uiSlot = 28 + i;
+        BedrockItem[] simulatedInventory = new BedrockItem[36];
+        for (int slot = 0; slot < simulatedInventory.length; slot++) {
+            simulatedInventory[slot] = safeCopy(this.getItem(slot));
+        }
+
+        List<BridgeRecipeBookMove> moves = new ArrayList<>();
+        boolean returnedCursor = false;
+        BedrockItem cursor = safeCopy(this.carriedItem);
+        if (!isEmpty(cursor)) {
+            hud.setItem(0, safeCopy(cursor));
+            int cursorMoves = this.bridgeAppendCloseReturnMoves(
+                    new ClickSlot(hud, ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), 0),
+                    cursor,
+                    simulatedInventory,
+                    moves);
+            if (cursorMoves < 0) {
+                this.publishJavaInventorySnapshot(reason + ":no_inventory_space_for_cursor");
+                return false;
+            }
+            returnedCursor = cursorMoves > 0;
+        }
+
+        int movedStacks = 0;
+        int gridSize = this.bridgeCraftingGridSize();
+        int uiBase = this.bridgeCraftingGridUiBase();
+        for (int i = 0; i < gridSize; i++) {
+            int uiSlot = uiBase + i;
             BedrockItem gridBefore = this.bridgeCraftingGridItemForReturn(hud, uiSlot);
             if (isEmpty(gridBefore)) continue;
-            ClickSlot dest = this.findCraftResultTarget(gridBefore);
-            if (dest == null) continue;
-            BedrockItem destBefore = safeCopy(dest.container.getItem(dest.bedrockSlot));
-            BedrockItem destAfter = gridBefore.copy();
-            if (!isEmpty(destBefore) && canStack(destBefore, gridBefore)) {
-                destAfter = destBefore.copy();
-                destAfter.setAmount(destBefore.amount() + gridBefore.amount());
+            if (isEmpty(hud.getItem(uiSlot))) {
+                hud.setItem(uiSlot, safeCopy(gridBefore));
             }
-            actions.add(rawContainerAction(hud, ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot, gridBefore, BedrockItem.empty()));
-            actions.add(rawContainerAction(dest.container, dest.sourceContainerId, dest.bedrockSlot, destBefore, destAfter));
-            hud.setItem(uiSlot, BedrockItem.empty());
-            this.bridgeRememberCraftingGridSlotIfApplicable(ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot, BedrockItem.empty());
-            dest.container.setItem(dest.bedrockSlot, destAfter.copy());
-            moved++;
+            int gridMoves = this.bridgeAppendCloseReturnMoves(
+                    new ClickSlot(hud, ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot),
+                    gridBefore,
+                    simulatedInventory,
+                    moves);
+            if (gridMoves < 0) {
+                this.publishJavaInventorySnapshot(reason + ":no_inventory_space_for_grid");
+                return false;
+            }
+            if (gridMoves > 0) movedStacks++;
         }
-        if (moved <= 0) {
+        if (moves.isEmpty()) {
             this.publishJavaInventorySnapshot(reason + ":no_grid_items_to_return");
             return false;
         }
-        this.bridgeSetSharedCarriedItem(BedrockItem.empty());
+
+        if (!this.bridgeExecuteRecipeBookMoves(moves)) {
+            this.publishJavaInventorySnapshot(reason + ":native_source_changed");
+            return false;
+        }
+        if (returnedCursor) this.bridgeSetSharedCarriedItem(BedrockItem.empty());
         this.bridgeClearCarriedSource();
         this.bridgeClearPendingCraft();
-        this.sendNormalInventoryTransaction(actions, reason);
         this.publishJavaInventorySnapshot(reason);
         ViaBedrock.getPlatform().getLogger().log(Level.INFO,
-                "[BedrockRealmBridge] returned " + moved + " 2x2 crafting grid item stack(s) to inventory on close reason=" + reason);
+                "[BedrockRealmBridge] queued modern close return for " + movedStacks + " " +
+                        this.bridgeCraftingGridWidth() + "x" + this.bridgeCraftingGridWidth() +
+                        " crafting grid item stack(s)" +
+                        " cursorReturned=" + returnedCursor +
+                        " requests=" + moves.size() +
+                        " reason=" + reason);
         return true;
+    }
+
+    private int bridgeAppendCloseReturnMoves(
+            ClickSlot source,
+            BedrockItem sourceItem,
+            BedrockItem[] simulatedInventory,
+            List<BridgeRecipeBookMove> moves) {
+        BedrockItem remaining = safeCopy(sourceItem);
+        int moveCount = 0;
+        while (!isEmpty(remaining)) {
+            int destinationSlot = bridgeFindRecipeBookInventoryTarget(simulatedInventory, remaining);
+            if (destinationSlot < 0) return -1;
+
+            BedrockItem destinationBefore = safeCopy(simulatedInventory[destinationSlot]);
+            int room = bridgeMaxStackSize(remaining) - amountOrZero(destinationBefore);
+            int count = Math.min(remaining.amount(), room);
+            if (count <= 0) return -1;
+
+            moves.add(new BridgeRecipeBookMove(source, this.playerInventorySlot(destinationSlot), count));
+            simulatedInventory[destinationSlot] = bridgeMoveDestinationAfter(remaining, destinationBefore, count);
+            remaining = bridgeMoveSourceAfter(remaining, count);
+            moveCount++;
+        }
+        return moveCount;
     }
 
     public boolean bridgeHasCarriedSource() {
@@ -1708,11 +2390,14 @@ public class InventoryContainer extends Container {
             InventoryTracker tracker = this.user.get(InventoryTracker.class);
             tracker.getHudContainer().setItem(0, safeCopy(this.carriedItem));
             int javaStateId = this.nextJavaStateId();
-            this.sendJavaContainerSetContent(javaStateId);
-            this.sendJavaCursorItem();
+            InventoryContainer visible = this.bridgeCraftingTable ? this : this.bridgeActiveCraftingTable();
+            if (visible == null) visible = this;
+            visible.sendJavaContainerSetContent(javaStateId);
+            visible.sendJavaCursorItem();
             ViaBedrock.getPlatform().getLogger().log(Level.INFO,
                     "[BedrockRealmBridge] sent Java inventory snapshot reason=" + reason +
                             " javaStateId=" + javaStateId +
+                            " javaContainerId=" + (visible.javaContainerId() & 0xFF) +
                             " carriedEmpty=" + isEmpty(this.carriedItem));
         } catch (Throwable t) {
             ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
@@ -1781,9 +2466,9 @@ public class InventoryContainer extends Container {
     }
 
     private ClickSlot clickSlotFromJavaSlot(int javaSlot) {
-        int playerSlot = bedrockSlotFromJavaSlot(javaSlot);
+        int playerSlot = this.bedrockSlotFromJavaSlot(javaSlot);
         if (playerSlot >= 0) return this.playerInventorySlot(playerSlot);
-        int uiSlot = craftingUiSlotFromJavaSlot(javaSlot);
+        int uiSlot = this.craftingUiSlotFromJavaSlot(javaSlot);
         if (uiSlot >= 0) {
             InventoryTracker tracker = this.user.get(InventoryTracker.class);
             return new ClickSlot(tracker.getHudContainer(), ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), uiSlot);
@@ -1798,7 +2483,12 @@ public class InventoryContainer extends Container {
         return new ClickSlot(this, ContainerID.CONTAINER_ID_INVENTORY.getValue(), bedrockSlot);
     }
 
-    private static int bedrockSlotFromJavaSlot(int javaSlot) {
+    private int bedrockSlotFromJavaSlot(int javaSlot) {
+        if (this.bridgeCraftingTable) {
+            if (javaSlot >= 37 && javaSlot <= 45) return javaSlot - 37;
+            if (javaSlot >= 10 && javaSlot <= 36) return javaSlot - 1;
+            return -1;
+        }
         // Geyser's PlayerInventoryTranslator maps raw Java player inventory slots like this:
         //   Java hotbar 36-44      -> Bedrock inventory 0-8
         //   Java main inv 9-35     -> Bedrock inventory 9-35
@@ -1815,12 +2505,23 @@ public class InventoryContainer extends Container {
         return -1;
     }
 
-    private static int craftingUiSlotFromJavaSlot(int javaSlot) {
+    private int craftingUiSlotFromJavaSlot(int javaSlot) {
+        if (this.bridgeCraftingTable) {
+            if (javaSlot >= 1 && javaSlot <= 9) return 31 + javaSlot;
+            return -1;
+        }
         if (javaSlot >= 1 && javaSlot <= 4) return 27 + javaSlot;
         return -1;
     }
 
-    private static String slotRouteName(int javaSlot) {
+    private String slotRouteName(int javaSlot) {
+        if (this.bridgeCraftingTable) {
+            if (javaSlot == 0) return "crafting_3x3_output";
+            if (javaSlot >= 1 && javaSlot <= 9) return "crafting_3x3_input";
+            if (javaSlot >= 10 && javaSlot <= 36) return "java_main_inventory_10_36";
+            if (javaSlot >= 37 && javaSlot <= 45) return "java_hotbar_37_45";
+            return "unsupported_workbench_slot";
+        }
         if (javaSlot >= 36 && javaSlot <= 44) return "java_hotbar_36_44";
         if (javaSlot >= 9 && javaSlot <= 35) return "java_main_inventory_9_35";
         if (javaSlot >= 5 && javaSlot <= 8) return "java_armor_unsupported_here";
@@ -1968,11 +2669,14 @@ public class InventoryContainer extends Container {
             if (clickSlot == null) return null;
             int sourceContainerId = clickSlot.sourceContainerId;
             int slot = clickSlot.bedrockSlot;
+            if (clickSlot.container instanceof HudContainer && slot == 0) {
+                return ContainerEnumName.CursorContainer;
+            }
             if (sourceContainerId == ContainerID.CONTAINER_ID_INVENTORY.getValue()) {
                 if (slot >= 0 && slot <= 8) return ContainerEnumName.HotbarContainer;
                 if (slot >= 9 && slot <= 35) return ContainerEnumName.InventoryContainer;
             }
-            if (sourceContainerId == ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue() && slot >= 28 && slot <= 31) {
+            if (sourceContainerId == ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue() && slot >= 28 && slot <= 40) {
                 return ContainerEnumName.CraftingInputContainer;
             }
             return null;
@@ -1982,11 +2686,13 @@ public class InventoryContainer extends Container {
 
     private static final class CraftRecipe {
         final String name;
+        final int networkId;
         final BedrockItem output;
         final int[] consume;
 
-        CraftRecipe(String name, BedrockItem output, int[] consume) {
+        CraftRecipe(String name, int networkId, BedrockItem output, int[] consume) {
             this.name = name;
+            this.networkId = networkId;
             this.output = output;
             this.consume = consume;
         }
@@ -2069,15 +2775,17 @@ public class InventoryContainer extends Container {
     private static final class BridgeRecipe {
         final String type;
         final String recipeId;
+        final int networkId;
         final int width;
         final int height;
         final BridgeIngredient[] pattern;
         final BridgeIngredient[] ingredients;
         final BedrockItem output;
 
-        BridgeRecipe(String type, String recipeId, int width, int height, BridgeIngredient[] pattern, BridgeIngredient[] ingredients, BedrockItem output) {
+        BridgeRecipe(String type, String recipeId, int networkId, int width, int height, BridgeIngredient[] pattern, BridgeIngredient[] ingredients, BedrockItem output) {
             this.type = type;
             this.recipeId = recipeId;
+            this.networkId = networkId;
             this.width = width;
             this.height = height;
             this.pattern = pattern;
@@ -2089,6 +2797,8 @@ public class InventoryContainer extends Container {
             if (object == null) return null;
             String type = jsonString(object, "type", "");
             String recipeId = jsonString(object, "recipe_id", type);
+            int networkId = jsonInt(object, "network_id", 0);
+            if (networkId <= 0) return null;
             JsonObject outputObject = object.getAsJsonObject("output");
             if (outputObject == null) return null;
             BedrockItem output = bridgeCreateItem(
@@ -2101,7 +2811,7 @@ public class InventoryContainer extends Container {
             if ("shaped".equals(type)) {
                 int width = jsonInt(object, "width", 0);
                 int height = jsonInt(object, "height", 0);
-                if (width < 1 || height < 1 || width > 2 || height > 2) return null;
+                if (width < 1 || height < 1 || width > 3 || height > 3) return null;
                 JsonArray arr = object.getAsJsonArray("pattern");
                 if (arr == null || arr.size() != width * height) return null;
                 BridgeIngredient[] pattern = new BridgeIngredient[width * height];
@@ -2113,13 +2823,13 @@ public class InventoryContainer extends Container {
                         if (pattern[i] != null) required += pattern[i].consumeCount();
                     }
                 }
-                if (required < 1 || required > 4) return null;
-                return new BridgeRecipe(type, recipeId, width, height, pattern, null, output);
+                if (required < 1 || required > 9) return null;
+                return new BridgeRecipe(type, recipeId, networkId, width, height, pattern, null, output);
             }
 
             if ("shapeless".equals(type)) {
                 JsonArray arr = object.getAsJsonArray("ingredients");
-                if (arr == null || arr.size() < 1 || arr.size() > 4) return null;
+                if (arr == null || arr.size() < 1 || arr.size() > 9) return null;
                 List<BridgeIngredient> ingredients = new ArrayList<>();
                 int required = 0;
                 for (JsonElement element : arr) {
@@ -2131,27 +2841,28 @@ public class InventoryContainer extends Container {
                         }
                     }
                 }
-                if (ingredients.isEmpty() || required < 1 || required > 4) return null;
-                return new BridgeRecipe(type, recipeId, 0, 0, null, ingredients.toArray(new BridgeIngredient[0]), output);
+                if (ingredients.isEmpty() || required < 1 || required > 9) return null;
+                return new BridgeRecipe(type, recipeId, networkId, 0, 0, null, ingredients.toArray(new BridgeIngredient[0]), output);
             }
 
             return null;
         }
 
         CraftRecipe match(InventoryContainer owner, BedrockItem[] grid) {
-            if ("shaped".equals(this.type)) return this.matchShaped(owner, grid);
+            int gridWidth = grid != null && grid.length >= 9 ? 3 : 2;
+            if ("shaped".equals(this.type)) return this.matchShaped(owner, grid, gridWidth);
             if ("shapeless".equals(this.type)) return this.matchShapeless(owner, grid);
             return null;
         }
 
-        private CraftRecipe matchShaped(InventoryContainer owner, BedrockItem[] grid) {
-            for (int offsetY = 0; offsetY <= 2 - this.height; offsetY++) {
-                for (int offsetX = 0; offsetX <= 2 - this.width; offsetX++) {
-                    int[] consume = new int[] { 0, 0, 0, 0 };
+        private CraftRecipe matchShaped(InventoryContainer owner, BedrockItem[] grid, int gridWidth) {
+            for (int offsetY = 0; offsetY <= gridWidth - this.height; offsetY++) {
+                for (int offsetX = 0; offsetX <= gridWidth - this.width; offsetX++) {
+                    int[] consume = new int[grid.length];
                     boolean ok = true;
-                    for (int gy = 0; gy < 2 && ok; gy++) {
-                        for (int gx = 0; gx < 2; gx++) {
-                            int gridIndex = gy * 2 + gx;
+                    for (int gy = 0; gy < gridWidth && ok; gy++) {
+                        for (int gx = 0; gx < gridWidth; gx++) {
+                            int gridIndex = gy * gridWidth + gx;
                             BedrockItem item = grid[gridIndex];
                             BridgeIngredient ingredient = null;
                             if (gx >= offsetX && gx < offsetX + this.width && gy >= offsetY && gy < offsetY + this.height) {
@@ -2167,27 +2878,27 @@ public class InventoryContainer extends Container {
                             if (!ok) break;
                         }
                     }
-                    if (ok) return new CraftRecipe(this.recipeId, this.output.copy(), consume);
+                    if (ok) return new CraftRecipe(this.recipeId, this.networkId, this.output.copy(), consume);
                 }
             }
             return null;
         }
 
         private CraftRecipe matchShapeless(InventoryContainer owner, BedrockItem[] grid) {
-            boolean[] used = new boolean[] { false, false, false, false };
-            int[] consume = new int[] { 0, 0, 0, 0 };
+            boolean[] used = new boolean[grid.length];
+            int[] consume = new int[grid.length];
             if (!this.assignShapeless(owner, grid, 0, used, consume)) return null;
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < grid.length; i++) {
                 if (!isEmpty(grid[i]) && !used[i]) return null;
             }
-            return new CraftRecipe(this.recipeId, this.output.copy(), consume);
+            return new CraftRecipe(this.recipeId, this.networkId, this.output.copy(), consume);
         }
 
         private boolean assignShapeless(InventoryContainer owner, BedrockItem[] grid, int ingredientIndex, boolean[] used, int[] consume) {
             if (ingredientIndex >= this.ingredients.length) return true;
             BridgeIngredient ingredient = this.ingredients[ingredientIndex];
             int needed = ingredient.consumeCount();
-            for (int slot = 0; slot < 4; slot++) {
+            for (int slot = 0; slot < grid.length; slot++) {
                 if (used[slot]) continue;
                 BedrockItem item = grid[slot];
                 if (ingredient.matches(owner, item) && item.amount() >= needed) {
@@ -2204,11 +2915,12 @@ public class InventoryContainer extends Container {
 
     private static final class BridgeRecipeDatabase {
         private static List<BridgeRecipe> cachedRecipes;
+        private static Path cachedPath;
         private static long cachedModifiedAt;
         private static boolean warnedMissing;
 
         static CraftRecipe match(InventoryContainer owner, BedrockItem[] grid) {
-            List<BridgeRecipe> recipes = loadRecipes();
+            List<BridgeRecipe> recipes = loadRecipes(owner);
             if (recipes.isEmpty()) return null;
             for (BridgeRecipe recipe : recipes) {
                 CraftRecipe match = recipe.match(owner, grid);
@@ -2217,24 +2929,24 @@ public class InventoryContainer extends Container {
             return null;
         }
 
-        static boolean hasServerRecipeDatabase() {
-            Path path = recipeDbPath();
+        static boolean hasServerRecipeDatabase(InventoryContainer owner) {
+            Path path = recipeDbPath(owner);
             return path != null && Files.exists(path);
         }
 
-        private static List<BridgeRecipe> loadRecipes() {
-            Path path = recipeDbPath();
+        private static List<BridgeRecipe> loadRecipes(InventoryContainer owner) {
+            Path path = recipeDbPath(owner);
             if (path == null || !Files.exists(path)) {
                 if (!warnedMissing) {
                     warnedMissing = true;
                     ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
-                            "[BedrockRealmBridge] live 2x2 crafting recipe DB not found; using tiny fallback recipes only");
+                            "[BedrockRealmBridge] live crafting recipe DB not found; using tiny fallback recipes only");
                 }
                 return Collections.emptyList();
             }
             try {
                 long modified = Files.getLastModifiedTime(path).toMillis();
-                if (cachedRecipes != null && cachedModifiedAt == modified) return cachedRecipes;
+                if (cachedRecipes != null && path.equals(cachedPath) && cachedModifiedAt == modified) return cachedRecipes;
                 String json = Files.readString(path, StandardCharsets.UTF_8);
                 JsonObject root = JsonParser.parseString(json).getAsJsonObject();
                 JsonArray recipeArray = root.getAsJsonArray("recipes");
@@ -2248,26 +2960,31 @@ public class InventoryContainer extends Container {
                     }
                 }
                 cachedRecipes = Collections.unmodifiableList(parsed);
+                cachedPath = path;
                 cachedModifiedAt = modified;
                 ViaBedrock.getPlatform().getLogger().log(Level.INFO,
-                        "[BedrockRealmBridge] loaded " + parsed.size() + " live Bedrock 2x2 crafting recipe(s) from " + path);
+                        "[BedrockRealmBridge] loaded " + parsed.size() + " live Bedrock crafting recipe(s) from " + path);
                 return cachedRecipes;
             } catch (Throwable t) {
                 ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
-                        "[BedrockRealmBridge] failed to load live 2x2 crafting recipe DB; using tiny fallback recipes only", t);
+                        "[BedrockRealmBridge] failed to load live crafting recipe DB; using tiny fallback recipes only", t);
                 cachedRecipes = Collections.emptyList();
+                cachedPath = path;
                 cachedModifiedAt = -1;
                 return cachedRecipes;
             }
         }
 
-        private static Path recipeDbPath() {
+        private static Path recipeDbPath(InventoryContainer owner) {
             Path cwd = Path.of(System.getProperty("user.dir", "."));
-            Path direct = cwd.resolve("bridge-crafting-recipes-2x2.json");
+            String fileName = owner != null && owner.bridgeCraftingTable
+                    ? "bridge-crafting-recipes-3x3.json"
+                    : "bridge-crafting-recipes-2x2.json";
+            Path direct = cwd.resolve(fileName);
             if (Files.exists(direct)) return direct;
             Path parent = cwd.getParent();
             if (parent != null) {
-                Path sibling = parent.resolve("bridge-crafting-recipes-2x2.json");
+                Path sibling = parent.resolve(fileName);
                 if (Files.exists(sibling)) return sibling;
             }
             return direct;
@@ -2295,6 +3012,28 @@ public class InventoryContainer extends Container {
             this.container = container;
             this.sourceContainerId = sourceContainerId;
             this.bedrockSlot = bedrockSlot;
+        }
+    }
+
+    private static final class BridgeRecipeBookMove {
+        final ClickSlot source;
+        final ClickSlot destination;
+        final int count;
+
+        BridgeRecipeBookMove(ClickSlot source, ClickSlot destination, int count) {
+            this.source = source;
+            this.destination = destination;
+            this.count = count;
+        }
+    }
+
+    private static final class BridgeRecipeBookAllocation {
+        final int multiplier;
+        final List<BridgeRecipeBookMove> moves;
+
+        BridgeRecipeBookAllocation(int multiplier, List<BridgeRecipeBookMove> moves) {
+            this.multiplier = multiplier;
+            this.moves = moves;
         }
     }
 

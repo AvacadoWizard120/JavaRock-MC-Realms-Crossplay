@@ -6,9 +6,10 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.81-item-frame-interaction-movement-sync'
+const PATCH_ID = 'v0.3.91-player-slot-codec'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/packet/UnhandledPackets.class',
+  'net/raphimc/viabedrock/protocol/packet/UnhandledPackets$1.class',
   'net/raphimc/viabedrock/protocol/packet/EntityPackets.class',
   'net/raphimc/viabedrock/protocol/packet/EntityPackets$1.class',
   'net/raphimc/viabedrock/protocol/packet/ClientPlayerPackets.class',
@@ -25,6 +26,10 @@ const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/api/model/entity/ClientPlayerEntity$BlockBreakingInfo.class',
   'net/raphimc/viabedrock/api/model/entity/ClientPlayerEntity$DimensionChangeInfo.class',
   'net/raphimc/viabedrock/protocol/storage/InventoryTracker.class',
+  'net/raphimc/viabedrock/protocol/storage/RecipeBookTracker.class',
+  'net/raphimc/viabedrock/protocol/storage/RecipeBookTracker$ResolvedSlot.class',
+  'net/raphimc/viabedrock/protocol/storage/RecipeBookTracker$ResolvedRecipe.class',
+  'net/raphimc/viabedrock/protocol/storage/RecipeBookTracker$Catalog.class',
   'net/raphimc/viabedrock/protocol/storage/EntityTracker.class',
   'net/raphimc/viabedrock/protocol/storage/EntityTracker$ItemFrameInteraction.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker.class',
@@ -42,7 +47,10 @@ const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/api/model/container/player/InventoryContainer$CraftRecipe.class',
   'net/raphimc/viabedrock/api/model/container/player/InventoryContainer$BridgeIngredient.class',
   'net/raphimc/viabedrock/api/model/container/player/InventoryContainer$BridgeRecipe.class',
-  'net/raphimc/viabedrock/api/model/container/player/InventoryContainer$BridgeRecipeDatabase.class'
+  'net/raphimc/viabedrock/api/model/container/player/InventoryContainer$BridgeRecipeDatabase.class',
+  'net/raphimc/viabedrock/api/model/container/player/InventoryContainer$BridgeRecipeBookMove.class',
+  'net/raphimc/viabedrock/api/model/container/player/InventoryContainer$BridgeRecipeBookAllocation.class',
+  'net/raphimc/viabedrock/api/model/container/player/HudContainer.class'
 ]
 const CLASS_RELATIVE_PATH = CLASS_RELATIVE_PATHS[0]
 const PATCH_SOURCE_RELATIVE_PATHS = [
@@ -55,7 +63,9 @@ const PATCH_SOURCE_RELATIVE_PATHS = [
   'EntityTracker.java',
   'EntityPackets.java',
   'InventoryContainer.java',
+  'HudContainer.java',
   'InventoryTracker.java',
+  'RecipeBookTracker.java',
   'UnhandledPackets.java',
   'WorldEffectPackets.java'
 ]
@@ -370,7 +380,7 @@ function ensureViaProxyInventoryPatch (sourceJar, runDir) {
     patchClasses: patchClassSignatures(),
     patchSources: patchSourceSignatures(),
     tool: result.command,
-      note: 'Patches ViaBedrock entity, chunk, inventory, and interaction translation. It maps Bedrock falling-block metadata, item-frame block-entity contents and rotation, terrain-derived sky and block light, ordered native inventory acknowledgements, accepted-slot reconstruction, Realm-native chest Take/Place requests, Java QUICK_CRAFT lifecycles, double-chest promotion, derived block rendering, player 2x2 crafting, and live crafting_data behavior. Classes are compiled against the real ViaProxy/ViaBedrock jar to keep packet enum descriptors compatible.'
+      note: 'Patches ViaBedrock entity, chunk, inventory, interaction, and recipe-book translation. It maps Bedrock falling-block metadata, item-frame block-entity contents and rotation, terrain-derived sky and block light, ordered native inventory acknowledgements, accepted-slot reconstruction, Realm-native chest Take/Place requests, Java QUICK_CRAFT lifecycles, double-chest promotion, derived block rendering, player 2x2 crafting, and live Bedrock recipe definitions and unlock state. Classes are compiled against the real ViaProxy/ViaBedrock jar to keep packet enum descriptors compatible.'
   })
 
   console.log(`[java-compat] Created ViaProxy inventory-patched jar: ${patchedJar}`)

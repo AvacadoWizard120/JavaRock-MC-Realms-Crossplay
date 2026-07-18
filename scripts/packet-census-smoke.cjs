@@ -157,8 +157,14 @@ const census = new PacketCensus({
   sampleLimitPerKind: 1,
   eventWindowSize: 8,
   focusTraceEnabled: true,
-  focusTraceFull: true
+  focusTraceFull: true,
+  rawJournalEnabled: true
 })
+
+const unknownClientboundRaw = Buffer.from([0xff, 0x00, 0x81, 0x7f, 0x42])
+const unknownServerboundRaw = Buffer.from([0x91, 0x02, 0xde, 0xad, 0xbe, 0xef])
+census.recordRawPacket({ direction: 'realm_to_native_bedrock', context: 'smoke_unknown', raw: unknownClientboundRaw })
+census.recordRawPacket({ direction: 'native_bedrock_to_realm', context: 'smoke_parse_failure', raw: unknownServerboundRaw })
 
 census.record({
   lane: 'realm_to_bridge',
@@ -305,10 +311,19 @@ const dbFile = path.join(dir, 'census.json')
 const summaryFile = path.join(dir, 'run-summary-smoke-run.json')
 const eventsFile = path.join(dir, 'events-smoke-run.jsonl')
 const focusTraceFile = path.join(dir, 'inventory-trace-smoke-run.jsonl')
+const rawJournalFile = path.join(dir, 'raw-packets-smoke-run.jsonl')
 assert.ok(fs.existsSync(dbFile), 'census.json should exist')
 assert.ok(fs.existsSync(summaryFile), 'run summary should exist')
 assert.ok(fs.existsSync(eventsFile), 'event jsonl should exist')
 assert.ok(fs.existsSync(focusTraceFile), 'inventory trace jsonl should exist')
+assert.ok(fs.existsSync(rawJournalFile), 'lossless raw packet journal should exist')
+
+const rawPackets = fs.readFileSync(rawJournalFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+assert.strictEqual(rawPackets.length, 2)
+assert(Buffer.from(rawPackets[0].raw_base64, 'base64').equals(unknownClientboundRaw))
+assert(Buffer.from(rawPackets[1].raw_base64, 'base64').equals(unknownServerboundRaw))
+assert.strictEqual(rawPackets[0].direction, 'realm_to_native_bedrock')
+assert.strictEqual(rawPackets[1].context, 'smoke_parse_failure')
 
 const db = JSON.parse(fs.readFileSync(dbFile, 'utf8'))
 assert.ok(Object.keys(db.packet_kinds).some(key => key.includes('item_stack_response')), 'item_stack_response should be indexed')
@@ -341,6 +356,9 @@ assert.ok(!JSON.stringify(brokenFocusEvent).includes('do-not-store-me-either'), 
 assert.ok(focusEvents.some(event => event.name === 'player_auth_input' && event.summary.itemStackRequestSummary?.requestCount === 1 && event.packet), 'focus trace should include embedded player_auth_input item stack requests')
 const summary = JSON.parse(fs.readFileSync(summaryFile, 'utf8'))
 assert.strictEqual(summary.focus_trace_events_written, 6)
+assert.strictEqual(summary.raw_packets_written, 2)
+assert.strictEqual(summary.raw_bytes_written, unknownClientboundRaw.length + unknownServerboundRaw.length)
+assert.strictEqual(path.basename(summary.raw_journal_file), 'raw-packets-smoke-run.jsonl')
 assert.strictEqual(path.basename(summary.focus_trace_file), 'inventory-trace-smoke-run.jsonl')
 
 const sampleRefs = Object.values(db.packet_kinds).flatMap(kind => kind.samples || [])
