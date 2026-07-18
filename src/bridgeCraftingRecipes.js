@@ -145,21 +145,21 @@ function isFutureStationRecipe (entry) {
   return block !== '' && block !== 'crafting_table'
 }
 
-function normalizeShapedInputCell (input, x, y) {
+function normalizeShapedInputCell (input, x, y, width = 2, height = 2) {
   if (!Array.isArray(input)) return null
 
-  // Bedrock crafting_data shaped recipes are column-major in the packet samples:
-  // width=1,height=2 is encoded as [[top,bottom]], and width=2,height=1 is
-  // encoded as [[left],[right]]. The Java player grid matcher expects row-major
-  // pattern order: top-left, top-right, bottom-left, bottom-right.
-  if (Array.isArray(input[x])) return input[x][y]
-
-  // Keep a conservative fallback for older/alternate parsers that may flatten the
-  // cells row-major. This should not be hit for current packet-census samples.
-  return input[y * 2 + x]
+  // bedrock-protocol groups the flat row-major wire cells into width arrays of
+  // height cells. Flatten that parser shape before mapping it onto Java's grid.
+  const nestedCellCount = input.every(Array.isArray)
+    ? input.reduce((count, group) => count + group.length, 0)
+    : -1
+  const cells = nestedCellCount === width * height ? input.flat() : input
+  return cells[y * width + x]
 }
 
-function simplifyCraftingDataForBridge2x2 (params = {}) {
+function simplifyCraftingDataForBridgeGrid (params = {}, gridSize = 2) {
+  const maxGridSize = gridSize === 3 ? 3 : 2
+  const maxRequired = maxGridSize * maxGridSize
   const recipes = Array.isArray(params.recipes) ? params.recipes : []
   const out = []
   const seen = new Set()
@@ -176,18 +176,18 @@ function simplifyCraftingDataForBridge2x2 (params = {}) {
     if (entryType === 'shaped') {
       const width = numberOrDefault(recipe.width, 0)
       const height = numberOrDefault(recipe.height, 0)
-      if (width < 1 || height < 1 || width > 2 || height > 2) continue
+      if (width < 1 || height < 1 || width > maxGridSize || height > maxGridSize) continue
       const input = Array.isArray(recipe.input) ? recipe.input : []
       const pattern = []
       let required = 0
       for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
-          const cell = recipeInputCell(normalizeShapedInputCell(input, x, y))
+          const cell = recipeInputCell(normalizeShapedInputCell(input, x, y, width, height))
           pattern.push(cell)
           required += ingredientRequiredCount(cell)
         }
       }
-      if (required < 1 || required > 4) continue
+      if (required < 1 || required > maxRequired) continue
       const simplified = {
         type: 'shaped',
         recipe_id: String(recipe.recipe_id || recipe.uuid || `shaped_${out.length}`),
@@ -208,7 +208,7 @@ function simplifyCraftingDataForBridge2x2 (params = {}) {
     if (entryType === 'shapeless' || entryType === 'shulker_box') {
       const input = Array.isArray(recipe.input) ? recipe.input.map(recipeInputCell).filter(Boolean) : []
       const required = input.reduce((sum, ingredient) => sum + ingredientRequiredCount(ingredient), 0)
-      if (input.length < 1 || required < 1 || required > 4) continue
+      if (input.length < 1 || required < 1 || required > maxRequired) continue
       const simplified = {
         type: 'shapeless',
         recipe_id: String(recipe.recipe_id || recipe.uuid || `${entryType}_${out.length}`),
@@ -228,7 +228,103 @@ function simplifyCraftingDataForBridge2x2 (params = {}) {
     schema_version: 1,
     generated_at: new Date().toISOString(),
     source: 'bedrock crafting_data packet',
-    note: 'Simplified crafting_table shaped/shapeless recipes that fit the Java player 2x2 crafting grid. Furnace/smelting/stonecutter/etc. recipes are deliberately excluded from this 2x2 grid DB and preserved separately in bridge-station-recipes-future.json.',
+    note: `Simplified crafting_table shaped/shapeless recipes that fit a ${maxGridSize}x${maxGridSize} crafting grid. Furnace/smelting/stonecutter/etc. recipes are excluded and preserved separately in bridge-station-recipes-future.json.`,
+    recipe_count: out.length,
+    recipes: out
+  }
+}
+
+function simplifyCraftingDataForBridge2x2 (params = {}) {
+  return simplifyCraftingDataForBridgeGrid(params, 2)
+}
+
+function simplifyCraftingDataForBridge3x3 (params = {}) {
+  return simplifyCraftingDataForBridgeGrid(params, 3)
+}
+
+function isRecipeBookCraftingRecipe (entry) {
+  const type = String(entry?.type || '').toLowerCase()
+  if (type !== 'shaped' && type !== 'shapeless' && type !== 'shulker_box') return false
+  const block = recipeBlockName(entry)
+  return block === 'crafting_table' || block === 'deprecated'
+}
+
+function simplifyCraftingDataForRecipeBook (params = {}) {
+  const recipes = Array.isArray(params.recipes) ? params.recipes : []
+  const out = []
+  const seen = new Set()
+
+  for (const entry of recipes) {
+    if (!isRecipeBookCraftingRecipe(entry)) continue
+
+    const entryType = String(entry?.type || '').toLowerCase()
+    const recipe = entry?.recipe && typeof entry.recipe === 'object' ? entry.recipe : {}
+    const outputList = Array.isArray(recipe.output) ? recipe.output : (recipe.result ? [recipe.result] : [])
+    const output = recipeResultToBridgeSpec(outputList[0])
+    if (!output) continue
+
+    const recipeId = String(recipe.recipe_id || recipe.uuid || `${entryType}_${out.length}`)
+    let simplified = null
+    if (entryType === 'shaped') {
+      const width = numberOrDefault(recipe.width, 0)
+      const height = numberOrDefault(recipe.height, 0)
+      if (width < 1 || height < 1 || width > 3 || height > 3) continue
+      const input = Array.isArray(recipe.input) ? recipe.input : []
+      const pattern = []
+      let occupied = 0
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const cell = recipeInputCell(normalizeShapedInputCell(input, x, y, width, height))
+          pattern.push(cell)
+          if (cell) occupied++
+        }
+      }
+      if (!occupied) continue
+      simplified = {
+        type: 'shaped',
+        recipe_id: recipeId,
+        network_id: recipeNetworkId(entry, recipe),
+        width,
+        height,
+        pattern,
+        output
+      }
+    } else {
+      const ingredients = Array.isArray(recipe.input)
+        ? recipe.input.map(recipeInputCell).filter(Boolean)
+        : []
+      if (!ingredients.length) continue
+      simplified = {
+        type: 'shapeless',
+        recipe_id: recipeId,
+        network_id: recipeNetworkId(entry, recipe),
+        ingredients,
+        output
+      }
+    }
+
+    const duplicateKey = JSON.stringify({
+      type: simplified.type,
+      recipe_id: simplified.recipe_id,
+      width: simplified.width,
+      height: simplified.height,
+      pattern: simplified.pattern,
+      ingredients: simplified.ingredients,
+      output: simplified.output
+    })
+    if (seen.has(duplicateKey)) continue
+    seen.add(duplicateKey)
+    simplified.display_id = out.length
+    out.push(simplified)
+  }
+
+  return {
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    source: 'bedrock crafting_data and unlocked_recipes packets',
+    unlock_state_ready: false,
+    last_unlock_type: 'empty',
+    unlocked_recipe_ids: [],
     recipe_count: out.length,
     recipes: out
   }
@@ -279,26 +375,97 @@ function writeJsonTargetsIfChanged (targets, value) {
   }
 }
 
+function recipeBookTargets (projectRoot, runDir) {
+  return [
+    path.join(runDir, 'bridge-recipe-book.json'),
+    path.join(projectRoot, 'bridge-recipe-book.json')
+  ]
+}
+
+function normalizeUnlockType (value) {
+  const names = ['empty', 'initially_unlocked', 'newly_unlocked', 'remove_unlocked', 'remove_all_unlocked']
+  if (Number.isInteger(Number(value))) return names[Number(value)] || 'empty'
+  const normalized = String(value || '').toLowerCase()
+  return names.includes(normalized) ? normalized : 'empty'
+}
+
+function applyBridgeUnlockedRecipesForViaProxy (projectRoot, runDir, params = {}) {
+  const targets = recipeBookTargets(projectRoot, runDir)
+  const unlockType = normalizeUnlockType(params.unlock_type ?? params.unlockType)
+  const incoming = Array.isArray(params.recipes) ? params.recipes.map(String) : []
+  let written = false
+  let unlockedRecipeCount = 0
+
+  for (const target of targets) {
+    if (!fs.existsSync(target)) continue
+    let db
+    try {
+      db = JSON.parse(fs.readFileSync(target, 'utf8'))
+    } catch {
+      continue
+    }
+
+    const unlocked = new Set(Array.isArray(db.unlocked_recipe_ids) ? db.unlocked_recipe_ids.map(String) : [])
+    if (unlockType === 'initially_unlocked') {
+      unlocked.clear()
+      for (const recipeId of incoming) unlocked.add(recipeId)
+    } else if (unlockType === 'newly_unlocked') {
+      for (const recipeId of incoming) unlocked.add(recipeId)
+    } else if (unlockType === 'remove_unlocked') {
+      for (const recipeId of incoming) unlocked.delete(recipeId)
+    } else if (unlockType === 'remove_all_unlocked') {
+      unlocked.clear()
+    } else {
+      continue
+    }
+
+    db.unlock_state_ready = true
+    db.last_unlock_type = unlockType
+    db.unlock_updated_at = new Date().toISOString()
+    db.unlocked_recipe_ids = [...unlocked].sort()
+    writeJsonTargetsIfChanged([target], db)
+    written = true
+    unlockedRecipeCount = Math.max(unlockedRecipeCount, unlocked.size)
+  }
+
+  return { written, unlockType, unlockedRecipeCount, targets: written ? targets : [] }
+}
+
 function writeBridgeCraftingRecipesForViaProxy (projectRoot, runDir, params = {}) {
   const db = simplifyCraftingDataForBridge2x2(params)
+  const craftingTableDb = simplifyCraftingDataForBridge3x3(params)
   const stationDb = simplifyFutureStationRecipesForBridge(params)
+  const recipeBookDb = simplifyCraftingDataForRecipeBook(params)
   const targets = [
     path.join(runDir, 'bridge-crafting-recipes-2x2.json'),
     path.join(projectRoot, 'bridge-crafting-recipes-2x2.json')
+  ]
+  const craftingTableTargets = [
+    path.join(runDir, 'bridge-crafting-recipes-3x3.json'),
+    path.join(projectRoot, 'bridge-crafting-recipes-3x3.json')
   ]
   const stationTargets = [
     path.join(runDir, 'bridge-station-recipes-future.json'),
     path.join(projectRoot, 'bridge-station-recipes-future.json')
   ]
+  const bookTargets = recipeBookTargets(projectRoot, runDir)
 
   if (stationDb.recipes.length) writeJsonTargetsIfChanged(stationTargets, stationDb)
+  // Always replace the session catalog, including with an empty one. Leaving an
+  // older account's ready catalog behind would expose stale recipe-book state.
+  writeJsonTargetsIfChanged(bookTargets, recipeBookDb)
+  if (craftingTableDb.recipes.length) writeJsonTargetsIfChanged(craftingTableTargets, craftingTableDb)
   if (!db.recipes.length) {
     return {
       written: false,
       recipeCount: 0,
       targets: [],
+      craftingTableRecipeCount: craftingTableDb.recipes.length,
+      craftingTableTargets: craftingTableDb.recipes.length ? craftingTableTargets : [],
       stationRecipeCount: stationDb.recipes.length,
-      stationTargets: stationDb.recipes.length ? stationTargets : []
+      stationTargets: stationDb.recipes.length ? stationTargets : [],
+      recipeBookCount: recipeBookDb.recipes.length,
+      recipeBookTargets: bookTargets
     }
   }
 
@@ -307,18 +474,26 @@ function writeBridgeCraftingRecipesForViaProxy (projectRoot, runDir, params = {}
     written: true,
     recipeCount: db.recipes.length,
     targets,
+    craftingTableRecipeCount: craftingTableDb.recipes.length,
+    craftingTableTargets: craftingTableDb.recipes.length ? craftingTableTargets : [],
     stationRecipeCount: stationDb.recipes.length,
-    stationTargets: stationDb.recipes.length ? stationTargets : []
+    stationTargets: stationDb.recipes.length ? stationTargets : [],
+    recipeBookCount: recipeBookDb.recipes.length,
+    recipeBookTargets: bookTargets
   }
 }
 
 module.exports = {
   simplifyCraftingDataForBridge2x2,
+  simplifyCraftingDataForBridge3x3,
+  simplifyCraftingDataForRecipeBook,
   simplifyFutureStationRecipesForBridge,
   writeBridgeCraftingRecipesForViaProxy,
+  applyBridgeUnlockedRecipesForViaProxy,
   recipeIngredientToBridgeSpec,
   recipeResultToBridgeSpec,
   recipeBlockName,
   recipeNetworkId,
-  isCraftingTableRecipe
+  isCraftingTableRecipe,
+  isRecipeBookCraftingRecipe
 }

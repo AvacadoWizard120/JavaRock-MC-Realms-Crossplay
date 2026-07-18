@@ -116,7 +116,7 @@ const moveParams = {
       },
       {
         source_type: 'container',
-        inventory_id: 124,
+        window_id: 124,
         slot: 29,
         old_item: { network_id: 0 },
         new_item: { network_id: 17, count: 1, metadata: 0, stack_id: 15 }

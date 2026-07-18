@@ -12,7 +12,10 @@ const { createNetherNetBedrockClient } = require('./nethernetBedrockProbe')
 const { inspectRealmNetherNetInfo } = require('./nethernetInfo')
 const { safeStringify } = require('./safeStringify')
 const { createPacketCensusFromConfig, summarizePacketForCensus } = require('./packetCensus')
-const { writeBridgeCraftingRecipesForViaProxy } = require('./bridgeCraftingRecipes')
+const {
+  writeBridgeCraftingRecipesForViaProxy,
+  applyBridgeUnlockedRecipesForViaProxy
+} = require('./bridgeCraftingRecipes')
 
 function normalizeRelayHostForViaProxy (host) {
   if (!host || host === '0.0.0.0' || host === '::') return '127.0.0.1'
@@ -767,6 +770,49 @@ function inventoryTransactionActionItemChanged (action = {}) {
     numberOrDefault(firstNonNull(oldItem.metadata, oldItem.meta, oldItem.damage), 0) !== numberOrDefault(firstNonNull(newItem.metadata, newItem.meta, newItem.damage), 0)
 }
 
+function playerInventorySlotDeltasFromTransaction (params = {}, allowedTransactionTypes = ['normal'], options = {}) {
+  const transaction = params.transaction || {}
+  const transactionType = String(transaction.transaction_type || '').toLowerCase()
+  const allowedTypes = new Set(allowedTransactionTypes.map(type => String(type).toLowerCase()))
+  if (!allowedTypes.has(transactionType)) return []
+
+  const actions = Array.isArray(transaction.actions) ? transaction.actions : []
+  const deltas = []
+  for (const action of actions) {
+    if (!inventoryTransactionActionItemChanged(action)) continue
+
+    const explicitWindowId = firstNonNull(
+      action.window_id,
+      action.windowId,
+      action.inventory_id,
+      action.inventoryId,
+      action.container_id,
+      action.containerId
+    )
+    const sourceType = String(firstNonNull(action.source_type, action.sourceType, '') || '').toLowerCase()
+    const windowId = explicitWindowId != null
+      ? explicitWindowId
+      : (sourceType === 'container' ? 0 : null)
+    if (windowId == null) continue
+    const normalizedWindowId = normalizedWindowIdString(windowId)
+    if (normalizedWindowId !== 'inventory' && normalizedWindowId !== 'fixed_inventory' && normalizedWindowId !== 'hotbar') continue
+
+    const slot = numberOrDefault(firstNonNull(action.slot, action.slot_id, action.slotId), -1)
+    if (slot < 0) continue
+
+    const item = action.new_item || action.newItem || action.to_item || action.toItem || action.to || emptyItemForLocalViaBedrock()
+    deltas.push({
+      action,
+      packet: normalizeClientboundForLocalViaBedrock('inventory_slot', {
+        window_id: windowId,
+        slot,
+        item
+      }, options)
+    })
+  }
+  return deltas
+}
+
 function clientboundInventoryTransactionDropDiagnosis (name, params = {}) {
   if (name !== 'inventory_transaction') return null
   const transaction = params.transaction || {}
@@ -852,7 +898,7 @@ const NATIVE_BEDROCK_RAW_ACTION_PACKET_NAMES = new Set([
   'player_action'
 ])
 
-function nativeBedrockRawActionDiagnostic (name, params = {}, packet, selectedItem) {
+function serverboundRawActionDiagnostic (name, params = {}, packet, selectedItem) {
   if (!Buffer.isBuffer(packet)) return undefined
   const embeddedAuthAction = name === 'player_auth_input' && Boolean(
     params.transaction ||
@@ -879,6 +925,7 @@ function nativeBedrockRawActionDiagnostic (name, params = {}, packet, selectedIt
     raw_packet_encoding: 'base64_bedrock_game_packet_without_batch_length',
     raw_packet_bytes: packet.length,
     raw_packet_base64: packet.toString('base64'),
+    raw_packet_hex: packet.toString('hex'),
     raw_packet_prefix_hex: packet.subarray(0, 64).toString('hex'),
     selected_hotbar_item: selectedItem
       ? {
@@ -896,6 +943,8 @@ function nativeBedrockRawActionDiagnostic (name, params = {}, packet, selectedIt
     decoded_packet_suspect_reasons: suspectReasons.length > 0 ? suspectReasons : undefined
   }
 }
+
+const nativeBedrockRawActionDiagnostic = serverboundRawActionDiagnostic
 
 function downstreamModeRecordSlug (mode) {
   return isNativeBedrockRecorderMode(mode) ? 'native_bedrock' : 'viabedrock'
@@ -1334,7 +1383,16 @@ function bridgeItemStackId (item, fallback = 0) {
 }
 
 function bridgeInventoryActionContainerId (action = {}) {
-  return firstNonNull(action.inventory_id, action.inventoryId, action.container_id, action.containerId, action.source?.container_id, action.source?.containerId)
+  return firstNonNull(
+    action.inventory_id,
+    action.inventoryId,
+    action.window_id,
+    action.windowId,
+    action.container_id,
+    action.containerId,
+    action.source?.container_id,
+    action.source?.containerId
+  )
 }
 
 function bridgeInventoryActionSlotDescriptor (action = {}) {
@@ -1982,6 +2040,74 @@ function bridgeItemStackResponseIsRejected (status) {
   if (status == null || status === '') return false
   const text = String(status).toLowerCase()
   return text !== 'ok' && text !== 'success' && text !== '0'
+}
+
+const BRIDGE_CRAFTING_RETURN_DESTINATIONS = new Set([
+  'hotbar',
+  'inventory',
+  'hotbar_and_inventory'
+])
+
+function bridgeCraftingDrainRequestIds (params = {}) {
+  const requestIds = []
+  for (const request of bridgeItemStackRequestEntries(params)) {
+    const actions = Array.isArray(request.actions) ? request.actions : []
+    const returnsCraftingInput = actions.some(action => {
+      return bridgeActionType(action) === 'place' &&
+        bridgeSlotContainerId(action.source) === 'crafting_input' &&
+        BRIDGE_CRAFTING_RETURN_DESTINATIONS.has(bridgeSlotContainerId(action.destination))
+    })
+    const requestId = bridgeRequestIdForItemStackEntry(request)
+    if (returnsCraftingInput && requestId != null) requestIds.push(requestId)
+  }
+  return requestIds
+}
+
+function buildSpawnSupportSubchunkRequest (startGameData = {}, partialChunkOrigin = {}) {
+  const position = firstNonNull(startGameData.player_position, startGameData.playerPosition)
+  if (!position || typeof position !== 'object') return null
+
+  const playerX = Number(position.x)
+  const playerY = Number(position.y)
+  const playerZ = Number(position.z)
+  const originY = Number(firstNonNull(partialChunkOrigin.y, 0))
+  const dimension = Number(firstNonNull(partialChunkOrigin.dimension, 0))
+  if (![playerX, playerY, playerZ, originY, dimension].every(Number.isFinite)) return null
+
+  const spawnChunkX = Math.floor(playerX / 16)
+  const spawnChunkZ = Math.floor(playerZ / 16)
+  const supportSectionY = Math.floor((playerY - 1) / 16)
+  const origin = { x: spawnChunkX, y: originY, z: spawnChunkZ }
+  const requests = []
+  for (let x = -1; x <= 1; x++) {
+    for (let z = -1; z <= 1; z++) {
+      for (let y = supportSectionY - 1; y <= supportSectionY + 1; y++) {
+        requests.push({ x, y: y - originY, z })
+      }
+    }
+  }
+  requests.sort((left, right) => {
+    const leftHorizontal = Math.max(Math.abs(left.x), Math.abs(left.z))
+    const rightHorizontal = Math.max(Math.abs(right.x), Math.abs(right.z))
+    if (leftHorizontal !== rightHorizontal) return leftHorizontal - rightHorizontal
+    const leftVertical = Math.abs((left.y + originY) - supportSectionY)
+    const rightVertical = Math.abs((right.y + originY) - supportSectionY)
+    if (leftVertical !== rightVertical) return leftVertical - rightVertical
+    const leftDistance = Math.abs(left.x) + Math.abs(left.z)
+    const rightDistance = Math.abs(right.x) + Math.abs(right.z)
+    if (leftDistance !== rightDistance) return leftDistance - rightDistance
+    if (left.y !== right.y) return left.y - right.y
+    if (left.x !== right.x) return left.x - right.x
+    return left.z - right.z
+  })
+
+  return { dimension, origin, requests }
+}
+
+function subchunkOriginsMatch (left = {}, right = {}) {
+  return Number(left.x) === Number(right.x) &&
+    Number(left.y) === Number(right.y) &&
+    Number(left.z) === Number(right.z)
 }
 
 function bridgeAcceptedResponseCursorStackId (response = {}) {
@@ -3068,6 +3194,7 @@ function rawBedrockPacketDiagnostic (packet, version) {
     byte_length: rawBuffer?.length,
     first_bytes_hex: rawBuffer?.slice(0, 48).toString('hex'),
     raw_bytes_base64: rawBuffer && rawBuffer.length <= rawCaptureLimit ? rawBuffer.toString('base64') : undefined,
+    raw_bytes_hex: rawBuffer && rawBuffer.length <= rawCaptureLimit ? rawBuffer.toString('hex') : undefined,
     raw_capture_truncated: rawBuffer?.length > rawCaptureLimit || undefined
   }
 }
@@ -3251,6 +3378,10 @@ class ViaBedrockRelayPlayer extends Player {
     this.syntheticChunkRadiusRequested = false
     this.syntheticSubchunkRequested = false
     this.latestSyntheticSubchunkOrigin = null
+    this.spawnSupportTerrainAttempted = false
+    this.pendingLocalPlayerSpawnSupport = null
+    this.localPlayerSpawnSupportTimer = null
+    this.awaitingSpawnSupportPacketForPlayReady = false
     this.downstreamKnownEntityRuntimeIds = new Set()
     this.downstreamEntitySpawnCache = new Map()
     this.downstreamEntityUniqueToRuntime = new Map()
@@ -3273,6 +3404,9 @@ class ViaBedrockRelayPlayer extends Player {
     this.bridgeItemNameByNetworkId = new Map()
     this.bridgeNetworkIdByItemName = new Map()
     this.pendingBridgeToRealmItemStackRequests = new Map()
+    this.pendingCraftingDrainRequestIds = new Set()
+    this.deferredCraftingContainerClose = null
+    this.craftingContainerCloseTimer = null
     this.pendingBridgeSyntheticItemStackPlaces = new Map()
     this.pendingBridgeCursorDependentTakeRequests = new Map()
     this.pendingBridgeAuthInputItemStackRequests = []
@@ -3329,6 +3463,17 @@ class ViaBedrockRelayPlayer extends Player {
 
   recordPacketCensusError (event = {}, error) {
     this.server.packetCensus?.recordError(event, error)
+  }
+
+  recordLosslessNativePacket (direction, packet, context) {
+    if (!this.isNativeBedrockRecorderDownstream() || !Buffer.isBuffer(packet)) return
+    this.server?.packetCensus?.recordRawPacket({
+      direction,
+      context,
+      source_version: direction === 'realm_to_native_bedrock' ? this.upstreamVersionForCensus() : this.downstreamVersionForCensus(),
+      target_version: direction === 'realm_to_native_bedrock' ? this.downstreamVersionForCensus() : this.upstreamVersionForCensus(),
+      raw: packet
+    })
   }
 
   recordRealmToBridge (name, params, phase = 'received', extra = {}) {
@@ -3647,6 +3792,12 @@ class ViaBedrockRelayPlayer extends Player {
 
   rememberBridgeToRealmItemStackRequest (name, params, context = 'live') {
     if (name !== 'item_stack_request') return
+    if (!(this.pendingCraftingDrainRequestIds instanceof Set)) {
+      this.pendingCraftingDrainRequestIds = new Set()
+    }
+    for (const requestId of bridgeCraftingDrainRequestIds(params)) {
+      this.pendingCraftingDrainRequestIds.add(String(requestId))
+    }
     for (const request of bridgeItemStackRequestEntries(params)) {
       const requestId = bridgeRequestIdForItemStackEntry(request)
       if (requestId == null) continue
@@ -3663,6 +3814,101 @@ class ViaBedrockRelayPlayer extends Player {
       if (oldest == null) break
       this.pendingBridgeToRealmItemStackRequests.delete(oldest)
     }
+  }
+
+  craftingContainerCloseAckTimeoutMs () {
+    return Math.max(250, numberOrDefault(process.env.NETHERNET_RELAY_CRAFTING_CLOSE_ACK_TIMEOUT_MS, 1500))
+  }
+
+  deferCraftingContainerCloseUntilDrainAck (params = {}, context = 'live') {
+    if (!(this.pendingCraftingDrainRequestIds instanceof Set) || this.pendingCraftingDrainRequestIds.size === 0) return false
+    if (String(context).startsWith('crafting_close_after_drain_')) return false
+
+    this.deferredCraftingContainerClose = {
+      params: clonePacketForCensusDiagnostic(params),
+      context,
+      hadRejectedRequest: false,
+      pendingAtClose: Array.from(this.pendingCraftingDrainRequestIds)
+    }
+    if (this.craftingContainerCloseTimer) clearTimeout(this.craftingContainerCloseTimer)
+    const timeoutMs = this.craftingContainerCloseAckTimeoutMs()
+    this.craftingContainerCloseTimer = setTimeout(() => {
+      this.craftingContainerCloseTimer = null
+      this.flushDeferredCraftingContainerClose('drain_ack_timeout', true)
+    }, timeoutMs)
+    this.craftingContainerCloseTimer.unref?.()
+
+    this.recordBridgeToRealm('container_close', params, 'deferred', {
+      context: `${context}:waiting_for_crafting_drain`,
+      translation_status: 'deferred_until_crafting_grid_return_ack',
+      diagnostic: {
+        requestIds: this.deferredCraftingContainerClose.pendingAtClose,
+        timeoutMs
+      }
+    })
+    console.log(`[bedrock-relay] Holding container_close until ${this.pendingCraftingDrainRequestIds.size} crafting-grid return request(s) are acknowledged.`)
+    return true
+  }
+
+  resolveCraftingDrainResponses (params = {}, context = 'live') {
+    if (!(this.pendingCraftingDrainRequestIds instanceof Set) || this.pendingCraftingDrainRequestIds.size === 0) return
+
+    let matched = 0
+    for (const response of bridgeItemStackResponseEntries(params)) {
+      const requestId = bridgeRequestIdForItemStackEntry(response)
+      if (requestId == null) continue
+      const key = String(requestId)
+      if (!this.pendingCraftingDrainRequestIds.delete(key)) continue
+      matched++
+      if (this.deferredCraftingContainerClose &&
+          bridgeItemStackResponseIsRejected(bridgeItemStackResponseStatus(response))) {
+        this.deferredCraftingContainerClose.hadRejectedRequest = true
+      }
+    }
+
+    if (matched > 0 && this.deferredCraftingContainerClose && this.pendingCraftingDrainRequestIds.size === 0) {
+      setImmediate(() => this.flushDeferredCraftingContainerClose(
+        this.deferredCraftingContainerClose?.hadRejectedRequest ? 'drain_response_rejected' : 'drain_acknowledged',
+        Boolean(this.deferredCraftingContainerClose?.hadRejectedRequest)
+      ))
+    }
+  }
+
+  flushDeferredCraftingContainerClose (reason = 'drain_acknowledged', force = false) {
+    const deferred = this.deferredCraftingContainerClose
+    if (!deferred) return false
+    if (!force && this.pendingCraftingDrainRequestIds instanceof Set && this.pendingCraftingDrainRequestIds.size > 0) return false
+
+    this.deferredCraftingContainerClose = null
+    if (this.craftingContainerCloseTimer) {
+      clearTimeout(this.craftingContainerCloseTimer)
+      this.craftingContainerCloseTimer = null
+    }
+    if (force && this.pendingCraftingDrainRequestIds instanceof Set) {
+      this.pendingCraftingDrainRequestIds.clear()
+    }
+
+    this.recordBridgeToRealm('container_close', deferred.params, 'resumed', {
+      context: `${deferred.context || 'live'}:${reason}`,
+      translation_status: reason === 'drain_acknowledged'
+        ? 'resumed_after_crafting_grid_return_ack'
+        : 'resumed_after_crafting_grid_return_fallback',
+      diagnostic: {
+        requestIds: deferred.pendingAtClose,
+        hadRejectedRequest: deferred.hadRejectedRequest
+      }
+    })
+    if (deferred.hadRejectedRequest || force) {
+      console.warn(`[bedrock-relay] Sending deferred container_close after ${reason}; an authoritative inventory replay will repair any rejected close-return prediction.`)
+      this.scheduleAuthoritativeInventoryReplay(`crafting_close:${reason}`, 10)
+    } else {
+      console.log('[bedrock-relay] Crafting-grid returns were accepted; sending deferred container_close.')
+    }
+    return this.relayServerboundToUpstream(
+      'container_close',
+      deferred.params,
+      `crafting_close_after_drain_${reason}`
+    )
   }
 
   queueSyntheticItemStackRequestForNextAuthInput (params = {}, context = 'live') {
@@ -3882,6 +4128,99 @@ class ViaBedrockRelayPlayer extends Player {
     return numberOrDefault(process.env.NETHERNET_RELAY_TERRAIN_SPAWN_DELAY_MS, 0)
   }
 
+  spawnSupportTerrainEnabled () {
+    if (!this.usesViaBedrockDownstream()) return false
+    return String(process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TERRAIN || 'true').trim().toLowerCase() !== 'false'
+  }
+
+  spawnSupportTerrainTimeoutMs () {
+    return Math.max(100, numberOrDefault(process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TIMEOUT_MS, 500))
+  }
+
+  delayLocalPlayerSpawnUntilSupportTerrain (name, params = {}, context = 'live') {
+    if (name !== 'play_status' || params.status !== 'player_spawn') return false
+    if (String(context).startsWith('spawn_support_')) return false
+    if (!this.spawnSupportTerrainEnabled() || this.spawnSupportTerrainAttempted || this.pendingLocalPlayerSpawnSupport) return false
+
+    const startGameData = this.upstream?.startGameData
+    const partialOrigin = this.latestSyntheticSubchunkOrigin
+    const supportRequest = buildSpawnSupportSubchunkRequest(startGameData, partialOrigin)
+    if (!supportRequest || !partialOrigin) return false
+
+    const partialDistance = Math.max(
+      Math.abs(Number(partialOrigin.x) - supportRequest.origin.x),
+      Math.abs(Number(partialOrigin.z) - supportRequest.origin.z)
+    )
+    if (!Number.isFinite(partialDistance) || partialDistance > 2) return false
+
+    this.spawnSupportTerrainAttempted = true
+    this.pendingLocalPlayerSpawnSupport = {
+      name,
+      params,
+      context,
+      origin: supportRequest.origin
+    }
+    this.recordBridgeToViaBedrock(name, params, 'delayed', {
+      context,
+      translation_status: 'delayed_until_spawn_support_subchunks',
+      diagnostic: {
+        origin: supportRequest.origin,
+        requestCount: supportRequest.requests.length
+      }
+    })
+
+    const sent = this.relayServerboundToUpstream(
+      'subchunk_request',
+      supportRequest,
+      'spawn_support_prewarm'
+    )
+    if (!sent) {
+      this.pendingLocalPlayerSpawnSupport = null
+      return false
+    }
+
+    const timeoutMs = this.spawnSupportTerrainTimeoutMs()
+    this.localPlayerSpawnSupportTimer = setTimeout(() => {
+      this.localPlayerSpawnSupportTimer = null
+      this.releaseLocalPlayerSpawnAfterSupport('spawn_support_timeout', false)
+    }, timeoutMs)
+    this.localPlayerSpawnSupportTimer.unref?.()
+    console.log(`[bedrock-relay] Requested ${supportRequest.requests.length} spawn-support subchunks around (${supportRequest.origin.x},${supportRequest.origin.z}); holding player_spawn for at most ${timeoutMs}ms.`)
+    return true
+  }
+
+  releaseLocalPlayerSpawnAfterSupport (reason, supportPacketFollows) {
+    const pending = this.pendingLocalPlayerSpawnSupport
+    if (!pending) return false
+    this.pendingLocalPlayerSpawnSupport = null
+    if (this.localPlayerSpawnSupportTimer) {
+      clearTimeout(this.localPlayerSpawnSupportTimer)
+      this.localPlayerSpawnSupportTimer = null
+    }
+    this.awaitingSpawnSupportPacketForPlayReady = Boolean(supportPacketFollows)
+    console.log(`[bedrock-relay] Releasing local player_spawn (${reason}); supportPacketFollows=${Boolean(supportPacketFollows)}.`)
+    return this.queueClientbound(
+      pending.name,
+      pending.params,
+      `spawn_support_release:${reason}:${pending.context || 'live'}`
+    )
+  }
+
+  releaseLocalPlayerSpawnForSubchunkResponse (params = {}) {
+    const pending = this.pendingLocalPlayerSpawnSupport
+    if (!pending) return false
+    const origin = firstNonNull(params.origin, params.subchunk_origin, params.subchunkOrigin)
+    if (!origin || !subchunkOriginsMatch(origin, pending.origin)) return false
+    return this.releaseLocalPlayerSpawnAfterSupport('support_subchunk_response', true)
+  }
+
+  finishSpawnSupportPlayGate () {
+    if (!this.awaitingSpawnSupportPacketForPlayReady) return false
+    this.awaitingSpawnSupportPacketForPlayReady = false
+    this.markDownstreamPlayReady('spawn support subchunk forwarded')
+    return true
+  }
+
   startGameChunkFlushDelayMs () {
     return Math.max(0, numberOrDefault(process.env.NETHERNET_RELAY_START_GAME_CHUNK_FLUSH_MS, 500))
   }
@@ -3916,6 +4255,7 @@ class ViaBedrockRelayPlayer extends Player {
   shouldPrewarmLocalPlayerSpawn (name, params = {}, context = '') {
     if (name !== 'play_status' || params.status !== 'player_spawn') return false
     if (String(context).startsWith('terrain_spawn_prewarm')) return false
+    if (String(context).startsWith('spawn_support_')) return false
     return this.localPlayerSpawnPrewarmDelayMs() > 0
   }
 
@@ -4366,42 +4706,80 @@ class ViaBedrockRelayPlayer extends Player {
     }
   }
 
+  queueSyntheticPlayerInventorySlot (packet, context, translationStatus) {
+    this.recordBridgeToViaBedrock('inventory_slot', packet, 'synthetic', {
+      context,
+      translation_status: `synthetic_${translationStatus}`
+    })
+    try {
+      this.queue('inventory_slot', packet)
+      this.recordBridgeToViaBedrock('inventory_slot', packet, 'sent', {
+        context,
+        translation_status: `sent_synthetic_${translationStatus}`
+      })
+      return true
+    } catch (error) {
+      this.recordPacketCensusError({
+        lane: 'bridge_to_viabedrock',
+        direction: 'bridge_to_viabedrock',
+        source_version: this.upstreamVersionForCensus(),
+        target_version: this.downstreamVersionForCensus(),
+        name: 'inventory_slot',
+        params: packet,
+        context,
+        phase: 'failed',
+        translation_status: `synthetic_${translationStatus}_failed`
+      }, error)
+      console.warn(`[bedrock-relay] Failed to send synthetic player inventory slot update during ${context}: ${error.message || error}`)
+      return false
+    }
+  }
+
   applyClientboundInventoryTransactionToAuthoritativeCache (name, params = {}, context = 'live') {
     if (name !== 'inventory_transaction') return 0
-    const transaction = params.transaction || {}
-    if (String(transaction.transaction_type || '').toLowerCase() !== 'normal') return 0
-    const actions = Array.isArray(transaction.actions) ? transaction.actions : []
+    const deltas = playerInventorySlotDeltasFromTransaction(params, ['normal'], {
+      localBedrockVersion: this.downstreamVersionForCensus()
+    })
     let applied = 0
 
-    for (const action of actions) {
-      const explicitWindowId = firstNonNull(
-        action.window_id,
-        action.windowId,
-        action.inventory_id,
-        action.inventoryId,
-        action.container_id,
-        action.containerId
+    for (const { packet } of deltas) {
+      bridgeTrackClientboundInventoryStacks(this, 'inventory_slot', packet)
+      this.rememberAuthoritativeInventoryPacket('inventory_slot', packet, `clientbound_inventory_transaction:${context}`)
+      this.queueSyntheticPlayerInventorySlot(
+        packet,
+        `clientbound_inventory_transaction_slot:${context}`,
+        'authoritative_inventory_transaction_slot'
       )
-      const sourceType = String(firstNonNull(action.source_type, action.sourceType, '') || '').toLowerCase()
-      const windowId = explicitWindowId != null
-        ? explicitWindowId
-        : (sourceType === 'container' ? 0 : null)
-      const slot = numberOrDefault(firstNonNull(action.slot, action.slot_id, action.slotId), -1)
-      if (windowId == null || slot < 0) continue
-
-      const item = action.new_item || action.newItem || action.to_item || action.toItem || action.to || emptyItemForLocalViaBedrock()
-      const normalized = normalizeClientboundForLocalViaBedrock('inventory_slot', {
-        window_id: windowId,
-        slot,
-        item
-      })
-
-      bridgeTrackClientboundInventoryStacks(this, 'inventory_slot', normalized)
-      this.rememberAuthoritativeInventoryPacket('inventory_slot', normalized, `clientbound_inventory_transaction:${context}`)
       applied++
     }
 
     return applied
+  }
+
+  predictServerboundItemUseInventoryDeltas (name, params = {}, context = 'live') {
+    if (name !== 'inventory_transaction') return 0
+    const transaction = params.transaction || {}
+    const transactionData = transaction.transaction_data || transaction.data || {}
+    if (String(transaction.transaction_type || '').toLowerCase() !== 'item_use') return 0
+    if (String(transactionData.action_type || transactionData.actionType || '').toLowerCase() !== 'click_block') return 0
+
+    const deltas = playerInventorySlotDeltasFromTransaction(params, ['item_use'], {
+      localBedrockVersion: this.downstreamVersionForCensus()
+    })
+    let sent = 0
+    for (const { action, packet } of deltas) {
+      const oldItem = action.old_item || action.oldItem || action.from || {}
+      const newItem = action.new_item || action.newItem || action.to || {}
+      if (bridgeItemCount(newItem) >= bridgeItemCount(oldItem)) continue
+
+      bridgeTrackClientboundInventoryStacks(this, 'inventory_slot', packet)
+      if (this.queueSyntheticPlayerInventorySlot(
+        packet,
+        `serverbound_item_use_prediction:${context}`,
+        'serverbound_item_use_inventory_prediction'
+      )) sent++
+    }
+    return sent
   }
 
   scheduleAuthoritativeInventoryReplay (reason, delayMs = 75) {
@@ -4824,9 +5202,9 @@ class ViaBedrockRelayPlayer extends Player {
     }
   }
 
-  nativeBedrockServerboundCaptureExtra (name, params, packet) {
+  serverboundRawActionCaptureExtra (name, params, packet) {
     if (name === 'mob_equipment' && params?.item) this.nativeRecorderSelectedItem = params.item
-    const diagnostic = nativeBedrockRawActionDiagnostic(name, params, packet, this.nativeRecorderSelectedItem)
+    const diagnostic = serverboundRawActionDiagnostic(name, params, packet, this.nativeRecorderSelectedItem)
     if (diagnostic?.decoded_packet_suspect && !this.warnedNativeRecorderDecodeMismatch) {
       this.warnedNativeRecorderDecodeMismatch = true
       console.warn(`[bedrock-recorder] Native ${name} decoded fields disagree with the selected hotbar item; preserving exact raw packet bytes in the capture instead of trusting the decoded item shape.`)
@@ -4834,7 +5212,15 @@ class ViaBedrockRelayPlayer extends Player {
     return diagnostic ? { diagnostic } : {}
   }
 
+  nativeBedrockServerboundCaptureExtra (name, params, packet) {
+    return this.serverboundRawActionCaptureExtra(name, params, packet)
+  }
+
   queueClientbound (name, params, context = 'live') {
+    if (this.delayLocalPlayerSpawnUntilSupportTerrain(name, params, context)) {
+      return true
+    }
+
     if (this.shouldPrewarmLocalPlayerSpawn(name, params, context)) {
       return this.delayLocalPlayerSpawnUntilTerrainPrewarm(name, params, context)
     }
@@ -4872,7 +5258,7 @@ class ViaBedrockRelayPlayer extends Player {
         }
       })
       this.scheduleAuthoritativeInventoryReplay(reason, 10)
-      console.warn(`[bedrock-relay] Dropping Realm -> ViaBedrock inventory_transaction during ${context}; applied ${appliedInventoryDeltas} authoritative slot delta(s) to the replay cache first. Local ViaBedrock cannot decode this 1.26.30 source-type shape: ${safeStringify(inventoryTransactionDrop, 0)}`)
+      console.warn(`[bedrock-relay] Dropping Realm -> ViaBedrock inventory_transaction during ${context}; forwarded ${appliedInventoryDeltas} player slot delta(s) directly and kept the replay cache as backup. Local ViaBedrock cannot decode this 1.26.30 source-type shape: ${safeStringify(inventoryTransactionDrop, 0)}`)
       return false
     }
 
@@ -4917,7 +5303,9 @@ class ViaBedrockRelayPlayer extends Player {
       this.updateCachedEntitySnapshotFromClientboundPacket(name, translated)
       if (name === 'start_game') this.flushStartGameChunkCache(`start_game_sent:${context}`)
       if (this.usesViaBedrockDownstream() && name === 'play_status' && firstNonEmpty(translated?.status, params?.status) === 'player_spawn') {
-        this.markDownstreamPlayReady(`sent play_status.player_spawn:${context}`)
+        if (!this.awaitingSpawnSupportPacketForPlayReady) {
+          this.markDownstreamPlayReady(`sent play_status.player_spawn:${context}`)
+        }
       }
       return true
     } catch (error) {
@@ -5037,19 +5425,30 @@ class ViaBedrockRelayPlayer extends Player {
 
   exportCraftingDataForPatchedViaBedrock (name, params = {}) {
     if (!this.usesViaBedrockDownstream()) return
-    if (name !== 'crafting_data') return
+    if (name !== 'crafting_data' && name !== 'unlocked_recipes') return
     const projectRootPath = path.resolve(__dirname, '..')
     const runDir = this.server.bridgeConfig?.javaLan?.viaProxyRunDir || path.join(projectRootPath, 'viaproxy-run')
     try {
+      if (name === 'unlocked_recipes') {
+        const result = applyBridgeUnlockedRecipesForViaProxy(projectRootPath, runDir, params)
+        if (result.written) {
+          console.log(`[bedrock-relay] Applied Bedrock ${result.unlockType} recipe-book update (${result.unlockedRecipeCount} unlocked recipe id(s))`)
+        }
+        return
+      }
+
       const result = writeBridgeCraftingRecipesForViaProxy(projectRootPath, runDir, params)
       if (result.written) {
         console.log(`[bedrock-relay] Exported ${result.recipeCount} live Bedrock crafting_table 2x2 recipe(s) for ViaBedrock: ${result.targets[0]}`)
+      }
+      if (result.recipeBookCount) {
+        console.log(`[bedrock-relay] Exported ${result.recipeBookCount} Bedrock crafting recipe display(s) for the Java recipe book: ${result.recipeBookTargets[0]}`)
       }
       if (result.stationRecipeCount) {
         console.log(`[bedrock-relay] Preserved ${result.stationRecipeCount} non-crafting-table station recipe(s) for future smelting/workstation support: ${result.stationTargets[0]}`)
       }
     } catch (err) {
-      console.warn(`[bedrock-relay] Failed to export live Bedrock 2x2 crafting recipes for ViaBedrock: ${err.message}`)
+      console.warn(`[bedrock-relay] Failed to export live Bedrock recipe data for ViaBedrock: ${err.message}`)
     }
   }
 
@@ -5157,6 +5556,10 @@ class ViaBedrockRelayPlayer extends Player {
     }
 
     this.rememberServerboundTerrainRequest(name)
+
+    if (name === 'container_close' && this.deferCraftingContainerCloseUntilDrainAck(params, context)) {
+      return true
+    }
 
     const equipmentDropDiagnosis = serverboundMobEquipmentDropDiagnosis(this, name, params)
     if (equipmentDropDiagnosis) {
@@ -5332,6 +5735,7 @@ class ViaBedrockRelayPlayer extends Player {
       } else {
         this.rememberBridgeToRealmItemStackRequest(name, translated, context)
       }
+      this.predictServerboundItemUseInventoryDeltas(name, translated, context)
       if (isServerboundRespawnAction(name, translated)) {
         this.markDownstreamEntityTrackerReset('serverbound respawn action')
       }
@@ -5370,6 +5774,7 @@ class ViaBedrockRelayPlayer extends Player {
   }
 
   readUpstream (packet) {
+    this.recordLosslessNativePacket('realm_to_native_bedrock', packet, this.startRelaying ? 'live' : 'queued_until_downstream_ready')
     if (!this.startRelaying) {
       this.upInLog('Client not ready, queueing packet until join')
       this.downQ.push(packet)
@@ -5390,7 +5795,10 @@ class ViaBedrockRelayPlayer extends Player {
     this.recordRealmToBridge(name, params, 'received', { context: 'live', bytes: Buffer.isBuffer(packet) ? packet.length : undefined })
     if (name === 'container_open') this.markRealmInventoryScreenOpen(params, 'live')
     if (name === 'container_close') this.markRealmInventoryScreenClosed(params, 'live')
-    if (name === 'item_stack_response') this.recordRejectedItemStackRequestDiagnostics(params, 'live')
+    if (name === 'item_stack_response') {
+      this.resolveCraftingDrainResponses(params, 'live')
+      this.recordRejectedItemStackRequestDiagnostics(params, 'live')
+    }
     this.upstreamState?.recordPacket?.(name, params)
     this.upInLog('->', name, params)
     this.exportCraftingDataForPatchedViaBedrock(name, params)
@@ -5414,7 +5822,11 @@ class ViaBedrockRelayPlayer extends Player {
         return
       }
 
+      const releasedSpawnForSupport = name === 'subchunk'
+        ? this.releaseLocalPlayerSpawnForSubchunkResponse(params)
+        : false
       this.queueClientbound(name, params, 'live')
+      if (releasedSpawnForSupport) this.finishSpawnSupportPlayGate()
     }
 
     if (this.chunkSendCache.length > 0 && this.sentStartGame) this.flushStartGameChunkCache('read_upstream')
@@ -5432,6 +5844,10 @@ class ViaBedrockRelayPlayer extends Player {
         continue
       }
       this.recordRealmToBridge(des.data.name, des.data.params, 'received', { context: 'downstream_queue_flush', bytes: Buffer.isBuffer(packet) ? packet.length : undefined })
+      if (des.data.name === 'item_stack_response') {
+        this.resolveCraftingDrainResponses(des.data.params, 'downstream_queue_flush')
+        this.recordRejectedItemStackRequestDiagnostics(des.data.params, 'downstream_queue_flush')
+      }
       this.upstreamState?.recordPacket?.(des.data.name, des.data.params)
       this.exportCraftingDataForPatchedViaBedrock(des.data.name, des.data.params)
       this.mirrorUpstreamClientStateFromPacket(des.data.name, des.data.params)
@@ -5445,7 +5861,11 @@ class ViaBedrockRelayPlayer extends Player {
         }
         continue
       }
+      const releasedSpawnForSupport = des.data.name === 'subchunk'
+        ? this.releaseLocalPlayerSpawnForSubchunkResponse(des.data.params)
+        : false
       this.queueClientbound(des.data.name, des.data.params, 'downstream_queue_flush')
+      if (releasedSpawnForSupport) this.finishSpawnSupportPlayGate()
     }
     this.downQ = []
   }
@@ -5463,9 +5883,7 @@ class ViaBedrockRelayPlayer extends Player {
       this.recordViaBedrockToBridge(des.data.name, des.data.params, 'received', {
         context: 'upstream_queue_flush',
         bytes: Buffer.isBuffer(packet) ? packet.length : undefined,
-        ...(this.isNativeBedrockRecorderDownstream()
-          ? this.nativeBedrockServerboundCaptureExtra(des.data.name, des.data.params, packet)
-          : {})
+        ...this.serverboundRawActionCaptureExtra(des.data.name, des.data.params, packet)
       })
       if (this.isNativeBedrockRecorderDownstream()) {
         this.relayNativeBedrockServerboundRaw(packet, des, 'upstream_queue_flush')
@@ -5480,6 +5898,9 @@ class ViaBedrockRelayPlayer extends Player {
 
   readPacket (packet) {
     if (this.startRelaying) {
+      // Authentication/login packets are local to the recorder endpoint and can
+      // contain credentials. Journal only packets entering the gameplay relay.
+      this.recordLosslessNativePacket('native_bedrock_to_realm', packet, 'live')
       if (!this.upstream) {
         let des
         try {
@@ -5488,7 +5909,11 @@ class ViaBedrockRelayPlayer extends Player {
           this.recordDownstreamParseFailure(packet, 'queued_until_upstream', e)
           return
         }
-        this.recordViaBedrockToBridge(des.data.name, des.data.params, 'received', { context: 'queued_until_upstream', bytes: Buffer.isBuffer(packet) ? packet.length : undefined })
+        this.recordViaBedrockToBridge(des.data.name, des.data.params, 'received', {
+          context: 'queued_until_upstream',
+          bytes: Buffer.isBuffer(packet) ? packet.length : undefined,
+          ...this.serverboundRawActionCaptureExtra(des.data.name, des.data.params, packet)
+        })
         this.downInLog('Got downstream connected packet but upstream is not connected yet, added to q', des)
         this.upQ.push(packet)
         return
@@ -5507,9 +5932,7 @@ class ViaBedrockRelayPlayer extends Player {
       this.recordViaBedrockToBridge(des.data.name, des.data.params, 'received', {
         context: 'live',
         bytes: Buffer.isBuffer(packet) ? packet.length : undefined,
-        ...(this.isNativeBedrockRecorderDownstream()
-          ? this.nativeBedrockServerboundCaptureExtra(des.data.name, des.data.params, packet)
-          : {})
+        ...this.serverboundRawActionCaptureExtra(des.data.name, des.data.params, packet)
       })
       if (this.isNativeBedrockRecorderDownstream()) {
         this.emit('serverbound', des.data, des)
@@ -5570,12 +5993,23 @@ class ViaBedrockRelayPlayer extends Player {
       clearTimeout(this.syntheticSubchunkRequestTimer)
       this.syntheticSubchunkRequestTimer = null
     }
+    if (this.localPlayerSpawnSupportTimer) {
+      clearTimeout(this.localPlayerSpawnSupportTimer)
+      this.localPlayerSpawnSupportTimer = null
+    }
+    if (this.craftingContainerCloseTimer) {
+      clearTimeout(this.craftingContainerCloseTimer)
+      this.craftingContainerCloseTimer = null
+    }
     if (this.authoritativeInventoryReplayTimer) {
       clearTimeout(this.authoritativeInventoryReplayTimer)
       this.authoritativeInventoryReplayTimer = null
     }
     this.clearLocalInventoryScreenShimTimers()
     this.delayedClientboundPlayPackets = []
+    this.pendingLocalPlayerSpawnSupport = null
+    this.deferredCraftingContainerClose = null
+    this.pendingCraftingDrainRequestIds?.clear?.()
     this.upstream?.close(reason)
     super.close(reason)
   }
@@ -5587,14 +6021,17 @@ class NetherNetRealmRelay extends Relay {
     this.bridgeConfig = options.bridgeConfig
     this.realmInfo = options.realmInfo
     this.runtimeStatus = options.runtimeStatus
+    this.downstreamMode = normalizeDownstreamMode(options.downstreamMode || options.bridgeConfig?.bedrockRelay?.downstreamMode)
     this.upstreamStates = new Map()
     this.packetCensus = createPacketCensusFromConfig(
       this.bridgeConfig || options.bridgeConfig || {},
-      options.packetCensusOptions || {}
+      {
+        rawJournalEnabled: isNativeBedrockRecorderMode(this.downstreamMode),
+        ...(options.packetCensusOptions || {})
+      }
     )
     this.debugBridgeRelay = process.env.DEBUG_NETHERNET_RELAY === 'true'
     this.downstreamBedrockVersion = options.version || options.bridgeConfig?.bedrockRelay?.version || '1.26.30'
-    this.downstreamMode = normalizeDownstreamMode(options.downstreamMode || options.bridgeConfig?.bedrockRelay?.downstreamMode)
     this.realmInfoPrefetchPromise = null
     this.prefetchedRealmInfo = null
   }
@@ -5969,6 +6406,9 @@ module.exports = {
   bridgeModernItemStackRequestsForLegacyInventoryTransaction,
   bridgeAliasedItemStackRequestParams,
   bridgeSanitizedItemStackRequestParams,
+  bridgeCraftingDrainRequestIds,
+  buildSpawnSupportSubchunkRequest,
+  subchunkOriginsMatch,
   bridgeItemStackRequestTouchesOwnInventoryScreen,
   bridgeItemStackRequestSourcePreflightDropDiagnosis,
   serverboundMobEquipmentDropDiagnosis,

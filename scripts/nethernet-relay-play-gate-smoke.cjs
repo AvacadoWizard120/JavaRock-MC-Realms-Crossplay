@@ -3,6 +3,7 @@
 const assert = require('assert')
 const {
   ViaBedrockRelayPlayer,
+  buildSpawnSupportSubchunkRequest,
   isClientboundDelayedUntilDownstreamPlay,
   isClientboundTransientBeforeDownstreamPlay,
   normalizeClientboundForLocalViaBedrock
@@ -82,6 +83,10 @@ function makeOutboundRelay (downstreamMode = 'viabedrock') {
   relay.syntheticChunkRadiusRequested = false
   relay.syntheticSubchunkRequested = false
   relay.latestSyntheticSubchunkOrigin = null
+  relay.spawnSupportTerrainAttempted = false
+  relay.pendingLocalPlayerSpawnSupport = null
+  relay.localPlayerSpawnSupportTimer = null
+  relay.awaitingSpawnSupportPacketForPlayReady = false
   relay.downstreamKnownEntityRuntimeIds = new Set()
   relay.downstreamEntitySpawnCache = new Map()
   relay.downstreamEntityUniqueToRuntime = new Map()
@@ -98,6 +103,48 @@ function makeOutboundRelay (downstreamMode = 'viabedrock') {
   relay.scheduleLocalInventoryScreenShim = (reason, delayMs) => shimRequests.push({ reason, delayMs })
   relay.queue = (name, params) => sentPackets.push({ name, params })
   return { relay, sentPackets, shimRequests }
+}
+
+{
+  const request = buildSpawnSupportSubchunkRequest({
+    player_position: { x: 86.03, y: 65.62, z: 673.27 }
+  }, { x: 5, y: 0, z: 42, dimension: 0 })
+  assert.deepStrictEqual(request.origin, { x: 5, y: 0, z: 42 })
+  assert.strictEqual(request.requests.length, 27)
+  assert.deepStrictEqual(request.requests[0], { x: 0, y: 4, z: 0 })
+  assert(request.requests.some(entry => entry.x === 0 && entry.y === 3 && entry.z === 0))
+  assert(request.requests.some(entry => entry.x === 0 && entry.y === 5 && entry.z === 0))
+}
+
+{
+  const { relay, sentPackets, shimRequests } = makeOutboundRelay()
+  const realmRequests = []
+  relay.upstream = {
+    startGameData: { player_position: { x: 86.03, y: 65.62, z: 673.27 } }
+  }
+  relay.latestSyntheticSubchunkOrigin = { x: 5, y: 0, z: 42, dimension: 0 }
+  relay.relayServerboundToUpstream = (name, params, context) => {
+    realmRequests.push({ name, params, context })
+    return true
+  }
+
+  assert.strictEqual(relay.queueClientbound('play_status', { status: 'player_spawn' }, 'spawn-support-smoke'), true)
+  assert.deepStrictEqual(sentPackets, [])
+  assert.strictEqual(realmRequests.length, 1)
+  assert.strictEqual(realmRequests[0].name, 'subchunk_request')
+  assert.strictEqual(realmRequests[0].params.requests.length, 27)
+
+  assert.strictEqual(relay.releaseLocalPlayerSpawnForSubchunkResponse({
+    origin: { x: 5, y: 0, z: 42 },
+    entries: []
+  }), true)
+  assert.deepStrictEqual(sentPackets.map(packet => packet.name), ['play_status'])
+  assert.strictEqual(relay.downstreamPlayReady, false)
+  relay.queueClientbound('subchunk', { origin: { x: 5, y: 0, z: 42 }, entries: [] }, 'spawn-support-smoke')
+  assert.strictEqual(relay.finishSpawnSupportPlayGate(), true)
+  assert.deepStrictEqual(sentPackets.map(packet => packet.name), ['play_status', 'subchunk'])
+  assert.strictEqual(relay.downstreamPlayReady, true)
+  assert.deepStrictEqual(shimRequests, [{ reason: 'play_ready:spawn support subchunk forwarded', delayMs: 25 }])
 }
 
 {

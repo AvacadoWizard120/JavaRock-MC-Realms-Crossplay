@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import ctypes
 from pathlib import Path
 
 try:
@@ -137,17 +138,34 @@ def profile_has_auth_cache(profile: dict | None) -> bool:
 def process_alive(pid: int | None) -> bool:
     if not pid:
         return False
-    try:
-        subprocess.run(
-            ["powershell.exe", "-NoLogo", "-NoProfile", "-Command", f"Get-Process -Id {int(pid)} -ErrorAction Stop | Out-Null"],
-            cwd=PROJECT_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3,
-            check=True,
+    if os.name == "nt":
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel32.GetExitCodeProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        handle = kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            int(pid),
         )
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(int(pid), 0)
         return True
-    except Exception:
+    except (OSError, ValueError):
         return False
 
 
@@ -176,7 +194,9 @@ class BridgeDesktopGui:
             self.style.theme_use("clam")
         preferences = read_json(GUI_PREFERENCES_FILE)
 
-        self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=5000)
+        self.dropped_log_lines = 0
+        self.log_drop_lock = threading.Lock()
         self.bridge_process: subprocess.Popen | None = None
         self.realms: list[dict] = []
         self.auth_profiles: list[dict] = []
@@ -401,21 +421,40 @@ class BridgeDesktopGui:
                 )
 
     def append_log(self, source: str, text: str) -> None:
+        self.append_log_batch([(source, text)])
+
+    def append_log_batch(self, entries: list[tuple[str, str]]) -> None:
+        if not entries:
+            return
         timestamp = time.strftime("%H:%M:%S")
-        self.log_text.insert("end", f"[{timestamp}] [{source}] {text.rstrip()}\n")
+        rendered = "".join(f"[{timestamp}] [{source}] {text.rstrip()}\n" for source, text in entries)
+        self.log_text.insert("end", rendered)
+        line_count = int(self.log_text.index("end-1c").split(".")[0])
+        if line_count > 5000:
+            self.log_text.delete("1.0", f"{line_count - 4500}.0")
         self.log_text.see("end")
 
     def queue_log(self, source: str, text: str) -> None:
-        self.log_queue.put((source, text))
+        try:
+            self.log_queue.put_nowait((source, text))
+        except queue.Full:
+            with self.log_drop_lock:
+                self.dropped_log_lines += 1
 
     def drain_log_queue(self) -> None:
-        while True:
+        entries: list[tuple[str, str]] = []
+        for _ in range(300):
             try:
-                source, text = self.log_queue.get_nowait()
+                entries.append(self.log_queue.get_nowait())
             except queue.Empty:
                 break
-            self.append_log(source, text)
-        self.root.after(250, self.drain_log_queue)
+        with self.log_drop_lock:
+            dropped = self.dropped_log_lines
+            self.dropped_log_lines = 0
+        if dropped:
+            entries.append(("gui", f"Skipped {dropped} repetitive log line(s) to keep the window responsive."))
+        self.append_log_batch(entries)
+        self.root.after(25 if not self.log_queue.empty() else 150, self.drain_log_queue)
 
     def profile_label(self, profile: dict) -> str:
         name = str(profile.get("name") or profile.get("id") or "account")

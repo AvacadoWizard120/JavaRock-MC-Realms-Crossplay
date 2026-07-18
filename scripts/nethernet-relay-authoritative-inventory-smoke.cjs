@@ -1,8 +1,12 @@
 'use strict'
 
+require('../src/preferVendoredProtocol').installVendoredProtocolPath()
+
 const assert = require('assert')
+const { createSerializer } = require('bedrock-protocol/src/transforms/serializer')
 const {
   ViaBedrockRelayPlayer,
+  bridgeCraftingDrainRequestIds,
   bridgeTrackClientboundInventoryStacks,
   bridgeItemStackRequestSourcePreflightDropDiagnosis,
   bridgeSanitizedItemStackRequestParams,
@@ -13,6 +17,52 @@ const {
   normalizeItemForLocalViaBedrock,
   normalizeClientboundEntityNoiseForLocalViaBedrock
 } = require('../src/nethernetBedrockRelay')
+
+const inventorySerializer = createSerializer('1.26.30')
+
+{
+  const drain = {
+    requests: [{
+      request_id: -133,
+      actions: [{
+        type_id: 'place',
+        count: 3,
+        source: { slot_type: { container_id: 'crafting_input' }, slot: 32, stack_id: 88 },
+        destination: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 13, stack_id: 73 }
+      }]
+    }]
+  }
+  assert.deepStrictEqual(bridgeCraftingDrainRequestIds(drain), [-133])
+
+  const relay = Object.create(ViaBedrockRelayPlayer.prototype)
+  const resumed = []
+  relay.pendingBridgeToRealmItemStackRequests = new Map()
+  relay.pendingCraftingDrainRequestIds = new Set()
+  relay.deferredCraftingContainerClose = null
+  relay.craftingContainerCloseTimer = null
+  relay.recordBridgeToRealm = () => {}
+  relay.scheduleAuthoritativeInventoryReplay = () => {}
+  relay.relayServerboundToUpstream = (name, params, context) => {
+    resumed.push({ name, params, context })
+    return true
+  }
+
+  relay.rememberBridgeToRealmItemStackRequest('item_stack_request', drain, 'close-return-smoke')
+  assert.deepStrictEqual(Array.from(relay.pendingCraftingDrainRequestIds), ['-133'])
+  assert.strictEqual(relay.deferCraftingContainerCloseUntilDrainAck({
+    window_id: 8,
+    window_type: 'none',
+    server: false
+  }, 'close-return-smoke'), true)
+  relay.resolveCraftingDrainResponses({ responses: [{ status: 'ok', request_id: -133, containers: [] }] })
+  assert.strictEqual(relay.pendingCraftingDrainRequestIds.size, 0)
+  assert.strictEqual(relay.flushDeferredCraftingContainerClose('drain_acknowledged'), true)
+  assert.deepStrictEqual(resumed, [{
+    name: 'container_close',
+    params: { window_id: 8, window_type: 'none', server: false },
+    context: 'crafting_close_after_drain_drain_acknowledged'
+  }])
+}
 
 {
   const owner = {
@@ -336,6 +386,7 @@ try {
 {
   const relayPlayer = Object.create(ViaBedrockRelayPlayer.prototype)
   const recorded = []
+  const queued = []
   const replays = []
   relayPlayer.downstreamPlayReady = true
   relayPlayer.lastPlayerInventoryContent = {
@@ -348,9 +399,7 @@ try {
   relayPlayer.recordBridgeToViaBedrock = (name, packet, phase, meta) => recorded.push({ name, packet, phase, meta })
   relayPlayer.scheduleAuthoritativeInventoryReplay = reason => replays.push(reason)
   relayPlayer.scheduleLocalInventoryScreenShim = () => false
-  relayPlayer.queue = () => {
-    throw new Error('unsafe inventory_transaction should be dropped before ViaBedrock')
-  }
+  relayPlayer.queue = (name, packet) => queued.push({ name, packet })
 
   const transaction = {
     transaction: {
@@ -378,14 +427,19 @@ try {
   assert.strictEqual(relayPlayer.lastPlayerInventoryContent.input[4].network_id, 367)
   assert.strictEqual(relayPlayer.lastPlayerInventoryContent.input[4].stack_id, 777)
   assert.strictEqual(relayPlayer.bridgePredictedItemStackIds.get('hotbar:4'), 777)
-  assert.strictEqual(recorded[0].phase, 'dropped')
-  assert.strictEqual(recorded[0].meta.diagnostic.appliedInventoryDeltas, 1)
+  assert.strictEqual(queued.length, 1)
+  assert.strictEqual(queued[0].name, 'inventory_slot')
+  assert.strictEqual(queued[0].packet.slot, 4)
+  assert.strictEqual(queued[0].packet.item.network_id, 367)
+  const dropped = recorded.find(entry => entry.phase === 'dropped')
+  assert.strictEqual(dropped.meta.diagnostic.appliedInventoryDeltas, 1)
   assert.ok(replays.some(reason => String(reason).includes('inventory_slot')))
 }
 
 {
   const relayPlayer = Object.create(ViaBedrockRelayPlayer.prototype)
   const recorded = []
+  const queued = []
   const replays = []
   relayPlayer.downstreamPlayReady = true
   relayPlayer.lastPlayerInventoryContent = {
@@ -398,8 +452,9 @@ try {
   relayPlayer.recordBridgeToViaBedrock = (name, packet, phase, meta) => recorded.push({ name, packet, phase, meta })
   relayPlayer.scheduleAuthoritativeInventoryReplay = reason => replays.push(reason)
   relayPlayer.scheduleLocalInventoryScreenShim = () => false
-  relayPlayer.queue = () => {
-    throw new Error('unsafe inventory_transaction should be dropped before ViaBedrock')
+  relayPlayer.queue = (name, packet) => {
+    inventorySerializer.createPacketBuffer({ name, params: packet })
+    queued.push({ name, packet })
   }
 
   const transaction = {
@@ -408,14 +463,20 @@ try {
       actions: [
         {
           source_type: 'container',
-          slot: 3,
+          slot: 6,
           old_item: { network_id: 0 },
-          new_item: { network_id: 3, count: 1, stack_id: 662 }
+          new_item: {
+            network_id: 58,
+            name: 'minecraft:crafting_table',
+            count: 1,
+            metadata: 0,
+            block_runtime_id: 1752181952
+          }
         },
         {
           source_type: 'world_interaction',
           slot: 1,
-          old_item: { network_id: 3, count: 1 },
+          old_item: { network_id: 58, count: 1 },
           new_item: { network_id: 0 }
         }
       ]
@@ -430,10 +491,15 @@ try {
     console.warn = originalWarn
   }
 
-  assert.strictEqual(relayPlayer.lastPlayerInventoryContent.input[3].network_id, 3)
-  assert.strictEqual(relayPlayer.lastPlayerInventoryContent.input[3].stack_id, 662)
-  assert.strictEqual(relayPlayer.bridgePredictedItemStackIds.get('hotbar:3'), 662)
-  assert.strictEqual(recorded[0].meta.diagnostic.appliedInventoryDeltas, 1)
+  assert.strictEqual(relayPlayer.lastPlayerInventoryContent.input[6].network_id, 58)
+  assert.strictEqual(relayPlayer.lastPlayerInventoryContent.input[6].has_stack_id, 0)
+  assert.strictEqual(relayPlayer.bridgePredictedItemStackIds.has('hotbar:6'), false)
+  assert.strictEqual(queued.length, 1)
+  assert.strictEqual(queued[0].name, 'inventory_slot')
+  assert.strictEqual(queued[0].packet.slot, 6)
+  assert.strictEqual(queued[0].packet.item.network_id, 58)
+  const dropped = recorded.find(entry => entry.phase === 'dropped')
+  assert.strictEqual(dropped.meta.diagnostic.appliedInventoryDeltas, 1)
   assert.ok(replays.some(reason => String(reason).includes('inventory_slot')))
 }
 

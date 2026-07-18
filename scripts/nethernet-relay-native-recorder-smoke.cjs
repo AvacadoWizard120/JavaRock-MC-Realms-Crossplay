@@ -11,6 +11,12 @@ function makePlayer () {
   player.sentDownstream = []
   player.downstreamFlushes = []
   player.censusEvents = []
+  player.rawPackets = []
+  player.server = {
+    packetCensus: {
+      recordRawPacket (entry) { player.rawPackets.push(entry) }
+    }
+  }
   player.sendBuffer = packet => player.sendQ.push(packet)
   player._tick = () => {
     player.sentDownstream.push(...player.sendQ)
@@ -86,6 +92,9 @@ clientboundPath.mirrorUpstreamClientStateFromPacket = () => {}
 clientboundPath.queueClientbound = () => { throw new Error('native readUpstream must not use decoded/re-encoded clientbound path') }
 clientboundPath.readUpstream(startGame)
 assert.strictEqual(clientboundPath.sentDownstream[0], startGame)
+assert.strictEqual(clientboundPath.rawPackets.length, 1)
+assert.strictEqual(clientboundPath.rawPackets[0].direction, 'realm_to_native_bedrock')
+assert.strictEqual(clientboundPath.rawPackets[0].raw, startGame)
 
 const serverboundPath = makePlayer()
 serverboundPath.startRelaying = true
@@ -108,6 +117,9 @@ serverboundPath.upstream = {
 const packResponse = Buffer.from([0x08, 0x04])
 serverboundPath.readPacket(packResponse)
 assert.strictEqual(serverboundSent[0], packResponse)
+assert.strictEqual(serverboundPath.rawPackets.length, 1)
+assert.strictEqual(serverboundPath.rawPackets[0].direction, 'native_bedrock_to_realm')
+assert.strictEqual(serverboundPath.rawPackets[0].raw, packResponse)
 
 const rawAction = Buffer.from([0x1e, 0x05, 0xaa, 0xbb])
 const diagnostic = nativeBedrockRawActionDiagnostic('inventory_transaction', {
@@ -118,6 +130,7 @@ const diagnostic = nativeBedrockRawActionDiagnostic('inventory_transaction', {
   }
 }, rawAction, { network_id: 316, count: 14 })
 assert.strictEqual(diagnostic.raw_packet_base64, rawAction.toString('base64'))
+assert.strictEqual(diagnostic.raw_packet_hex, rawAction.toString('hex'))
 assert.strictEqual(diagnostic.raw_packet_bytes, rawAction.length)
 assert.strictEqual(diagnostic.decoded_packet_suspect, true)
 assert.deepStrictEqual(diagnostic.decoded_packet_suspect_reasons, [
