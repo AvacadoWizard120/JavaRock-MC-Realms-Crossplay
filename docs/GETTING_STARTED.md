@@ -10,12 +10,14 @@ Use a normal writable folder such as Documents or Downloads. Do not run JavaRock
 
 1. Extract the complete JavaRock ZIP.
 2. Double-click `START-JAVAROCK.bat`.
-3. JavaRock checks the computer and lists anything missing.
-4. Choose **Yes** to install the listed requirements. Windows may show an administrator approval dialog for system software.
-5. Wait while the local Node dependencies and ViaProxy runtime are prepared.
+3. JavaRock prints a result for Node.js, Java, local dependencies, and ViaProxy.
+4. If anything is missing, choose **Yes** to prepare it. Windows may ask for administrator approval before installing Node.js or Java.
+5. Follow the live console output while dependencies and ViaProxy are prepared.
 6. The JavaRock desktop window opens.
 
 Choosing **No** installs nothing and closes the launcher. You can run it again later.
+
+JavaRock requires Node.js 20 or newer and a JDK 17 or newer. Its desktop window is built with Windows Forms, so Python and Tkinter are not required.
 
 ## Add Your Account
 

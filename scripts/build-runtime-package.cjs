@@ -23,7 +23,7 @@ const rootFiles = [
 ]
 
 const scriptFiles = [
-  'bridge_desktop_gui.py',
+  'JavaRock-Gui.ps1',
   'Install-JavaRockRequirements.ps1',
   'install-viaproxy.cjs',
   'Start-JavaRock.ps1'
@@ -101,7 +101,7 @@ function writeRuntimePackageJson (destination) {
     scripts: {
       'realm:list': 'node src/index.js list-realms',
       'bridge:dev': 'node src/index.js bridge-dev',
-      'bridge:desktop-gui': 'python scripts/bridge_desktop_gui.py',
+      'bridge:desktop-gui': 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/JavaRock-Gui.ps1',
       setup: 'node scripts/install-viaproxy.cjs',
       'bedrock:packet-recorder': 'node src/index.js bedrock-packet-recorder'
     },

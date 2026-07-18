@@ -31,11 +31,14 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($zip)
 try {
     $names = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($required in @('START-JAVAROCK.bat', 'README-FIRST.txt', 'scripts/Start-JavaRock.ps1', 'src/index.js')) {
+    foreach ($required in @('START-JAVAROCK.bat', 'README-FIRST.txt', 'scripts/Start-JavaRock.ps1', 'scripts/JavaRock-Gui.ps1', 'src/index.js')) {
         if ($names -notcontains $required) { throw "Release ZIP is missing $required." }
     }
     if ($names | Where-Object { $_ -match 'bridge-gui|bridgeGui|node_modules|packet-census|\.auth' }) {
         throw 'Release ZIP contains a forbidden development or private path.'
+    }
+    if ($names | Where-Object { $_ -match '\.py$|bridge_desktop_gui' }) {
+        throw 'Release ZIP contains the retired Python desktop GUI.'
     }
 } finally {
     $archive.Dispose()

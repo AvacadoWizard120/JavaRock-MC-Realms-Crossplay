@@ -14,7 +14,9 @@ JavaRock is still experimental. Inventory actions, crafting, entity translation,
 6. Select a Realm, then click **Start Bridge**.
 7. In Minecraft Java Edition, connect to `localhost:25565`.
 
-The launcher checks for Node.js 20, JDK 17, Python 3.10 with Tkinter, project dependencies, and the patched ViaProxy runtime. It shows what is missing before installing anything. JavaRock uses a local desktop application; there is no web control panel.
+The launcher checks for Node.js 20, JDK 17, project dependencies, and the patched ViaProxy runtime. It prints every result before making changes and skips anything that is already ready. Long installs show their current action and elapsed time.
+
+The JavaRock window uses Windows' built-in desktop controls. It does not need Python, Tkinter, or a web browser.
 
 ## Current Support
 
