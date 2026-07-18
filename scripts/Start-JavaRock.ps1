@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $InstallerScript = Join-Path $PSScriptRoot 'Install-JavaRockRequirements.ps1'
-$GuiScript = Join-Path $PSScriptRoot 'bridge_desktop_gui.py'
+$GuiScript = Join-Path $PSScriptRoot 'JavaRock-Gui.ps1'
 
 function Invoke-NativeCapture {
     param(
@@ -35,160 +35,252 @@ function Get-VersionMajor {
 
     if ($Text -match '(?i)[v\" ]?(\d+)(?:\.(\d+))') {
         $major = [int]$Matches[1]
-        if ($major -eq 1 -and $Matches[2]) {
-            return [int]$Matches[2]
-        }
+        if ($major -eq 1 -and $Matches[2]) { return [int]$Matches[2] }
         return $major
     }
     return 0
 }
 
-function Find-Application {
+function Find-Applications {
     param([string]$Name)
 
-    return Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    return @(Get-Command $Name -CommandType Application -All -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Source } |
+        Where-Object { $_ } |
+        Select-Object -Unique)
+}
+
+function Get-UniqueExistingPaths {
+    param([object[]]$Paths)
+
+    $seen = @{}
+    $result = @()
+    foreach ($candidate in @($Paths)) {
+        if (-not $candidate) { continue }
+        try { $full = [IO.Path]::GetFullPath([string]$candidate) } catch { continue }
+        if ($seen.ContainsKey($full)) { continue }
+        $seen[$full] = $true
+        if (Test-Path -LiteralPath $full -PathType Leaf) { $result += $full }
+    }
+    return @($result)
 }
 
 function Find-NpmRunner {
     param([string]$NodePath)
 
-    $npmCommand = Find-Application 'npm.cmd'
-    if ($npmCommand) {
-        $probe = Invoke-NativeCapture -FilePath $npmCommand.Source -Arguments @('--version')
+    $nodeDirectory = Split-Path -Parent $NodePath
+    $npmCandidates = @((Join-Path $nodeDirectory 'npm.cmd')) + @(Find-Applications 'npm.cmd')
+    foreach ($npmPath in @(Get-UniqueExistingPaths -Paths $npmCandidates)) {
+        $probe = Invoke-NativeCapture -FilePath $npmPath -Arguments @('--version')
         if ($probe.ExitCode -eq 0) {
-            return [pscustomobject]@{ File = $npmCommand.Source; Prefix = @(); Version = $probe.Output.Trim() }
+            return [pscustomobject]@{ File = $npmPath; Prefix = @(); Version = $probe.Output.Trim() }
         }
     }
 
-    $nodeDirectory = Split-Path -Parent $NodePath
-    $cliCandidates = @(
-        (Join-Path $nodeDirectory 'node_modules\npm\bin\npm-cli.js'),
-        (Join-Path $env:ProgramFiles 'nodejs\node_modules\npm\bin\npm-cli.js')
-    ) | Select-Object -Unique
-
-    foreach ($cli in $cliCandidates) {
-        if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
-            continue
-        }
+    $cliCandidates = @((Join-Path $nodeDirectory 'node_modules\npm\bin\npm-cli.js'))
+    if ($env:ProgramFiles) {
+        $cliCandidates += Join-Path $env:ProgramFiles 'nodejs\node_modules\npm\bin\npm-cli.js'
+    }
+    foreach ($cli in @(Get-UniqueExistingPaths -Paths $cliCandidates)) {
         $probe = Invoke-NativeCapture -FilePath $NodePath -Arguments @($cli, '--version')
         if ($probe.ExitCode -eq 0) {
             return [pscustomobject]@{ File = $NodePath; Prefix = @($cli); Version = $probe.Output.Trim() }
         }
     }
-
     return $null
 }
 
+function Get-NodeCandidates {
+    $candidates = @(Find-Applications 'node.exe')
+    $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    foreach ($base in @($env:ProgramFiles, $programFilesX86, $env:LOCALAPPDATA)) {
+        if (-not $base) { continue }
+        if ($base -eq $env:LOCALAPPDATA) {
+            $candidates += Join-Path $base 'Programs\nodejs\node.exe'
+            $candidates += Join-Path $base 'Microsoft\WinGet\Links\node.exe'
+        } else {
+            $candidates += Join-Path $base 'nodejs\node.exe'
+        }
+    }
+    return @(Get-UniqueExistingPaths -Paths $candidates)
+}
+
 function Get-NodeRequirement {
-    $command = Find-Application 'node.exe'
-    if (-not $command) {
-        return [pscustomobject]@{ Ready = $false; Kind = 'Node'; Label = 'Node.js 20 or newer, including npm'; Detail = 'node.exe was not found'; Runner = $null }
+    $details = @()
+    foreach ($nodePath in @(Get-NodeCandidates)) {
+        $probe = Invoke-NativeCapture -FilePath $nodePath -Arguments @('--version')
+        $major = Get-VersionMajor $probe.Output
+        $npm = Find-NpmRunner $nodePath
+        if ($probe.ExitCode -eq 0 -and $major -ge 20 -and $null -ne $npm) {
+            return [pscustomobject]@{
+                Ready = $true
+                Kind = 'Node'
+                Label = 'Node.js 20 or newer, including npm'
+                Detail = "Node $($probe.Output.Trim()); npm $($npm.Version); $nodePath"
+                Runner = [pscustomobject]@{ Node = $nodePath; Npm = $npm }
+            }
+        }
+        $reason = if ($probe.ExitCode -ne 0) { 'could not run' } elseif ($major -lt 20) { "version $major is too old" } else { 'npm is missing or broken' }
+        $details += "$nodePath ($reason)"
     }
 
-    $probe = Invoke-NativeCapture -FilePath $command.Source -Arguments @('--version')
-    $major = Get-VersionMajor $probe.Output
-    $npm = Find-NpmRunner $command.Source
-    $ready = $probe.ExitCode -eq 0 -and $major -ge 20 -and $null -ne $npm
-    $detail = "Node $($probe.Output.Trim())"
-    if (-not $npm) { $detail += '; npm is missing or broken' }
-    if ($major -lt 20) { $detail += '; version 20 or newer is required' }
-
+    $detail = if ($details.Count -gt 0) { $details -join '; ' } else { 'node.exe was not found in PATH or standard install folders' }
     return [pscustomobject]@{
-        Ready = $ready
+        Ready = $false
         Kind = 'Node'
         Label = 'Node.js 20 or newer, including npm'
         Detail = $detail
-        Runner = [pscustomobject]@{ Node = $command.Source; Npm = $npm }
+        Runner = $null
     }
 }
 
-function Get-JavaRequirement {
-    $java = Find-Application 'java.exe'
-    $javac = Find-Application 'javac.exe'
-    if (-not $java -or -not $javac) {
-        return [pscustomobject]@{ Ready = $false; Kind = 'Java'; Label = 'JDK 17 or newer, including java and javac'; Detail = 'java.exe or javac.exe was not found'; Runner = $null }
+function Get-JavaBinCandidates {
+    $directories = @()
+    foreach ($path in @((Find-Applications 'java.exe') + (Find-Applications 'javac.exe'))) {
+        if ($path) { $directories += Split-Path -Parent $path }
     }
+    if ($env:JAVA_HOME) { $directories += Join-Path $env:JAVA_HOME 'bin' }
 
-    $javaProbe = Invoke-NativeCapture -FilePath $java.Source -Arguments @('-version')
-    $javacProbe = Invoke-NativeCapture -FilePath $javac.Source -Arguments @('-version')
-    $javaMajor = Get-VersionMajor $javaProbe.Output
-    $javacMajor = Get-VersionMajor $javacProbe.Output
-    $ready = $javaProbe.ExitCode -eq 0 -and $javacProbe.ExitCode -eq 0 -and $javaMajor -ge 17 -and $javacMajor -ge 17
-
-    return [pscustomobject]@{
-        Ready = $ready
-        Kind = 'Java'
-        Label = 'JDK 17 or newer, including java and javac'
-        Detail = "java=$javaMajor; javac=$javacMajor"
-        Runner = [pscustomobject]@{ Java = $java.Source; Javac = $javac.Source }
-    }
-}
-
-function Get-PythonRequirement {
-    $candidates = @()
-    $python = Find-Application 'python.exe'
-    if ($python) { $candidates += [pscustomobject]@{ File = $python.Source; Prefix = @() } }
-    $py = Find-Application 'py.exe'
-    if ($py) { $candidates += [pscustomobject]@{ File = $py.Source; Prefix = @('-3') } }
-
-    $probeScript = 'import sys, tkinter; print(str(sys.version_info.major) + "." + str(sys.version_info.minor) + "|" + sys.executable)'
-    foreach ($candidate in $candidates) {
-        $arguments = @($candidate.Prefix) + @('-c', $probeScript)
-        $probe = Invoke-NativeCapture -FilePath $candidate.File -Arguments $arguments
-        if ($probe.ExitCode -ne 0) { continue }
-        $line = @($probe.Output -split "`r?`n")[-1]
-        $parts = $line.Split('|', 2)
-        if ($parts.Count -ne 2) { continue }
-        $major = Get-VersionMajor $parts[0]
-        if ($major -lt 3) { continue }
-        $minor = 0
-        if ($parts[0] -match '^3\.(\d+)$') { $minor = [int]$Matches[1] }
-        if ($minor -ge 10) {
-            return [pscustomobject]@{
-                Ready = $true
-                Kind = 'Python'
-                Label = 'Python 3.10 or newer with Tkinter'
-                Detail = "Python $($parts[0]) with Tkinter"
-                Runner = [pscustomobject]@{ Python = $parts[1]; Version = $parts[0] }
-            }
+    $roots = @($env:ProgramFiles, [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), $env:LOCALAPPDATA)
+    $patterns = @(
+        'Eclipse Adoptium\*\bin',
+        'Java\*\bin',
+        'Microsoft\jdk-*\bin',
+        'BellSoft\*\bin',
+        'Zulu\*\bin',
+        'Programs\Eclipse Adoptium\*\bin'
+    )
+    foreach ($root in $roots) {
+        if (-not $root) { continue }
+        foreach ($pattern in $patterns) {
+            $directories += @(Get-Item -Path (Join-Path $root $pattern) -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSIsContainer } |
+                ForEach-Object { $_.FullName })
         }
     }
 
-    return [pscustomobject]@{ Ready = $false; Kind = 'Python'; Label = 'Python 3.10 or newer with Tkinter'; Detail = 'A compatible Python and Tkinter combination was not found'; Runner = $null }
+    $seen = @{}
+    $result = @()
+    foreach ($directory in $directories) {
+        if (-not $directory) { continue }
+        try { $full = [IO.Path]::GetFullPath([string]$directory).TrimEnd('\') } catch { continue }
+        if ($seen.ContainsKey($full)) { continue }
+        $seen[$full] = $true
+        $java = Join-Path $full 'java.exe'
+        $javac = Join-Path $full 'javac.exe'
+        if ((Test-Path -LiteralPath $java -PathType Leaf) -and (Test-Path -LiteralPath $javac -PathType Leaf)) {
+            $result += [pscustomobject]@{ Directory = $full; Java = $java; Javac = $javac }
+        }
+    }
+    return @($result)
+}
+
+function Get-JavaRequirement {
+    $details = @()
+    foreach ($candidate in @(Get-JavaBinCandidates)) {
+        $javaProbe = Invoke-NativeCapture -FilePath $candidate.Java -Arguments @('-version')
+        $javacProbe = Invoke-NativeCapture -FilePath $candidate.Javac -Arguments @('-version')
+        $javaMajor = Get-VersionMajor $javaProbe.Output
+        $javacMajor = Get-VersionMajor $javacProbe.Output
+        if ($javaProbe.ExitCode -eq 0 -and $javacProbe.ExitCode -eq 0 -and $javaMajor -ge 17 -and $javacMajor -ge 17) {
+            return [pscustomobject]@{
+                Ready = $true
+                Kind = 'Java'
+                Label = 'JDK 17 or newer, including java and javac'
+                Detail = "java $javaMajor; javac $javacMajor; $($candidate.Directory)"
+                Runner = $candidate
+            }
+        }
+        $details += "$($candidate.Directory) (java=$javaMajor; javac=$javacMajor)"
+    }
+
+    $detail = if ($details.Count -gt 0) { $details -join '; ' } else { 'a complete JDK was not found in PATH, JAVA_HOME, or standard install folders' }
+    return [pscustomobject]@{
+        Ready = $false
+        Kind = 'Java'
+        Label = 'JDK 17 or newer, including java and javac'
+        Detail = $detail
+        Runner = $null
+    }
 }
 
 function Test-NodeModulesReady {
-    return (Test-Path -LiteralPath (Join-Path $ProjectRoot 'node_modules\bedrock-protocol\package.json') -PathType Leaf)
+    foreach ($packageName in @(
+        'bedrock-protocol',
+        'dotenv',
+        'minecraft-data',
+        'nethernet',
+        'prismarine-auth',
+        'prismarine-realms'
+    )) {
+        $manifest = Join-Path $ProjectRoot "node_modules\$packageName\package.json"
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { return $false }
+    }
+    return $true
 }
 
 function Test-ViaProxyReady {
     $jar = Join-Path $ProjectRoot 'tools\ViaProxy.jar'
-    $classFile = Join-Path $ProjectRoot 'patches\viabedrock-inventory\net\raphimc\viabedrock\protocol\packet\UnhandledPackets.class'
+    $sourceRoot = Join-Path $ProjectRoot 'patches\viabedrock-inventory'
+    $classFile = Join-Path $sourceRoot 'net\raphimc\viabedrock\protocol\packet\UnhandledPackets.class'
     if (-not (Test-Path -LiteralPath $jar -PathType Leaf) -or -not (Test-Path -LiteralPath $classFile -PathType Leaf)) {
         return $false
     }
 
     $classTime = (Get-Item -LiteralPath $classFile).LastWriteTimeUtc
-    $newerSource = Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'patches\viabedrock-inventory') -Filter '*.java' -File | Where-Object { $_.LastWriteTimeUtc -gt $classTime } | Select-Object -First 1
+    $newerSource = Get-ChildItem -LiteralPath $sourceRoot -Filter '*.java' -File -Recurse |
+        Where-Object { $_.LastWriteTimeUtc -gt $classTime } |
+        Select-Object -First 1
     return $null -eq $newerSource
 }
 
 function Get-SetupState {
-    $system = @((Get-NodeRequirement), (Get-JavaRequirement), (Get-PythonRequirement))
-    $project = @()
-    if (-not (Test-NodeModulesReady)) {
-        $project += [pscustomobject]@{ Ready = $false; Kind = 'NodeModules'; Label = 'JavaRock Node dependencies'; Detail = 'node_modules is not prepared' }
-    }
-    if (-not (Test-ViaProxyReady)) {
-        $project += [pscustomobject]@{ Ready = $false; Kind = 'ViaProxy'; Label = 'ViaProxy and the JavaRock compatibility patch'; Detail = 'the local runtime is not prepared or is stale' }
-    }
+    $nodeModulesReady = Test-NodeModulesReady
+    $viaProxyReady = Test-ViaProxyReady
+    $system = @((Get-NodeRequirement), (Get-JavaRequirement))
+    $project = @(
+        [pscustomobject]@{
+            Ready = $nodeModulesReady
+            Kind = 'NodeModules'
+            Label = 'JavaRock Node dependencies'
+            Detail = if ($nodeModulesReady) { 'ready' } else { 'not prepared; npm ci is required' }
+        },
+        [pscustomobject]@{
+            Ready = $viaProxyReady
+            Kind = 'ViaProxy'
+            Label = 'ViaProxy and JavaRock compatibility patch'
+            Detail = if ($viaProxyReady) { 'ready' } else { 'not prepared or stale; npm run setup is required' }
+        }
+    )
     return [pscustomobject]@{ System = $system; Project = $project }
+}
+
+function Write-SetupState {
+    param([Parameter(Mandatory = $true)]$State)
+
+    Write-Host ''
+    Write-Host '[JavaRock] Requirement check'
+    foreach ($item in @($State.System) + @($State.Project)) {
+        $status = if ($item.Ready) { 'READY' } elseif ($item.Kind -in @('Node', 'Java')) { 'MISSING' } else { 'NEEDS SETUP' }
+        $color = if ($item.Ready) { 'Green' } else { 'Yellow' }
+        Write-Host ("  [{0}] {1}" -f $status, $item.Label) -ForegroundColor $color
+        Write-Host ("          {0}" -f $item.Detail)
+    }
+    Write-Host ''
 }
 
 function Refresh-ProcessPath {
     $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $user = [Environment]::GetEnvironmentVariable('Path', 'User')
     $env:Path = (@($machine, $user) | Where-Object { $_ }) -join ';'
+}
+
+function Add-ToolDirectoryToPath {
+    param([string]$Directory)
+
+    if (-not $Directory) { return }
+    $parts = @($env:Path -split ';')
+    if ($parts -notcontains $Directory) { $env:Path = "$Directory;$env:Path" }
 }
 
 function Show-Message {
@@ -208,8 +300,8 @@ function Confirm-Setup {
     param([object[]]$Missing)
 
     Add-Type -AssemblyName System.Windows.Forms
-    $items = ($Missing | ForEach-Object { "- $($_.Label)" }) -join "`r`n"
-    $text = "JavaRock needs the following items:`r`n`r`n$items`r`n`r`nInstall them now?`r`n`r`nChoosing No installs nothing and closes JavaRock. System software may request administrator approval."
+    $items = ($Missing | ForEach-Object { "- $($_.Label)`r`n  $($_.Detail)" }) -join "`r`n"
+    $text = "JavaRock needs to prepare the following items:`r`n`r`n$items`r`n`r`nContinue?`r`n`r`nChoosing No changes nothing and closes JavaRock. Installing Node.js or Java may request administrator approval."
     $choice = [System.Windows.Forms.MessageBox]::Show(
         $text,
         'JavaRock Requirements',
@@ -220,42 +312,49 @@ function Confirm-Setup {
     return $choice -eq [System.Windows.Forms.DialogResult]::Yes
 }
 
-function Invoke-Npm {
+function Invoke-NpmPhase {
     param(
         [Parameter(Mandatory = $true)]$Runner,
+        [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
     $allArguments = @($Runner.Prefix) + $Arguments
+    $display = (@($Arguments) | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+    Write-Host "[JavaRock] $Name"
+    Write-Host "[JavaRock] Running: npm $display"
+    Write-Host '[JavaRock] Command output follows; this window remains active while setup is working.'
+    $timer = [Diagnostics.Stopwatch]::StartNew()
     & $Runner.File @allArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "npm failed with exit code $LASTEXITCODE."
-    }
+    $exitCode = $LASTEXITCODE
+    $timer.Stop()
+    if ($exitCode -ne 0) { throw "$Name failed with exit code $exitCode after $([Math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds." }
+    Write-Host "[JavaRock] Finished in $([Math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds."
+    Write-Host ''
 }
 
 try {
     Set-Location -LiteralPath $ProjectRoot
+    Write-Host '[JavaRock] Checking this computer and the extracted JavaRock files...'
     $state = Get-SetupState
+    Write-SetupState -State $state
     $missingSystem = @($state.System | Where-Object { -not $_.Ready })
-    $missing = @($missingSystem) + @($state.Project)
+    $missingProject = @($state.Project | Where-Object { -not $_.Ready })
+    $missing = @($missingSystem) + @($missingProject)
 
     if ($CheckOnly) {
-        foreach ($item in @($state.System) + @($state.Project)) {
-            $status = 'MISSING'
-            if ($item.Ready) { $status = 'READY' }
-            Write-Host "[$status] $($item.Label): $($item.Detail)"
-        }
         if ($missing.Count -gt 0) { exit 2 }
         exit 0
     }
 
     if ($missing.Count -gt 0 -and -not (Confirm-Setup -Missing $missing)) {
-        Show-Message -Text 'Nothing was installed. JavaRock will close. Run START-JAVAROCK.bat again whenever you are ready.'
+        Show-Message -Text 'Nothing was installed or changed. JavaRock will close. Run START-JAVAROCK.bat again whenever you are ready.'
         exit 1
     }
 
     if ($missingSystem.Count -gt 0) {
         $kinds = ($missingSystem | ForEach-Object { $_.Kind } | Select-Object -Unique) -join ','
+        Write-Host "[JavaRock] Requesting administrator approval for: $kinds"
         $installerArguments = @(
             '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
             '-File', ('"{0}"' -f $InstallerScript),
@@ -263,27 +362,45 @@ try {
         )
         $installer = Start-Process -FilePath 'powershell.exe' -ArgumentList $installerArguments -Verb RunAs -Wait -PassThru
         if ($installer.ExitCode -ne 0) {
-            throw "Automatic requirement installation did not finish (exit code $($installer.ExitCode)). If Windows Package Manager was unavailable, install or update Microsoft App Installer, then run JavaRock again."
+            throw "The Windows requirement installer stopped with exit code $($installer.ExitCode). Review its final message, then run JavaRock again."
         }
         Refresh-ProcessPath
+        Write-Host '[JavaRock] Rechecking Node.js and Java after Windows setup...'
+        $state = Get-SetupState
+        Write-SetupState -State $state
     }
 
-    $state = Get-SetupState
     $stillMissingSystem = @($state.System | Where-Object { -not $_.Ready })
     if ($stillMissingSystem.Count -gt 0) {
-        $names = ($stillMissingSystem | ForEach-Object { $_.Label }) -join "`r`n- "
-        throw "These system requirements are still missing:`r`n- $names`r`n`r`nInstall or update Microsoft App Installer if winget was unavailable, then run JavaRock again."
+        $details = ($stillMissingSystem | ForEach-Object { "- $($_.Label): $($_.Detail)" }) -join "`r`n"
+        throw "Windows setup finished, but JavaRock still cannot use:`r`n$details`r`n`r`nRestart Windows if an installer requested it. Otherwise install the listed item manually, then run START-JAVAROCK.bat again."
     }
 
     $nodeRequirement = @($state.System | Where-Object { $_.Kind -eq 'Node' })[0]
+    $javaRequirement = @($state.System | Where-Object { $_.Kind -eq 'Java' })[0]
+    Add-ToolDirectoryToPath (Split-Path -Parent $nodeRequirement.Runner.Node)
+    Add-ToolDirectoryToPath $javaRequirement.Runner.Directory
+
     if (-not (Test-NodeModulesReady)) {
-        Write-Host '[JavaRock] Installing local Node dependencies...'
-        Invoke-Npm -Runner $nodeRequirement.Runner.Npm -Arguments @('ci', '--no-audit', '--no-fund', '--cache', (Join-Path $ProjectRoot '.npm-cache'))
+        Invoke-NpmPhase -Runner $nodeRequirement.Runner.Npm -Name 'Installing JavaRock Node dependencies...' -Arguments @(
+            'ci', '--no-audit', '--no-fund', '--loglevel', 'info', '--cache', (Join-Path $ProjectRoot '.npm-cache')
+        )
+    } else {
+        Write-Host '[JavaRock] Node dependencies are already ready; skipping npm ci.'
     }
 
     if (-not (Test-ViaProxyReady)) {
-        Write-Host '[JavaRock] Downloading ViaProxy and compiling the compatibility patch...'
-        Invoke-Npm -Runner $nodeRequirement.Runner.Npm -Arguments @('run', 'setup')
+        Invoke-NpmPhase -Runner $nodeRequirement.Runner.Npm -Name 'Downloading ViaProxy and compiling the JavaRock patch...' -Arguments @('run', 'setup')
+    } else {
+        Write-Host '[JavaRock] ViaProxy and the JavaRock patch are already ready; skipping setup.'
+    }
+
+    $finalState = Get-SetupState
+    Write-SetupState -State $finalState
+    $stillMissing = @($finalState.System) + @($finalState.Project) | Where-Object { -not $_.Ready }
+    if (@($stillMissing).Count -gt 0) {
+        $details = (@($stillMissing) | ForEach-Object { "- $($_.Label): $($_.Detail)" }) -join "`r`n"
+        throw "JavaRock setup did not pass its final check:`r`n$details"
     }
 
     if ($NoLaunch) {
@@ -291,18 +408,28 @@ try {
         exit 0
     }
 
-    $finalState = Get-SetupState
-    $pythonRequirement = @($finalState.System | Where-Object { $_.Kind -eq 'Python' })[0]
-    $pythonExe = $pythonRequirement.Runner.Python
-    $pythonw = Join-Path (Split-Path -Parent $pythonExe) 'pythonw.exe'
-    if (Test-Path -LiteralPath $pythonw -PathType Leaf) { $pythonExe = $pythonw }
+    if (-not (Test-Path -LiteralPath $GuiScript -PathType Leaf)) {
+        throw "The native Windows GUI is missing: $GuiScript"
+    }
 
-    Start-Process -FilePath $pythonExe -ArgumentList @(('"{0}"' -f $GuiScript)) -WorkingDirectory $ProjectRoot
-    Write-Host '[JavaRock] Desktop GUI started.'
+    $guiRuntime = Join-Path $ProjectRoot '.runtime'
+    [IO.Directory]::CreateDirectory($guiRuntime) | Out-Null
+    $guiOut = Join-Path $guiRuntime 'javarock-gui-startup.out.log'
+    $guiErr = Join-Path $guiRuntime 'javarock-gui-startup.err.log'
+    $guiArguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$GuiScript`""
+    $guiProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $guiArguments -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $guiOut -RedirectStandardError $guiErr -PassThru
+    if ($guiProcess.WaitForExit(800) -and $guiProcess.ExitCode -ne 0) {
+        $guiError = ''
+        try { $guiError = (Get-Content -LiteralPath $guiErr -Raw -ErrorAction Stop).Trim() } catch {}
+        throw "The native Windows GUI exited during startup (exit code $($guiProcess.ExitCode)). $guiError"
+    }
+    $guiProcess.Dispose()
+    Write-Host '[JavaRock] Native Windows GUI started. Python and Tkinter are not required.'
     exit 0
 } catch {
     $message = $_.Exception.Message
-    Write-Error $message
+    Write-Host ''
+    Write-Host "[JavaRock] ERROR: $message" -ForegroundColor Red
     if (-not $CheckOnly) {
         try { Show-Message -Text $message -Title 'JavaRock could not start' -Kind Error } catch {}
     }

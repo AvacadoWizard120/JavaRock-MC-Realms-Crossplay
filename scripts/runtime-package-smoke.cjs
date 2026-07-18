@@ -30,7 +30,7 @@ try {
     'LICENSE',
     'LICENSES/GPL-3.0-or-later.txt',
     'scripts/Start-JavaRock.ps1',
-    'scripts/bridge_desktop_gui.py',
+    'scripts/JavaRock-Gui.ps1',
     'src/index.js',
     'patches/viabedrock-inventory/InventoryContainer.java'
   ]
@@ -56,6 +56,7 @@ try {
     'setup'
   ])
   assert(!JSON.stringify(runtimePackage).includes('bridge:gui'))
+  assert(!JSON.stringify(runtimePackage).match(/python|tkinter/i))
 
   console.log('JavaRock runtime package smoke check passed.')
 } finally {

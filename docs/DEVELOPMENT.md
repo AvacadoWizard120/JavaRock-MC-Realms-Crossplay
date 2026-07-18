@@ -10,7 +10,7 @@ npm run setup
 npm run check
 ```
 
-Use Node.js 20+, JDK 17+, and Python 3.10+ with Tkinter. `npm run setup` downloads ViaProxy and compiles the included ViaBedrock compatibility sources.
+Use Node.js 20+ and JDK 17+. `npm run setup` downloads ViaProxy and compiles the included ViaBedrock compatibility sources. The Windows GUI is implemented in PowerShell with Windows Forms and has no Python dependency.
 
 ## Useful Checks
 

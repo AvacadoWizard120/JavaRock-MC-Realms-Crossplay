@@ -4,11 +4,13 @@
 
 Choose **Yes** to install them through Windows Package Manager. System installs may request administrator approval. If Windows Package Manager itself is unavailable, install or update **App Installer** from Microsoft, then run `START-JAVAROCK.bat` again.
 
-JavaRock requires Node.js 20+, a JDK 17+ with `javac`, and Python 3.10+ with Tkinter.
+JavaRock requires Node.js 20+ with npm and a JDK 17+ with `javac`. Python and Tkinter are not required.
+
+The console marks each check as `READY`, `MISSING`, or `NEEDS SETUP`. JavaRock does not send a `READY` item to winget. During a long winget operation it prints the current action and elapsed time every ten seconds.
 
 ## The Window Does Not Open
 
-Run `START-JAVAROCK.bat` again and read the final error. Keep the entire extracted folder together. Moving only the batch file breaks its relative paths.
+Run `START-JAVAROCK.bat` again and read the final error. GUI startup errors are also written under `.runtime/`. Keep the entire extracted folder together; moving only the batch file breaks its relative paths.
 
 ## Login Repeats or Uses the Wrong Account
 

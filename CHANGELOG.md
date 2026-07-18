@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.83 - 2026-07-18
+
+- Replaced the Python/Tkinter GUI with a native Windows Forms application.
+- Python is no longer checked, installed, or included in the release.
+- The launcher now reports each Node.js, Java, dependency, and ViaProxy check before asking to change anything.
+- Existing Node.js and Java installations are found through PATH and common Windows install folders.
+- The installer checks winget first, then chooses install or upgrade instead of blindly running install.
+- Winget work now shows the command, elapsed time, exit code, and a progress message every ten seconds.
+- Node dependency and ViaProxy setup show the command being run and how long it took.
+
+Known issues:
+
+- Fast or unusual inventory mouse sequences can still desync.
+- Movement can still rubber-band.
+- Doors can take too long to open or close on the Java client.
+
 ## 0.3.82 - 2026-07-18
 
 - The Java recipe book now follows the player's inventory and can fill the 2x2 or crafting-table grid.
