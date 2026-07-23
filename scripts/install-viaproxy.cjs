@@ -160,6 +160,20 @@ function selectViaProxyAsset (release) {
   return jarAssets.find(asset => !/java8|sources|javadoc/i.test(asset.name || '')) || jarAssets[0]
 }
 
+function markCompiledClassesFresh (sources, compiledClasses) {
+  if (!sources.length || !compiledClasses.length) {
+    throw new Error('Patch timestamp synchronization requires source and class files.')
+  }
+
+  const newestSourceMtimeMs = Math.max(...sources.map(source => fs.statSync(source).mtimeMs))
+  const compiledMtimeMs = Math.max(Date.now(), newestSourceMtimeMs + 2000)
+  const compiledTime = new Date(compiledMtimeMs)
+  for (const compiledClass of compiledClasses) {
+    fs.utimesSync(compiledClass, compiledTime, compiledTime)
+  }
+  return compiledMtimeMs
+}
+
 function compileViaBedrockPatch (viaProxyJar) {
   const patchRoot = path.resolve(__dirname, '..', 'patches', 'viabedrock-inventory')
   const sources = PATCH_SOURCE_RELATIVE_PATHS.map(relativePath => path.join(patchRoot, relativePath))
@@ -190,6 +204,10 @@ function compileViaBedrockPatch (viaProxyJar) {
       fs.mkdirSync(path.dirname(destination), { recursive: true })
       fs.copyFileSync(compiled, destination)
     }
+    markCompiledClassesFresh(
+      sources,
+      CLASS_RELATIVE_PATHS.map(relativePath => path.join(patchRoot, relativePath))
+    )
   } finally {
     fs.rmSync(outputRoot, { recursive: true, force: true })
   }
@@ -262,6 +280,7 @@ module.exports = {
   DEFAULT_REPO,
   compileViaBedrockPatch,
   installViaProxy,
+  markCompiledClassesFresh,
   parseArgs,
   selectViaProxyAsset
 }

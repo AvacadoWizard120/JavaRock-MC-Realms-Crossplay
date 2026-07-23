@@ -1,7 +1,14 @@
 'use strict'
 
 const assert = require('assert')
-const { parseArgs, selectViaProxyAsset } = require('./install-viaproxy.cjs')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const {
+  markCompiledClassesFresh,
+  parseArgs,
+  selectViaProxyAsset
+} = require('./install-viaproxy.cjs')
 
 function main () {
   const release = {
@@ -24,6 +31,24 @@ function main () {
 
   assert.throws(() => parseArgs(['--dest']), /requires a value/)
   assert.throws(() => parseArgs(['--timeout-ms', 'nope']), /positive integer/)
+
+  const timestampRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'javarock-patch-time-'))
+  try {
+    const source = path.join(timestampRoot, 'FutureSource.java')
+    const compiledClass = path.join(timestampRoot, 'FutureSource.class')
+    fs.writeFileSync(source, 'class FutureSource {}\n')
+    fs.writeFileSync(compiledClass, 'compiled')
+
+    const futureSourceTime = new Date(Date.now() + (5 * 60 * 60 * 1000))
+    fs.utimesSync(source, futureSourceTime, futureSourceTime)
+    markCompiledClassesFresh([source], [compiledClass])
+
+    const sourceMtimeMs = fs.statSync(source).mtimeMs
+    const classMtimeMs = fs.statSync(compiledClass).mtimeMs
+    assert(classMtimeMs >= sourceMtimeMs, 'compiled class should not appear older than a future-dated ZIP source')
+  } finally {
+    fs.rmSync(timestampRoot, { recursive: true, force: true })
+  }
 
   console.log('ViaProxy installer smoke check passed.')
 }

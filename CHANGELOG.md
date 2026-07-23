@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.86 - 2026-07-23
+
+- Fixed fresh ViaProxy patch classes being rejected as stale after extracting the Windows ZIP.
+- Compiled class timestamps now account for ZIP files whose timestamps are shifted forward by the local timezone.
+- Added a setup test using a deliberately future-dated Java source file.
+
 ## 0.3.85 - 2026-07-23
 
 - Fixed Realm refresh and Microsoft login crashing with `Cannot find module './bridgeGui'` in the Windows package.
