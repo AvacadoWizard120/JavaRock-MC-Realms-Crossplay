@@ -1,15 +1,56 @@
 [CmdletBinding()]
 param(
-    [switch]$SmokeTest
+    [switch]$SmokeTest,
+    [switch]$WindowSmokeTest,
+    [string]$StartupReadyFile = '',
+    [string]$StartupErrorFile = ''
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+trap {
+    $details = ($_ | Out-String).Trim()
+    if ($StartupErrorFile) {
+        try {
+            [IO.Directory]::CreateDirectory((Split-Path -Parent $StartupErrorFile)) | Out-Null
+            [IO.File]::WriteAllText($StartupErrorFile, "$details`r`n", [Text.UTF8Encoding]::new($false))
+        } catch {}
+    }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        [void][Windows.Forms.MessageBox]::Show(
+            $details,
+            'JavaRock GUI failed',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Error
+        )
+    } catch {}
+    exit 1
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+if (-not ('JavaRockNativeWindow' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class JavaRockNativeWindow {
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr window, int command);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr window);
+}
+'@
+}
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $PrimaryRuntimeDir = Join-Path $ProjectRoot '.runtime'
@@ -560,7 +601,7 @@ function Set-DarkTheme {
         $button.BackColor = $panel
         $button.ForeColor = $foreground
     }
-    if (-not $SmokeTest) {
+    if (-not $SmokeTest -and -not $WindowSmokeTest) {
         Write-JsonFile -Path $PreferencesFile -Value ([ordered]@{ darkMode = $Enabled })
     }
 }
@@ -909,6 +950,29 @@ if ($SmokeTest) {
 }
 
 $form.Add_Shown({
+    $form.ShowInTaskbar = $true
+    $form.WindowState = [Windows.Forms.FormWindowState]::Normal
+    [void][JavaRockNativeWindow]::ShowWindow($form.Handle, 9)
+    $form.BringToFront()
+    $form.Activate()
+    [void][JavaRockNativeWindow]::SetForegroundWindow($form.Handle)
+    [Windows.Forms.Application]::DoEvents()
+
+    $visible = [JavaRockNativeWindow]::IsWindowVisible($form.Handle)
+    if (-not $visible) { throw 'Windows created the JavaRock form but did not make it visible.' }
+    if ($StartupReadyFile) {
+        Write-JsonFile -Path $StartupReadyFile -Value ([ordered]@{
+            pid = $PID
+            visible = $visible
+            windowHandle = $form.Handle.ToInt64()
+            readyAt = [DateTime]::UtcNow.ToString('o')
+        })
+    }
+    if ($WindowSmokeTest) {
+        $form.Close()
+        return
+    }
+
     $timer.Start()
     if ($script:Profiles.Count -eq 0) {
         Add-Log 'gui' 'No Microsoft account profiles are on record. Add an account before listing Realms.'

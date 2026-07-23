@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.84 - 2026-07-23
+
+- Fixed the launcher reporting success while the JavaRock window remained hidden.
+- The GUI now starts without a console through `CreateNoWindow`; the form itself is explicitly shown and brought forward.
+- The launcher waits for the GUI to report its process id, window handle, and visible state before it exits.
+- A GUI that crashes or fails to become visible now produces a clear startup error instead of silently quitting.
+- The GUI smoke check now creates a real window and verifies that Windows reports it visible.
+
 ## 0.3.83 - 2026-07-18
 
 - Replaced the Python/Tkinter GUI with a native Windows Forms application.
