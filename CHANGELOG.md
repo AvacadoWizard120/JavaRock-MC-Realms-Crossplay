@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.85 - 2026-07-23
+
+- Fixed Realm refresh and Microsoft login crashing with `Cannot find module './bridgeGui'` in the Windows package.
+- Removed the last command-line references to the retired browser GUI.
+- The package check now starts the staged command-line entrypoint, so missing runtime modules stop the release build.
+
 ## 0.3.84 - 2026-07-23
 
 - Fixed the launcher reporting success while the JavaRock window remained hidden.

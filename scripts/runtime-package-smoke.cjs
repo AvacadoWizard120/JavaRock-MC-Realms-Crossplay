@@ -58,6 +58,18 @@ try {
   assert(!JSON.stringify(runtimePackage).includes('bridge:gui'))
   assert(!JSON.stringify(runtimePackage).match(/python|tkinter/i))
 
+  const runtimeIndex = fs.readFileSync(path.join(destination, 'src', 'index.js'), 'utf8')
+  assert.doesNotMatch(runtimeIndex, /bridgeGui|bridge-gui|gui-port|localhost:8765/i)
+
+  const help = spawnSync(process.execPath, [path.join(destination, 'src', 'index.js'), '--help'], {
+    cwd: destination,
+    encoding: 'utf8',
+    windowsHide: true
+  })
+  if (help.status !== 0) throw new Error(`${help.stdout || ''}${help.stderr || ''}`)
+  assert.match(help.stdout, /Commands:/)
+  assert.match(help.stdout, /npm run realm:list/)
+
   console.log('JavaRock runtime package smoke check passed.')
 } finally {
   removeDestination()
