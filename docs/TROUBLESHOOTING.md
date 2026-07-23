@@ -10,7 +10,7 @@ The console marks each check as `READY`, `MISSING`, or `NEEDS SETUP`. JavaRock d
 
 ## The Window Does Not Open
 
-Run `START-JAVAROCK.bat` again and read the final error. GUI startup errors are also written under `.runtime/`. Keep the entire extracted folder together; moving only the batch file breaks its relative paths.
+Run `START-JAVAROCK.bat` again and read the final error. The launcher waits until Windows confirms that the JavaRock window is visible. GUI startup errors are also written to `.runtime/javarock-gui-startup.err.log`. Keep the entire extracted folder together; moving only the batch file breaks its relative paths.
 
 ## Login Repeats or Uses the Wrong Account
 

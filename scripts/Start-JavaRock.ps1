@@ -283,6 +283,20 @@ function Add-ToolDirectoryToPath {
     if ($parts -notcontains $Directory) { $env:Path = "$Directory;$env:Path" }
 }
 
+function ConvertTo-ProcessArgument {
+    param([AllowEmptyString()][string]$Value)
+
+    if ($Value -eq '') { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Join-ProcessArguments {
+    param([string[]]$Arguments)
+
+    return (@($Arguments) | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) -join ' '
+}
+
 function Show-Message {
     param(
         [string]$Text,
@@ -414,17 +428,61 @@ try {
 
     $guiRuntime = Join-Path $ProjectRoot '.runtime'
     [IO.Directory]::CreateDirectory($guiRuntime) | Out-Null
-    $guiOut = Join-Path $guiRuntime 'javarock-gui-startup.out.log'
     $guiErr = Join-Path $guiRuntime 'javarock-gui-startup.err.log'
-    $guiArguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$GuiScript`""
-    $guiProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $guiArguments -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $guiOut -RedirectStandardError $guiErr -PassThru
-    if ($guiProcess.WaitForExit(800) -and $guiProcess.ExitCode -ne 0) {
-        $guiError = ''
-        try { $guiError = (Get-Content -LiteralPath $guiErr -Raw -ErrorAction Stop).Trim() } catch {}
-        throw "The native Windows GUI exited during startup (exit code $($guiProcess.ExitCode)). $guiError"
+    $guiReady = Join-Path $guiRuntime 'javarock-gui-startup-ready.json'
+    [IO.File]::WriteAllText($guiErr, '', [Text.UTF8Encoding]::new($false))
+    if (Test-Path -LiteralPath $guiReady -PathType Leaf) { Remove-Item -LiteralPath $guiReady -Force }
+
+    $guiArguments = @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', $GuiScript,
+        '-StartupReadyFile', $guiReady,
+        '-StartupErrorFile', $guiErr
+    )
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = (Get-Command 'powershell.exe' -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $startInfo.Arguments = Join-ProcessArguments $guiArguments
+    $startInfo.WorkingDirectory = $ProjectRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+
+    $guiProcess = New-Object Diagnostics.Process
+    $guiProcess.StartInfo = $startInfo
+    if (-not $guiProcess.Start()) { throw 'Windows refused to start the JavaRock GUI process.' }
+
+    $readyPayload = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $guiReady -PathType Leaf) {
+            try { $readyPayload = Get-Content -LiteralPath $guiReady -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+            if ($null -ne $readyPayload) { break }
+        }
+        if ($guiProcess.HasExited) { break }
+        Start-Sleep -Milliseconds 100
     }
+
+    $guiError = ''
+    try { $guiError = (Get-Content -LiteralPath $guiErr -Raw -ErrorAction Stop).Trim() } catch {}
+    $readyPid = 0
+    $readyVisible = $false
+    if ($null -ne $readyPayload) {
+        $pidProperty = $readyPayload.PSObject.Properties['pid']
+        $visibleProperty = $readyPayload.PSObject.Properties['visible']
+        if ($null -ne $pidProperty) { $readyPid = [int]$pidProperty.Value }
+        if ($null -ne $visibleProperty) { $readyVisible = [bool]$visibleProperty.Value }
+    }
+
+    if ($readyPid -ne $guiProcess.Id -or -not $readyVisible) {
+        $exitDetail = if ($guiProcess.HasExited) { " It exited with code $($guiProcess.ExitCode)." } else { '' }
+        if (-not $guiProcess.HasExited) {
+            try { $guiProcess.Kill() } catch {}
+        }
+        throw "The JavaRock GUI did not create a visible window within 10 seconds.$exitDetail $guiError"
+    }
+
+    if (Test-Path -LiteralPath $guiReady -PathType Leaf) { Remove-Item -LiteralPath $guiReady -Force }
     $guiProcess.Dispose()
-    Write-Host '[JavaRock] Native Windows GUI started. Python and Tkinter are not required.'
+    Write-Host "[JavaRock] Native Windows GUI is visible (PID $readyPid). Python and Tkinter are not required."
     exit 0
 } catch {
     $message = $_.Exception.Message
