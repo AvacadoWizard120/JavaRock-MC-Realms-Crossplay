@@ -11,7 +11,7 @@ User opens bridge app
     -> app starts a local Bedrock relay for ViaBedrock
     -> app starts ViaProxy as the Java front door
     -> user joins that local server from Minecraft Java Edition
-    -> translated Java traffic reaches the Realm over NetherNet
+    -> translated Java traffic reaches the Realm over NetherNet or RakNet
 ```
 
 Internally it needs three layers:
@@ -40,7 +40,7 @@ Direct Java-packet-to-Bedrock-packet forwarding will become unmaintainable. A br
 - `src/nethernetInfo.js` resolves the selected Realm endpoint and identifies NetherNet GUIDs.
 - `src/nethernetJsonRpcSignal.js` connects to the Realms NetherNet JSON-RPC signaling service.
 - `src/nethernetRealmTransport.js` adapts NetherNet data-channel payloads into the RakNet-shaped transport expected by `bedrock-protocol`.
-- `src/nethernetBedrockProbe.js` creates the Bedrock client over NetherNet and performs the modern Realm login/spawn flow.
+- `src/nethernetBedrockProbe.js` creates the Bedrock client over the Realm endpoint's NetherNet or RakNet transport and performs login/spawn.
 - `src/javaLanStatusServer.js` starts a Java LAN-visible status facade so the Java-client side can be exercised before gameplay translation exists.
 - `src/nethernetBedrockRelay.js` relays and normalizes Bedrock traffic between ViaBedrock/native Bedrock and the Realm.
 - `src/bedrockPacketRecorder.js` starts the transparent native Bedrock baseline recorder.

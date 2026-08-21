@@ -20,9 +20,13 @@ Use **Microsoft Account > Logout / Forget Account**, then add the intended accou
 
 Confirm that the selected Microsoft/Xbox account owns the Bedrock Realm or has accepted its invitation. Java Realms and Bedrock Realms are separate services. Refresh the Realm list after changing accounts.
 
+The refresh stops after about two minutes instead of loading forever. On a new account, finish the Microsoft device-code prompt shown in the JavaRock log before that timer expires. On an existing account, a timeout usually means Microsoft or Realms did not answer; retry once and keep the Realm log if it fails again.
+
 ## Java Cannot Connect
 
 Confirm that the GUI says the bridge is running and connect to `localhost:25565`. Stop stale JavaRock processes with the GUI's **Stop** button before retrying. A firewall prompt should be allowed only for the local/private network you intend to use.
+
+JavaRock stops a Realm endpoint lookup after 45 seconds. A timeout or repeated `503` response is a Realms service or network failure, not a reason to leave Minecraft on Joining World for five minutes. Refresh the Realm list and start the bridge again. The GUI passes the selected Realm id directly, so accounts with similarly named Realms do not silently join the first name match.
 
 ## Joining World, Empty Terrain, or Desync
 

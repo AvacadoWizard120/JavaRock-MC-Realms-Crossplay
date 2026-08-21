@@ -34,8 +34,8 @@ function makeDeferredRelayRealmInfo (config) {
       host: 'pending',
       port: 19132,
       isUuidLikeHost: true,
-      networkProtocol: 'NETHERNET_JSONRPC',
-      transport: 'nethernet',
+      networkProtocol: undefined,
+      transport: 'pending',
       pending: true
     }
   }
@@ -85,7 +85,7 @@ async function runViaBedrockRelay (config, runtimeStatus) {
     enableViaBedrockExperimentalFeatures: true
   })
 
-  console.log('[bridge] Java -> ViaProxy/ViaBedrock -> local Bedrock relay -> NetherNet Realm.')
+  console.log('[bridge] Java -> ViaProxy/ViaBedrock -> local Bedrock relay -> selected Bedrock Realm.')
   console.log('[bridge] Realm endpoint lookup is deferred until a Java client joins, so the local front door can start immediately.')
   printRelayJoinReady(config, relay)
   runtimeStatus.event('via_bedrock_relay_started', {
@@ -130,7 +130,7 @@ async function runStatusFacade (config, runtimeStatus) {
       loginDisconnectText = 'Realm auth and selection worked. Start the ViaBedrock relay to join from Java.'
     } else {
       statusText = `Bridge selected ${info.realm.name || 'Realm'} - RakNet endpoint available`
-      loginDisconnectText = 'Realm endpoint is RakNet-capable, but Java-to-Bedrock gameplay translation is not wired yet.'
+      loginDisconnectText = 'Realm endpoint lookup worked. Start the ViaBedrock relay to join from Java.'
     }
   } catch (error) {
     runtimeStatus.event('realm_lookup_error', {

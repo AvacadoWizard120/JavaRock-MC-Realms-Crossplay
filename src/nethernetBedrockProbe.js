@@ -4,6 +4,7 @@ require('./preferVendoredProtocol').installVendoredProtocolPath()
 require('./bedrockProtocolSchemaCompat').installBedrockProtocolSchemaCompat()
 
 const { Client } = require('bedrock-protocol/src/client')
+const bedrock = require('bedrock-protocol')
 const Options = require('bedrock-protocol/src/options')
 const { ClientStatus } = require('bedrock-protocol/src/connection')
 const { BridgeStateTracker } = require('./stateTracker')
@@ -32,6 +33,25 @@ function buildNetherNetBedrockClientOptions (config, info) {
     onMsaCode: printDeviceCode,
     conLog: message => console.log(`[bedrock] ${message}`),
     delayedInit: true
+  }
+}
+
+function buildRakNetBedrockClientOptions (config, info) {
+  return {
+    username: config.username,
+    profilesFolder: config.profilesFolder,
+    connectTimeout: config.connectTimeoutMs,
+    raknetBackend: config.raknetBackend || 'jsp-raknet',
+    useRaknetWorkers: false,
+    skipPing: true,
+    host: info.endpoint.host,
+    port: info.endpoint.port || 19132,
+    version: config.version || Options.CURRENT_VERSION,
+    authflow: createBedrockAuthflow(config, {
+      cache: createReadThroughMemoryCacheFactory(config.profilesFolder)
+    }),
+    onMsaCode: printDeviceCode,
+    conLog: message => console.log(`[bedrock] ${message}`)
   }
 }
 
@@ -156,6 +176,43 @@ function createNetherNetBedrockClient (config, info, options = {}) {
   return { client, state, transport: client.connection }
 }
 
+function createRakNetBedrockClient (config, info, options = {}) {
+  const state = new BridgeStateTracker()
+  const clientOptions = buildRakNetBedrockClientOptions(config, info)
+  installCompressionAwareEncryptor()
+
+  console.log(`${options.prefix || '\n[bedrock-realm]'} Creating Bedrock client over RakNet transport:`)
+  console.log(safeStringify({
+    username: clientOptions.username,
+    profilesFolder: clientOptions.profilesFolder,
+    version: clientOptions.version,
+    host: clientOptions.host,
+    port: clientOptions.port,
+    probeSeconds: config.probeSeconds
+  }, 2))
+
+  const client = bedrock.createClient(clientOptions)
+  attachStateHandlers(client, state)
+  attachPacketLogger(client, config, state)
+  attachLifecycleLogging(client, state, config)
+
+  client.once('spawn', () => {
+    console.log('[bedrock-realm] Spawn observed over RakNet. The Java packet relay is ready.')
+  })
+
+  return { client, state, transport: client.connection }
+}
+
+function createRealmBedrockClient (config, info, options = {}) {
+  if (info?.endpoint?.transport === 'nethernet') {
+    return createNetherNetBedrockClient(config, info, options)
+  }
+  if (info?.endpoint?.transport === 'raknet') {
+    return createRakNetBedrockClient(config, info, options)
+  }
+  throw new Error(`Unsupported Realm endpoint transport: ${info?.endpoint?.transport || '(missing)'}`)
+}
+
 async function runNetherNetBedrockProbe (config) {
   const info = await inspectRealmNetherNetInfo(config)
   printRealmNetherNetInfoResult(info)
@@ -184,7 +241,10 @@ async function runNetherNetBedrockProbe (config) {
 module.exports = {
   attachBedrockLoginResponses,
   buildNetherNetBedrockClientOptions,
+  buildRakNetBedrockClientOptions,
   createNetherNetBedrockClient,
+  createRakNetBedrockClient,
+  createRealmBedrockClient,
   runNetherNetBedrockProbe,
   waitForProbeWindow
 }

@@ -42,8 +42,8 @@ Useful flags:
   --realm-index <n>       Pick from joined/owned Realms list.
   --realm-id <id>         Join a specific Realm id.
   --realm-invite <code>   Join via invite code/link where supported by bedrock-protocol.
-  --realm-name <text>     Pick first Realm whose name contains text.
-  --version <x.y.z>       Force a Bedrock protocol version.
+  --realm-name <text>     Pick an exact name or one unambiguous partial name.
+  --version <x.y.z>       Force the Realm-side Bedrock protocol version.
   --log-all-packets       Log every packet name/JSON when JSON logging is enabled.
   --log-packet-json       Write important packet payloads to packet-logs/*.jsonl.
   --probe-seconds <n>     For probe mode, exit n seconds after spawn. 0 = never auto-exit.
@@ -76,6 +76,7 @@ async function main () {
       try {
         await listRealmsWithRealmApi(config)
       } catch (error) {
+        if (error?.code === 'OPERATION_TIMEOUT') throw error
         console.warn('[realms] RealmAPI listing failed. Falling back to bedrock-protocol pickRealm list path.')
         console.warn(`[realms] ${error.stack || error.message || error}`)
         createRealmClient(config, { listOnly: true })

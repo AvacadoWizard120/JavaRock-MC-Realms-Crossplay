@@ -8,7 +8,7 @@ const path = require('path')
 const { Relay } = require('bedrock-protocol')
 const { Player } = require('bedrock-protocol/src/serverPlayer')
 const { ClientStatus } = require('bedrock-protocol/src/connection')
-const { createNetherNetBedrockClient } = require('./nethernetBedrockProbe')
+const { createRealmBedrockClient } = require('./nethernetBedrockProbe')
 const { inspectRealmNetherNetInfo } = require('./nethernetInfo')
 const { safeStringify } = require('./safeStringify')
 const { createPacketCensusFromConfig, summarizePacketForCensus } = require('./packetCensus')
@@ -50,10 +50,11 @@ function intEnv (name, fallback) {
 
 function realmEndpointRefreshRetryOptions () {
   return {
-    maxAttempts: intEnv('NETHERNET_RELAY_REFRESH_REALM_JOIN_MAX_ATTEMPTS', 4),
-    baseDelayMs: intEnv('NETHERNET_RELAY_REFRESH_REALM_JOIN_RETRY_BASE_MS', 1500),
-    maxDelayMs: intEnv('NETHERNET_RELAY_REFRESH_REALM_JOIN_RETRY_MAX_MS', 8000),
-    jitterMs: intEnv('NETHERNET_RELAY_REFRESH_REALM_JOIN_RETRY_JITTER_MS', 1000)
+    maxAttempts: intEnv('NETHERNET_RELAY_REFRESH_REALM_JOIN_MAX_ATTEMPTS', 3),
+    baseDelayMs: intEnv('NETHERNET_RELAY_REFRESH_REALM_JOIN_RETRY_BASE_MS', 1000),
+    maxDelayMs: intEnv('NETHERNET_RELAY_REFRESH_REALM_JOIN_RETRY_MAX_MS', 4000),
+    jitterMs: intEnv('NETHERNET_RELAY_REFRESH_REALM_JOIN_RETRY_JITTER_MS', 500),
+    attemptTimeoutMs: intEnv('REALM_JOIN_ATTEMPT_TIMEOUT_MS', 12000)
   }
 }
 
@@ -6034,6 +6035,7 @@ class NetherNetRealmRelay extends Relay {
     this.downstreamBedrockVersion = options.version || options.bridgeConfig?.bedrockRelay?.version || '1.26.30'
     this.realmInfoPrefetchPromise = null
     this.prefetchedRealmInfo = null
+    this.lastRealmInfoPrefetchFailureAt = 0
   }
 
   isNativeBedrockRecorderDownstream () {
@@ -6049,10 +6051,11 @@ class NetherNetRealmRelay extends Relay {
   }
 
   hasUsableRealmEndpoint (info = this.realmInfo) {
-    return info?.endpoint?.transport === 'nethernet' &&
-      info.endpoint.host &&
-      info.endpoint.host !== 'pending' &&
-      info.endpoint.pending !== true
+    const endpoint = info?.endpoint
+    return (endpoint?.transport === 'nethernet' || endpoint?.transport === 'raknet') &&
+      endpoint.host &&
+      endpoint.host !== 'pending' &&
+      endpoint.pending !== true
   }
 
   startRealmEndpointPrefetch (label = 'relay startup') {
@@ -6065,12 +6068,17 @@ class NetherNetRealmRelay extends Relay {
     const promise = inspectRealmNetherNetInfo(this.bridgeConfig, {
       realmJoinRetry: realmEndpointRefreshRetryOptions()
     }).then(fresh => {
-      if (!this.hasUsableRealmEndpoint(fresh)) return null
+      if (!this.hasUsableRealmEndpoint(fresh)) {
+        this.lastRealmInfoPrefetchFailureAt = Date.now()
+        return null
+      }
+      this.lastRealmInfoPrefetchFailureAt = 0
       this.prefetchedRealmInfo = { info: fresh, resolvedAt: Date.now() }
       console.log(`[bedrock-relay] Realm endpoint prefetch ready in ${Date.now() - startedAt}ms.`)
       return fresh
     }).catch(error => {
-      console.warn(`[bedrock-relay] Realm endpoint prefetch did not complete; Java join will perform the normal fresh lookup: ${error.message || error}`)
+      this.lastRealmInfoPrefetchFailureAt = Date.now()
+      console.warn(`[bedrock-relay] Realm endpoint prefetch did not complete: ${error.message || error}`)
       return null
     })
 
@@ -6087,10 +6095,11 @@ class NetherNetRealmRelay extends Relay {
     this.prefetchedRealmInfo = null
     if (!prefetched || !this.hasUsableRealmEndpoint(prefetched.info)) return null
 
-    const maxAgeMs = Math.max(1000, intEnv('NETHERNET_RELAY_PREFETCH_REALM_ENDPOINT_MAX_AGE_MS', 15000))
+    const defaultMaxAgeMs = prefetched.info.endpoint.transport === 'raknet' ? 300000 : 15000
+    const maxAgeMs = Math.max(1000, intEnv('NETHERNET_RELAY_PREFETCH_REALM_ENDPOINT_MAX_AGE_MS', defaultMaxAgeMs))
     const ageMs = Date.now() - prefetched.resolvedAt
     if (ageMs > maxAgeMs) {
-      console.log(`[bedrock-relay] Discarding ${ageMs}ms-old prefetched Realm endpoint for ${label}; one-shot session GUIDs must stay fresh.`)
+      console.log(`[bedrock-relay] Discarding ${ageMs}ms-old prefetched ${prefetched.info.endpoint.transport} Realm endpoint for ${label}.`)
       return null
     }
 
@@ -6102,34 +6111,42 @@ class NetherNetRealmRelay extends Relay {
   async resolveFreshRealmInfoForUpstream (label) {
     const prefetched = await this.consumePrefetchedRealmInfo(label)
     if (prefetched) return prefetched
+    if (Date.now() - this.lastRealmInfoPrefetchFailureAt < 10000) {
+      console.warn('[bedrock-relay] The startup Realm lookup just failed; skipping an immediate duplicate lookup.')
+      return null
+    }
 
     const needsResolve = !this.hasUsableRealmEndpoint(this.realmInfo)
     if (process.env.NETHERNET_RELAY_REFRESH_REALM_ENDPOINT === 'false' && !needsResolve) return this.realmInfo
-    if (this.realmInfo?.endpoint?.transport !== 'nethernet' && !needsResolve) return this.realmInfo
-
     try {
       const realmJoinRetry = realmEndpointRefreshRetryOptions()
       const retryLabel = realmJoinRetry.maxAttempts <= 0 ? 'unbounded retries' : `${realmJoinRetry.maxAttempts} attempt(s)`
       const action = needsResolve ? 'Resolving' : 'Refreshing'
-      console.log(`[bedrock-relay] ${action} Realm NetherNet endpoint for ${label} (${retryLabel} before falling back). This avoids reusing stale one-shot session GUIDs after failed/closed WebRTC handshakes.`)
+      console.log(`[bedrock-relay] ${action} Realm endpoint for ${label} (${retryLabel} before failing this join).`)
       const fresh = await inspectRealmNetherNetInfo(this.bridgeConfig, { realmJoinRetry })
-      if (fresh?.endpoint?.transport === 'nethernet' && fresh.endpoint.host) {
+      if (this.hasUsableRealmEndpoint(fresh)) {
         const oldHost = this.realmInfo?.endpoint?.host
         const newHost = fresh.endpoint.host
         this.realmInfo = fresh
-        if (oldHost && oldHost !== 'pending' && oldHost !== newHost) {
+        if (fresh.endpoint.transport === 'nethernet' && oldHost && oldHost !== 'pending' && oldHost !== newHost) {
           console.log(`[bedrock-relay] Refreshed Realm NetherNet session GUID: ${oldHost} -> ${newHost}`)
-        } else {
+        } else if (fresh.endpoint.transport === 'nethernet') {
           console.log(`[bedrock-relay] Refreshed Realm NetherNet session GUID: ${newHost}`)
+        } else {
+          console.log(`[bedrock-relay] Refreshed Realm RakNet endpoint: ${newHost}:${fresh.endpoint.port}`)
         }
         return fresh
       }
-      console.warn('[bedrock-relay] Realm endpoint refresh did not return a usable NetherNet endpoint; using the existing endpoint for this attempt.')
+      console.warn('[bedrock-relay] Realm endpoint refresh did not return a usable endpoint.')
     } catch (error) {
-      console.warn(`[bedrock-relay] Realm endpoint refresh failed; using the existing endpoint for this attempt: ${error.message || error}`)
+      console.warn(`[bedrock-relay] Realm endpoint refresh failed: ${error.message || error}`)
     }
 
-    return this.realmInfo
+    if (this.realmInfo?.endpoint?.transport === 'raknet' && this.hasUsableRealmEndpoint(this.realmInfo)) {
+      console.warn('[bedrock-relay] Reusing the last RakNet endpoint after refresh failed.')
+      return this.realmInfo
+    }
+    return null
   }
 
   cleanupUpstreamState (hash) {
@@ -6142,12 +6159,16 @@ class NetherNetRealmRelay extends Relay {
     const label = `${ds.profile?.name || ds.profile?.xuid || clientAddr.host || 'bedrock-downstream'}#${String(hash).slice(0, 8)}`
 
     console.log(`[bedrock-relay] Downstream ${this.downstreamClientLabel()} authenticated: ${label}`)
-    console.log('[bedrock-relay] Opening NetherNet upstream to the selected Bedrock Realm.')
+    console.log('[bedrock-relay] Opening an upstream connection to the selected Bedrock Realm.')
 
     const openingStartedAt = Date.now()
+    this.runtimeStatus?.event?.('bedrock_relay_endpoint_lookup_started', {
+      state: 'resolving_realm_endpoint',
+      bedrockRelay: { downstream: label }
+    })
     const attemptRealmInfo = await this.resolveFreshRealmInfoForUpstream(label)
     if (!this.hasUsableRealmEndpoint(attemptRealmInfo)) {
-      const message = 'Realm endpoint lookup failed before NetherNet connect. Check Microsoft/Minecraft Services DNS/connectivity and retry from the GUI.'
+      const message = 'Realm endpoint lookup did not finish in time. Check Microsoft/Minecraft Services connectivity, refresh the Realm list, and try again.'
       console.error(`[bedrock-relay] ${message}`)
       this.runtimeStatus?.event?.('bedrock_relay_endpoint_lookup_failed', {
         state: 'bedrock_relay_error',
@@ -6163,7 +6184,16 @@ class NetherNetRealmRelay extends Relay {
     }
     const downstreamBedrockVersion = this.downstreamBedrockVersion || this.bridgeConfig?.bedrockRelay?.version || '1.26.30'
     const upstreamBedrockVersion = this.bridgeConfig?.bedrockRelay?.upstreamVersion || this.bridgeConfig?.version
-    console.log(`[bedrock-relay] Fresh Realm endpoint ready after ${Date.now() - openingStartedAt}ms; starting WebRTC and Bedrock login.`)
+    this.runtimeStatus?.event?.('bedrock_relay_endpoint_ready', {
+      state: 'connecting_to_realm',
+      realm: attemptRealmInfo.realm,
+      endpoint: {
+        transport: attemptRealmInfo.endpoint.transport,
+        networkProtocol: attemptRealmInfo.endpoint.networkProtocol
+      },
+      bedrockRelay: { downstream: label }
+    })
+    console.log(`[bedrock-relay] Fresh ${attemptRealmInfo.endpoint.transport} Realm endpoint ready after ${Date.now() - openingStartedAt}ms; starting Bedrock login.`)
 
     console.log(`[bedrock-relay] Local ${this.downstreamSchemaLabel()} packet schema: ${downstreamBedrockVersion}`)
     console.log(`[bedrock-relay] Upstream Realm Bedrock client version: ${upstreamBedrockVersion || '(bedrock-protocol current)'}`)
@@ -6182,7 +6212,7 @@ class NetherNetRealmRelay extends Relay {
 
     let upstreamBundle
     try {
-      upstreamBundle = createNetherNetBedrockClient(relayConfig, attemptRealmInfo, {
+      upstreamBundle = createRealmBedrockClient(relayConfig, attemptRealmInfo, {
         prefix: '[bedrock-relay]'
       })
     } catch (error) {
@@ -6218,7 +6248,7 @@ class NetherNetRealmRelay extends Relay {
         })
       }
       ds.flushUpQueue()
-      console.log(`[bedrock-relay] NetherNet upstream joined; packet relay is now live (${Date.now() - openingStartedAt}ms after downstream authentication).`)
+      console.log(`[bedrock-relay] Realm upstream joined over ${attemptRealmInfo.endpoint.transport}; packet relay is now live (${Date.now() - openingStartedAt}ms after downstream authentication).`)
       if (this.isNativeBedrockRecorderDownstream()) {
         console.log('[bedrock-recorder-ready] Native Bedrock recorder relay is live. Join from Bedrock and reproduce the baseline flow; packets should pass through without ViaBedrock play gating.')
       } else {
@@ -6246,7 +6276,7 @@ class NetherNetRealmRelay extends Relay {
     })
 
     upstream.on('error', error => {
-      console.error(`[bedrock-relay] Upstream NetherNet error: ${error.stack || error.message || error}`)
+      console.error(`[bedrock-relay] Upstream Realm error: ${error.stack || error.message || error}`)
       this.runtimeStatus?.event?.('bedrock_relay_upstream_error', {
         state: 'bedrock_relay_error',
         bedrockRelay: {
@@ -6260,7 +6290,7 @@ class NetherNetRealmRelay extends Relay {
     })
 
     upstream.on('close', reason => {
-      console.log(`[bedrock-relay] Upstream NetherNet closed: ${reason || 'closed'}`)
+      console.log(`[bedrock-relay] Upstream Realm connection closed: ${reason || 'closed'}`)
       this.runtimeStatus?.event?.('bedrock_relay_upstream_close', {
         state: 'bedrock_relay_closed',
         bedrockRelay: {
@@ -6297,7 +6327,7 @@ function startNetherNetBedrockRelay (config, info, options = {}) {
   const port = relayConfig.port || 19133
   const version = relayConfig.version || config.version || '1.26.30'
   const motd = relayConfig.motd || config.javaLan?.motd || 'Bedrock Realm Bridge'
-  const levelName = relayConfig.levelName || `${info.realm?.name || 'Realm'} over NetherNet`
+  const levelName = relayConfig.levelName || `${info.realm?.name || 'Bedrock Realm'} through JavaRock`
   const downstreamMode = normalizeDownstreamMode(options.downstreamMode || relayConfig.downstreamMode)
 
   const relay = new NetherNetRealmRelay({

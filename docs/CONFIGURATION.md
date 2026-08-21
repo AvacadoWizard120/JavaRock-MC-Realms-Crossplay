@@ -13,9 +13,11 @@ Use the **Microsoft Account** menu to add, switch, forget, or refresh an account
 The GUI lists Realms visible to the selected account. A manual Realm name can be used when needed. Command-line selection uses this precedence:
 
 1. Realm id
-2. Realm index
-3. Realm name
+2. Realm name
+3. Realm index
 4. Realm index `0`
+
+Realm names are matched exactly first. A partial name is accepted only when it identifies one Realm; ambiguous names must be selected by id.
 
 ## Default Ports
 
@@ -42,5 +44,9 @@ LOG_PACKET_NAMES=true
 LOG_PACKET_JSON=false
 PACKET_CENSUS=false
 ```
+
+JavaRock detects the current Realm-side Bedrock protocol from `bedrock-protocol`. The local ViaProxy/ViaBedrock side remains on the version supported by the stable ViaProxy release, so the two version fields can intentionally differ.
+
+Realm list refresh is capped at 120 seconds, with up to 110 seconds available for a first Microsoft device-code login. Once Java connects, Realm selection and endpoint lookup are capped at 45 seconds. These defaults can be changed with `REALM_LIST_TIMEOUT_MS`, `BEDROCK_SERVICES_AUTH_TIMEOUT_MS`, `REALM_ENDPOINT_TIMEOUT_MS`, and the `REALM_JOIN_*` settings in `.env`.
 
 Leave Realm selectors blank when using the GUI. `BRIDGE_USERNAME` is a local cache key, not a Microsoft account name.

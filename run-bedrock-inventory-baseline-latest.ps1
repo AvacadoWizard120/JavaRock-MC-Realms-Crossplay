@@ -1,6 +1,6 @@
 param(
   [string]$RealmName = "",
-  [string]$BedrockVersion = "1.26.30",
+  [string]$BedrockVersion = "",
   [string]$BindHost = "0.0.0.0",
   [int]$Port = 19133
 )
@@ -21,4 +21,4 @@ Write-Host "[script]   4. Stop the recorder and run: node scripts\inventory-trac
   -Port $Port `
   -CaptureProfile "native-bedrock-inventory-crafting-baseline" `
   -SourceLabel "Native Bedrock client focused inventory/crafting baseline" `
-  -TargetLabel "Bedrock Realm over NetherNet"
+  -TargetLabel "selected Bedrock Realm"

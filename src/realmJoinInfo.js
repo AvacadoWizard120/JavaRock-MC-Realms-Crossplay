@@ -7,6 +7,7 @@ const {
   normalizeNetworkProtocol,
   normalizeRealmAddress
 } = require('./realmAddress')
+const { withTimeout } = require('./asyncDeadline')
 
 const TRANSIENT_REALM_JOIN_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504])
 
@@ -83,13 +84,14 @@ function realmJoinErrorStatusCode (error) {
 }
 
 function isTransientRealmJoinError (error) {
+  if (error?.code === 'OPERATION_TIMEOUT') return true
   const status = realmJoinErrorStatusCode(error)
   if (status && TRANSIENT_REALM_JOIN_STATUS_CODES.has(status)) return true
   return /retry again later|service unavailable|too many requests|rate limit|temporarily unavailable/i.test(String(error?.message || error || ''))
 }
 
 function realmJoinRetryOptions (options = {}) {
-  const maxAttempts = Number.isInteger(options.maxAttempts) ? options.maxAttempts : intEnv('REALM_JOIN_MAX_ATTEMPTS', 7)
+  const maxAttempts = Number.isInteger(options.maxAttempts) ? options.maxAttempts : intEnv('REALM_JOIN_MAX_ATTEMPTS', 3)
   const retryForever = options.retryForever === true ||
     boolEnv('REALM_JOIN_RETRY_FOREVER', false) ||
     maxAttempts <= 0
@@ -97,9 +99,10 @@ function realmJoinRetryOptions (options = {}) {
   return {
     maxAttempts,
     retryForever,
-    baseDelayMs: Math.max(0, Number.isInteger(options.baseDelayMs) ? options.baseDelayMs : intEnv('REALM_JOIN_RETRY_BASE_MS', 1500)),
-    maxDelayMs: Math.max(0, Number.isInteger(options.maxDelayMs) ? options.maxDelayMs : intEnv('REALM_JOIN_RETRY_MAX_MS', 15000)),
+    baseDelayMs: Math.max(0, Number.isInteger(options.baseDelayMs) ? options.baseDelayMs : intEnv('REALM_JOIN_RETRY_BASE_MS', 1000)),
+    maxDelayMs: Math.max(0, Number.isInteger(options.maxDelayMs) ? options.maxDelayMs : intEnv('REALM_JOIN_RETRY_MAX_MS', 4000)),
     jitterMs: Math.max(0, Number.isInteger(options.jitterMs) ? options.jitterMs : intEnv('REALM_JOIN_RETRY_JITTER_MS', 0)),
+    attemptTimeoutMs: Math.max(1000, Number.isInteger(options.attemptTimeoutMs) ? options.attemptTimeoutMs : intEnv('REALM_JOIN_ATTEMPT_TIMEOUT_MS', 12000)),
     log: options.log === false ? null : (typeof options.log === 'function' ? options.log : console.warn)
   }
 }
@@ -122,21 +125,25 @@ function realmJoinAttemptLabel (attempt, retry) {
 function makeRealmJoinExhaustedError (error, attempts) {
   const finalError = new Error(
     `Realm join endpoint stayed unavailable after ${attempts} attempt(s): ${error.message || error}. ` +
-    'This is usually a transient Realms session-service failure. Set REALM_JOIN_MAX_ATTEMPTS=0 to keep waiting until it recovers.'
+    'This is usually a transient Realms session-service failure. Wait a moment, refresh the Realm list, and try again.'
   )
   finalError.cause = error
   finalError.statusCode = realmJoinErrorStatusCode(error)
   return finalError
 }
 
-async function fetchRealmJoinResponse (api, realm) {
+async function fetchRealmJoinResponse (api, realm, timeoutMs = intEnv('REALM_JOIN_ATTEMPT_TIMEOUT_MS', 12000)) {
   const realmId = getRealmId(realm)
   if (!realmId) throw new Error('Cannot fetch Realm join response because the selected Realm has no id.')
   if (!api?.rest || typeof api.rest.get !== 'function') {
     throw new Error('Cannot fetch full Realm join response because RealmAPI.rest.get is unavailable.')
   }
 
-  return api.rest.get(`/worlds/${realmId}/join`)
+  return withTimeout(
+    () => api.rest.get(`/worlds/${realmId}/join`),
+    timeoutMs,
+    `Realm ${realmId} join endpoint request`
+  )
 }
 
 async function getRealmJoinEndpointInfo (api, realm, options = {}) {
@@ -146,7 +153,7 @@ async function getRealmJoinEndpointInfo (api, realm, options = {}) {
 
   for (let attempt = 1; attempt <= attemptLimit; attempt++) {
     try {
-      const joinResponse = await fetchRealmJoinResponse(api, realm)
+      const joinResponse = await fetchRealmJoinResponse(api, realm, retry.attemptTimeoutMs)
       if (attempt > 1) retry.log?.(`[realms] Realm join endpoint recovered after ${attempt} attempt(s).`)
       return makeRealmJoinEndpointInfo(joinResponse)
     } catch (error) {

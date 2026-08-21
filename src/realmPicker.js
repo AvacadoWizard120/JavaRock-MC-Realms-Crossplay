@@ -3,12 +3,25 @@
 const { safeStringify } = require('./safeStringify')
 const { wrapRealmAddressNormalizer } = require('./realmAddress')
 
+const REALM_RECORD_PREFIX = '[realm-json] '
+
 function getRealmId (realm) {
   return String(realm?.id ?? realm?.realmId ?? realm?.remoteSubscriptionId ?? '')
 }
 
 function getRealmName (realm) {
   return String(realm?.name ?? realm?.worldName ?? realm?.motd ?? '')
+}
+
+function summarizeRealm (realm, index) {
+  return {
+    index,
+    id: getRealmId(realm),
+    name: getRealmName(realm),
+    owner: String(realm?.ownerName ?? realm?.owner ?? realm?.ownerUUID ?? ''),
+    state: String(realm?.state ?? realm?.status ?? ''),
+    expired: realm?.expired === true
+  }
 }
 
 function printRealms (realms) {
@@ -26,6 +39,7 @@ function printRealms (realms) {
     const state = realm.state ?? realm.status ?? '(unknown state)'
     const expired = realm.expired === true ? ' expired' : ''
     console.log(`  [${i}] ${name} | id=${id} | owner=${owner} | state=${state}${expired}`)
+    console.log(`${REALM_RECORD_PREFIX}${JSON.stringify(summarizeRealm(realm, i))}`)
   }
   console.log('')
 }
@@ -43,10 +57,21 @@ function selectRealm (realms, selector) {
   }
 
   if (selector.name) {
-    const wanted = String(selector.name).toLowerCase()
-    const match = realms.find(realm => getRealmName(realm).toLowerCase().includes(wanted))
-    if (!match) throw new Error(`REALM_NAME containing "${selector.name}" was not found.`)
-    return match
+    const selectedName = String(selector.name).trim()
+    const wanted = selectedName.toLowerCase()
+    const exact = realms.filter(realm => getRealmName(realm).trim().toLowerCase() === wanted)
+    if (exact.length === 1) return exact[0]
+    if (exact.length > 1) {
+      throw new Error(`More than one Realm is named "${selectedName}". Select it by Realm id instead.`)
+    }
+
+    const partial = realms.filter(realm => getRealmName(realm).toLowerCase().includes(wanted))
+    if (partial.length === 1) return partial[0]
+    if (partial.length > 1) {
+      const matches = partial.map(realm => `${getRealmName(realm)} (${getRealmId(realm) || 'no id'})`).join(', ')
+      throw new Error(`REALM_NAME "${selectedName}" is ambiguous. Matching Realms: ${matches}. Select one by Realm id.`)
+    }
+    throw new Error(`REALM_NAME containing "${selectedName}" was not found.`)
   }
 
   if (Number.isInteger(selector.index)) {
@@ -86,9 +111,11 @@ function makeRealmPickFunction (config, options = {}) {
 }
 
 module.exports = {
+  REALM_RECORD_PREFIX,
   getRealmId,
   getRealmName,
   printRealms,
   selectRealm,
+  summarizeRealm,
   makeRealmPickFunction
 }

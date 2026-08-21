@@ -53,6 +53,18 @@ public static class JavaRockNativeWindow {
 }
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$DefaultUpstreamBedrockVersion = ''
+Push-Location $ProjectRoot
+try {
+    try {
+        $candidateVersion = (& node.exe -e "process.stdout.write(require('bedrock-protocol/src/options').CURRENT_VERSION)" 2>$null).Trim()
+        if ($LASTEXITCODE -eq 0 -and $candidateVersion -match '^\d+\.\d+\.\d+$') {
+            $DefaultUpstreamBedrockVersion = $candidateVersion
+        }
+    } catch {}
+} finally {
+    Pop-Location
+}
 $PrimaryRuntimeDir = Join-Path $ProjectRoot '.runtime'
 $FallbackRuntimeDir = Join-Path $ProjectRoot '.runtime-desktop'
 $AuthProfilesDir = Join-Path $ProjectRoot '.auth-profiles'
@@ -311,10 +323,32 @@ function Add-Log {
 function Parse-Realms {
     param([string]$Output)
 
-    $realms = @()
+    $structured = @()
+    $legacy = @()
     foreach ($line in @($Output -split "`r?`n")) {
+        if ($line -match '^\[realm-json\]\s+(?<json>\{.*\})\s*$') {
+            try {
+                $record = $Matches.json | ConvertFrom-Json
+                $name = [string](Get-ObjectValue $record 'name' '')
+                $id = [string](Get-ObjectValue $record 'id' '')
+                $state = [string](Get-ObjectValue $record 'state' '')
+                $expired = [bool](Get-ObjectValue $record 'expired' $false)
+                $stateLabel = if ($state) { $state } else { 'unknown state' }
+                if ($expired) { $stateLabel += ', expired' }
+                $structured += [pscustomobject]@{
+                    Index = [int](Get-ObjectValue $record 'index' $structured.Count)
+                    Name = $name
+                    Id = $id
+                    Owner = [string](Get-ObjectValue $record 'owner' '')
+                    State = $state
+                    Expired = $expired
+                    Label = "$(if ($name) { $name } else { '(unnamed)' }) | $stateLabel | $(if ($id) { $id } else { 'no id' })"
+                }
+            } catch {}
+            continue
+        }
         if ($line -match '^\s*\[(?<index>\d+)\]\s+(?<name>.*?)\s+\|\s+id=(?<id>.*?)\s+\|\s+owner=(?<owner>.*?)\s+\|\s+state=(?<state>.*?)(?:\s+expired)?\s*$') {
-            $realms += [pscustomobject]@{
+            $legacy += [pscustomobject]@{
                 Index = [int]$Matches.index
                 Name = $Matches.name
                 Id = $Matches.id
@@ -324,7 +358,8 @@ function Parse-Realms {
             }
         }
     }
-    return @($realms)
+    if ($structured.Count -gt 0) { return @($structured) }
+    return @($legacy)
 }
 
 $script:Profiles = @()
@@ -332,6 +367,8 @@ $script:SelectedProfileId = ''
 $script:Realms = @()
 $script:BridgeProcess = $null
 $script:RealmProcess = $null
+$script:RealmRefreshStartedAt = $null
+$script:RealmRefreshTimeoutMs = 130000
 $script:StopProcess = $null
 $script:LogOffsets = @{}
 $script:LogBox = $null
@@ -504,7 +541,7 @@ $upstreamLabel.AutoSize = $true
 $launchGroup.Controls.Add($upstreamLabel)
 
 $upstreamVersion = New-Object System.Windows.Forms.TextBox
-$upstreamVersion.Text = '1.26.30'
+$upstreamVersion.Text = $DefaultUpstreamBedrockVersion
 $upstreamVersion.Location = New-Object Drawing.Point(382, 102)
 $upstreamVersion.Size = New-Object Drawing.Size(125, 25)
 $launchGroup.Controls.Add($upstreamVersion)
@@ -734,10 +771,12 @@ function Refresh-Realms {
     }
     try {
         $script:RealmProcess = Start-RedirectedProcess -FilePath 'node.exe' -Arguments $arguments -StdoutPath $RealmStdoutLog -StderrPath $RealmStderrLog -Environment $environment
+        $script:RealmRefreshStartedAt = [DateTime]::UtcNow
         $refreshButton.Enabled = $false
         Update-TopStatus 'refreshing realms'
     } catch {
         Add-Log 'realms' "Realm refresh failed: $($_.Exception.Message)"
+        $refreshButton.Enabled = $true
     }
 }
 
@@ -773,11 +812,11 @@ function Start-BridgeOrRecorder {
     $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $ProjectRoot $scriptName))
     $arguments += @(Get-SelectedRealmArguments)
     if ($recorder) {
-        $arguments += @('-BedrockVersion', $(if ($upstreamVersion.Text.Trim()) { $upstreamVersion.Text.Trim() } else { '1.26.30' }), '-StatusFile', $StatusFile)
+        $arguments += @('-BedrockVersion', $upstreamVersion.Text.Trim(), '-StatusFile', $StatusFile)
     } else {
         $arguments += @(
             '-ViaProxyBedrockTargetVersion', $(if ($targetVersion.Text.Trim()) { $targetVersion.Text.Trim() } else { 'Bedrock 1.26.30' }),
-            '-UpstreamBedrockVersion', $(if ($upstreamVersion.Text.Trim()) { $upstreamVersion.Text.Trim() } else { '1.26.30' })
+            '-UpstreamBedrockVersion', $upstreamVersion.Text.Trim()
         )
     }
     $environment = @{
@@ -884,6 +923,17 @@ $timer.Add_Tick({
         if ($text) { Add-Log $entry.Source $text }
     }
 
+    if ($null -ne $script:RealmProcess -and -not $script:RealmProcess.HasExited -and $null -ne $script:RealmRefreshStartedAt) {
+        $refreshElapsedMs = ([DateTime]::UtcNow - $script:RealmRefreshStartedAt).TotalMilliseconds
+        if ($refreshElapsedMs -ge $script:RealmRefreshTimeoutMs) {
+            Add-Log 'realms' "Realm refresh exceeded $([Math]::Round($script:RealmRefreshTimeoutMs / 1000)) seconds and was stopped. Check the Microsoft login message or network connection, then retry."
+            try { Stop-Process -Id $script:RealmProcess.Id -Force -ErrorAction SilentlyContinue } catch {}
+            try { $script:RealmProcess.Dispose() } catch {}
+            $script:RealmProcess = $null
+            $script:RealmRefreshStartedAt = $null
+            $refreshButton.Enabled = $true
+        }
+    }
     if ($null -ne $script:RealmProcess -and $script:RealmProcess.HasExited) {
         $exitCode = $script:RealmProcess.ExitCode
         $combined = ''
@@ -894,6 +944,7 @@ $timer.Add_Tick({
         Add-Log 'realms' "Realm refresh finished with exit code $exitCode; found $($realms.Count) Realm(s)."
         $script:RealmProcess.Dispose()
         $script:RealmProcess = $null
+        $script:RealmRefreshStartedAt = $null
         $refreshButton.Enabled = $true
     }
     if ($null -ne $script:BridgeProcess -and $script:BridgeProcess.HasExited) {
@@ -918,6 +969,10 @@ $timer.Add_Tick({
     $bridgeText = if ($bridgePid) { "$bridgePid $(if (Test-ProcessAlive $bridgePid) { 'running' } else { 'stopped' })" } else { '-' }
     $viaText = if ($viaPid) { "$viaPid $(if (Test-ProcessAlive $viaPid) { 'running' } else { 'stopped' })" } else { '-' }
     $pidStatus.Text = "Bridge: $bridgeText   ViaProxy: $viaText"
+    if ($null -ne $script:RealmProcess -and -not $script:RealmProcess.HasExited -and $null -ne $script:RealmRefreshStartedAt) {
+        $elapsedSeconds = [Math]::Floor(([DateTime]::UtcNow - $script:RealmRefreshStartedAt).TotalSeconds)
+        $state = "refreshing realms ($elapsedSeconds s)"
+    }
     Update-TopStatus $state
 })
 
@@ -943,6 +998,10 @@ Set-DarkTheme $script:DarkMode
 Add-Log 'gui' 'Windows-native JavaRock launcher ready.'
 
 if ($SmokeTest) {
+    $realmParserSmoke = @(Parse-Realms '[realm-json] {"index":2,"id":"13","name":"Survival | Friends","owner":"owner","state":"OPEN","expired":false}')
+    if ($realmParserSmoke.Count -ne 1 -or $realmParserSmoke[0].Id -ne '13' -or $realmParserSmoke[0].Name -ne 'Survival | Friends') {
+        throw 'Structured Realm list parsing failed.'
+    }
     Write-Host '[JavaRock] Native Windows GUI smoke check passed.'
     $timer.Dispose()
     $form.Dispose()
