@@ -14,8 +14,14 @@ const {
   normalizeNetworkProtocol,
   transportFromNetworkProtocol
 } = require('../src/realmAddress')
+const { withTimeout } = require('../src/asyncDeadline')
 
 async function main () {
+  await assert.rejects(
+    withTimeout(new Promise(() => {}), 10, 'smoke deadline'),
+    error => error.code === 'OPERATION_TIMEOUT' && /smoke deadline/.test(error.message)
+  )
+
   assert.strictEqual(normalizeNetworkProtocol('nethernet_jsonrpc'), 'NETHERNET_JSONRPC')
   assert.strictEqual(transportFromNetworkProtocol('NETHERNET_JSONRPC'), 'nethernet')
   assert.strictEqual(transportFromNetworkProtocol('NETHERNET'), 'nethernet')
@@ -48,6 +54,9 @@ async function main () {
   assert.strictEqual(extractNetworkProtocol({ network_protocol: 'raknet' }), 'RAKNET')
   assert.strictEqual(classifyRealmEndpointTransport({ host: 'server.example.net', port: 19132 }, { port: 19132 }, undefined), 'raknet')
   assert.strictEqual(isTransientRealmJoinError(new Error('503 Service Unavailable Retry again later')), true)
+  assert.strictEqual(isTransientRealmJoinError(Object.assign(new Error('request timed out'), { code: 'OPERATION_TIMEOUT' })), true)
+  assert.strictEqual(realmJoinRetryOptions({ log: false }).maxAttempts, 3)
+  assert.strictEqual(realmJoinRetryOptions({ log: false }).attemptTimeoutMs, 12000)
   assert.strictEqual(realmJoinRetryOptions({ maxAttempts: 0, log: false }).retryForever, true)
   assert.strictEqual(realmJoinRetryDelayMs(10, { baseDelayMs: 1, maxDelayMs: 5, jitterMs: 0, log: false }), 5)
 

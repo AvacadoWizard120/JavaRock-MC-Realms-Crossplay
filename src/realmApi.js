@@ -9,6 +9,7 @@ const { Authflow, Titles } = require('prismarine-auth')
 const { RealmAPI } = require('prismarine-realms')
 const { CURRENT_VERSION } = require('bedrock-protocol/src/options')
 const { printDeviceCode } = require('./bedrockRealmClient')
+const { withTimeout } = require('./asyncDeadline')
 
 const CACHE_IDS = new Set(['msal', 'live', 'sisu', 'xbl', 'bed', 'mca', 'mcs', 'pfb'])
 const AUTH_HEADER_CACHE_MIN_TTL_MS = 120000
@@ -134,9 +135,13 @@ async function getBedrockServicesAuthorizationHeader (config) {
       const authflow = createBedrockAuthflow(config, {
         cache: createReadThroughMemoryCacheFactory(config.profilesFolder)
       })
-      const token = await authflow.getMinecraftBedrockServicesToken({
-        version: minecraftVersionForRealmsApi(config.version)
-      })
+      const token = await withTimeout(
+        () => authflow.getMinecraftBedrockServicesToken({
+          version: minecraftVersionForRealmsApi(config.version)
+        }),
+        config.authTimeoutMs || 110000,
+        'Bedrock services authentication'
+      )
 
       if (!token?.mcToken) {
         throw new Error('Minecraft Bedrock services auth did not return an authorization header.')

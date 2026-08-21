@@ -2,16 +2,26 @@ param(
   [string]$RealmName = "",
   [string]$RealmId = "",
   [int]$RealmIndex = -1,
-  [string]$BedrockVersion = "1.26.30",
+  [string]$BedrockVersion = "",
   [string]$BindHost = "0.0.0.0",
   [int]$Port = 19133,
   [string]$StatusFile = "$PSScriptRoot\.runtime\bridge-status.json",
   [string]$CaptureProfile = "native-bedrock-recorder",
   [string]$SourceLabel = "Minecraft Bedrock client through local recorder",
-  [string]$TargetLabel = "Bedrock Realm over NetherNet"
+  [string]$TargetLabel = "selected Bedrock Realm"
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $BedrockVersion) {
+  Push-Location $PSScriptRoot
+  try {
+    $BedrockVersion = (& node.exe -e "process.stdout.write(require('bedrock-protocol/src/options').CURRENT_VERSION)" 2>$null).Trim()
+  } finally {
+    Pop-Location
+  }
+  if (-not $BedrockVersion) { throw 'Could not detect the current Bedrock protocol version from bedrock-protocol.' }
+}
 
 Write-Host "[script] Starting native Bedrock packet recorder mode." -ForegroundColor Yellow
 Write-Host "[script] Native Bedrock client should connect to this local relay, not to the Realm directly." -ForegroundColor Yellow
@@ -51,15 +61,15 @@ $env:BEDROCK_RELAY_VERSION = $BedrockVersion
 $env:BEDROCK_RELAY_UPSTREAM_VERSION = $BedrockVersion
 $env:NETHERNET_RELAY_REFRESH_REALM_ENDPOINT = "true"
 
-# Native recorder captures are usually hands-on tests; if Realms /join is
-# temporarily unavailable, wait patiently instead of failing the run.
-if (-not $env:REALM_JOIN_MAX_ATTEMPTS) { $env:REALM_JOIN_MAX_ATTEMPTS = "0" }
-if (-not $env:REALM_JOIN_RETRY_BASE_MS) { $env:REALM_JOIN_RETRY_BASE_MS = "5000" }
-if (-not $env:REALM_JOIN_RETRY_MAX_MS) { $env:REALM_JOIN_RETRY_MAX_MS = "60000" }
-if (-not $env:REALM_JOIN_RETRY_JITTER_MS) { $env:REALM_JOIN_RETRY_JITTER_MS = "5000" }
+if (-not $env:REALM_JOIN_MAX_ATTEMPTS) { $env:REALM_JOIN_MAX_ATTEMPTS = "3" }
+if (-not $env:REALM_JOIN_RETRY_BASE_MS) { $env:REALM_JOIN_RETRY_BASE_MS = "1000" }
+if (-not $env:REALM_JOIN_RETRY_MAX_MS) { $env:REALM_JOIN_RETRY_MAX_MS = "4000" }
+if (-not $env:REALM_JOIN_RETRY_JITTER_MS) { $env:REALM_JOIN_RETRY_JITTER_MS = "500" }
+if (-not $env:REALM_JOIN_ATTEMPT_TIMEOUT_MS) { $env:REALM_JOIN_ATTEMPT_TIMEOUT_MS = "12000" }
+if (-not $env:REALM_ENDPOINT_TIMEOUT_MS) { $env:REALM_ENDPOINT_TIMEOUT_MS = "45000" }
+if (-not $env:NETHERNET_RELAY_REFRESH_REALM_JOIN_MAX_ATTEMPTS) { $env:NETHERNET_RELAY_REFRESH_REALM_JOIN_MAX_ATTEMPTS = "3" }
 
-$realmJoinRetryLabel = if ($env:REALM_JOIN_MAX_ATTEMPTS -eq "0") { "unbounded; press Ctrl+C to stop" } else { "$($env:REALM_JOIN_MAX_ATTEMPTS) attempts" }
-Write-Host "[script] Realm join endpoint retries: $realmJoinRetryLabel (base $($env:REALM_JOIN_RETRY_BASE_MS)ms, max $($env:REALM_JOIN_RETRY_MAX_MS)ms)." -ForegroundColor Yellow
+Write-Host "[script] Realm endpoint lookup: at most $($env:REALM_ENDPOINT_TIMEOUT_MS)ms; $($env:REALM_JOIN_MAX_ATTEMPTS) join request attempts." -ForegroundColor Yellow
 
 # Count every packet while writing detailed timeline events for bootstrap and
 # interaction packets. High-volume movement/entity packets are sampled in the

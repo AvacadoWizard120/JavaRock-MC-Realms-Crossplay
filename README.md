@@ -23,7 +23,7 @@ The JavaRock window uses Windows' built-in desktop controls. It does not need Py
 Working or partially working:
 
 - Microsoft account profiles and Realm selection
-- Realm transport through NetherNet/WebRTC
+- Realm transport through NetherNet/WebRTC or RakNet, depending on the endpoint returned by Realms
 - Terrain, basic entities, movement, and block interaction
 - Player inventory, chests, and double-chest transfers
 - Connected block states such as fences and double chests

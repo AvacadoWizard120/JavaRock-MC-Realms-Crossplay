@@ -3,10 +3,21 @@ param(
   [string]$RealmId = "",
   [int]$RealmIndex = -1,
   [string]$ViaProxyBedrockTargetVersion = "Bedrock 1.26.30",
-  [string]$UpstreamBedrockVersion = "1.26.30"
+  [string]$UpstreamBedrockVersion = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $ViaProxyBedrockTargetVersion) { $ViaProxyBedrockTargetVersion = 'Bedrock 1.26.30' }
+if (-not $UpstreamBedrockVersion) {
+  Push-Location $PSScriptRoot
+  try {
+    $UpstreamBedrockVersion = (& node.exe -e "process.stdout.write(require('bedrock-protocol/src/options').CURRENT_VERSION)" 2>$null).Trim()
+  } finally {
+    Pop-Location
+  }
+  if (-not $UpstreamBedrockVersion) { throw 'Could not detect the current Bedrock protocol version from bedrock-protocol.' }
+}
 
 Write-Host "[script] Starting EXPERIMENTAL ViaBedrock relay mode." -ForegroundColor Yellow
 Write-Host "[script] Local ViaBedrock target: $ViaProxyBedrockTargetVersion" -ForegroundColor Yellow
@@ -49,16 +60,16 @@ $env:BEDROCK_RELAY_PORT = "19133"
 # Refresh before each Java/ViaBedrock downstream joins so reconnects do not reuse a stale GUID.
 $env:NETHERNET_RELAY_REFRESH_REALM_ENDPOINT = "true"
 
-# Realms can list successfully while /worlds/<id>/join returns 503 for minutes.
-# For interactive bridge launches, keep waiting for startup instead of exiting.
-# Set REALM_JOIN_MAX_ATTEMPTS to a positive number for a bounded wait.
-if (-not $env:REALM_JOIN_MAX_ATTEMPTS) { $env:REALM_JOIN_MAX_ATTEMPTS = "0" }
-if (-not $env:REALM_JOIN_RETRY_BASE_MS) { $env:REALM_JOIN_RETRY_BASE_MS = "5000" }
-if (-not $env:REALM_JOIN_RETRY_MAX_MS) { $env:REALM_JOIN_RETRY_MAX_MS = "60000" }
-if (-not $env:REALM_JOIN_RETRY_JITTER_MS) { $env:REALM_JOIN_RETRY_JITTER_MS = "5000" }
+# A Realm API outage should fail clearly instead of leaving Java on Joining World for minutes.
+if (-not $env:REALM_JOIN_MAX_ATTEMPTS) { $env:REALM_JOIN_MAX_ATTEMPTS = "3" }
+if (-not $env:REALM_JOIN_RETRY_BASE_MS) { $env:REALM_JOIN_RETRY_BASE_MS = "1000" }
+if (-not $env:REALM_JOIN_RETRY_MAX_MS) { $env:REALM_JOIN_RETRY_MAX_MS = "4000" }
+if (-not $env:REALM_JOIN_RETRY_JITTER_MS) { $env:REALM_JOIN_RETRY_JITTER_MS = "500" }
+if (-not $env:REALM_JOIN_ATTEMPT_TIMEOUT_MS) { $env:REALM_JOIN_ATTEMPT_TIMEOUT_MS = "12000" }
+if (-not $env:REALM_ENDPOINT_TIMEOUT_MS) { $env:REALM_ENDPOINT_TIMEOUT_MS = "45000" }
+if (-not $env:NETHERNET_RELAY_REFRESH_REALM_JOIN_MAX_ATTEMPTS) { $env:NETHERNET_RELAY_REFRESH_REALM_JOIN_MAX_ATTEMPTS = "3" }
 
-$realmJoinRetryLabel = if ($env:REALM_JOIN_MAX_ATTEMPTS -eq "0") { "unbounded; press Ctrl+C to stop" } else { "$($env:REALM_JOIN_MAX_ATTEMPTS) attempts" }
-Write-Host "[script] Realm join endpoint retries: $realmJoinRetryLabel (base $($env:REALM_JOIN_RETRY_BASE_MS)ms, max $($env:REALM_JOIN_RETRY_MAX_MS)ms)." -ForegroundColor Yellow
+Write-Host "[script] Realm endpoint lookup: at most $($env:REALM_ENDPOINT_TIMEOUT_MS)ms; $($env:REALM_JOIN_MAX_ATTEMPTS) join request attempts." -ForegroundColor Yellow
 
 # Packet Census is a persistent packet ledger for this experimental path.
 # It records every decoded/forwarded packet kind and stores focused samples for
@@ -69,7 +80,7 @@ if (-not $env:PACKET_CENSUS_SAMPLE_LIMIT) { $env:PACKET_CENSUS_SAMPLE_LIMIT = "8
 if (-not $env:PACKET_CENSUS_CRASH_WINDOW) { $env:PACKET_CENSUS_CRASH_WINDOW = "300" }
 if (-not $env:PACKET_CENSUS_PROFILE) { $env:PACKET_CENSUS_PROFILE = "java-viabedrock-relay" }
 if (-not $env:PACKET_CENSUS_SOURCE_LABEL) { $env:PACKET_CENSUS_SOURCE_LABEL = "Java client through ViaProxy/ViaBedrock" }
-if (-not $env:PACKET_CENSUS_TARGET_LABEL) { $env:PACKET_CENSUS_TARGET_LABEL = "Bedrock Realm over NetherNet" }
+if (-not $env:PACKET_CENSUS_TARGET_LABEL) { $env:PACKET_CENSUS_TARGET_LABEL = "selected Bedrock Realm" }
 if (-not $env:PACKET_CENSUS_FOCUS_TRACE) { $env:PACKET_CENSUS_FOCUS_TRACE = "true" }
 if (-not $env:PACKET_CENSUS_FOCUS_TRACE_FULL_NAMES) {
   $env:PACKET_CENSUS_FOCUS_TRACE_FULL_NAMES = "item_stack_request,item_stack_response,inventory_transaction,inventory_content,inventory_slot,container_open,container_close,container_set_content,container_set_slot,container_set_data,mob_equipment,player_hotbar"

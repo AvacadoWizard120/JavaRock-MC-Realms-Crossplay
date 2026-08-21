@@ -2,6 +2,10 @@
 
 require('dotenv').config()
 const path = require('path')
+require('./preferVendoredProtocol').installVendoredProtocolPath()
+const { CURRENT_VERSION } = require('bedrock-protocol/src/options')
+
+const STABLE_VIABEDROCK_VERSION = '1.26.30'
 
 function boolEnv (name, fallback = false) {
   const raw = process.env[name]
@@ -82,12 +86,12 @@ function loadConfig (argv = process.argv.slice(2)) {
   const viaProxyJar = firstDefined(args['viaproxy-jar'], args.viaProxyJar, process.env.VIAPROXY_JAR)
   const viaProxyRunDir = path.resolve(firstDefined(args['viaproxy-run-dir'], args.viaProxyRunDir, process.env.VIAPROXY_RUN_DIR, 'viaproxy-run'))
   const viaProxyTargetVersion = firstDefined(args['viaproxy-target-version'], args.viaProxyTargetVersion, process.env.VIAPROXY_TARGET_VERSION)
-  const viaProxyBedrockTargetVersion = firstDefined(args['viaproxy-bedrock-target-version'], args.viaProxyBedrockTargetVersion, process.env.VIAPROXY_BEDROCK_TARGET_VERSION, 'Bedrock 1.26.30')
+  const viaProxyBedrockTargetVersion = firstDefined(args['viaproxy-bedrock-target-version'], args.viaProxyBedrockTargetVersion, process.env.VIAPROXY_BEDROCK_TARGET_VERSION, `Bedrock ${STABLE_VIABEDROCK_VERSION}`)
   const version = firstDefined(args.version, args['bedrock-version'], process.env.BEDROCK_VERSION)
   const bedrockRelayHost = firstDefined(args['bedrock-relay-host'], args.bedrockRelayHost, process.env.BEDROCK_RELAY_HOST, '127.0.0.1')
   const bedrockRelayPort = Number.parseInt(firstDefined(args['bedrock-relay-port'], args.bedrockRelayPort, process.env.BEDROCK_RELAY_PORT, '19133'), 10)
-  const bedrockRelayVersion = firstDefined(args['bedrock-relay-version'], args.bedrockRelayVersion, process.env.BEDROCK_RELAY_VERSION, '1.26.30')
-  const bedrockRelayUpstreamVersion = firstDefined(args['bedrock-relay-upstream-version'], args.bedrockRelayUpstreamVersion, process.env.BEDROCK_RELAY_UPSTREAM_VERSION, version, '1.26.30')
+  const bedrockRelayVersion = firstDefined(args['bedrock-relay-version'], args.bedrockRelayVersion, process.env.BEDROCK_RELAY_VERSION, STABLE_VIABEDROCK_VERSION)
+  const bedrockRelayUpstreamVersion = firstDefined(args['bedrock-relay-upstream-version'], args.bedrockRelayUpstreamVersion, process.env.BEDROCK_RELAY_UPSTREAM_VERSION, version, CURRENT_VERSION)
 
   const profilesFolder = path.resolve(firstDefined(args['profiles-folder'], process.env.PROFILES_FOLDER, '.auth'))
   const authCacheMode = String(firstDefined(args['auth-cache-mode'], args.authCacheMode, process.env.AUTH_CACHE_MODE, 'file')).toLowerCase()
@@ -144,11 +148,11 @@ function loadConfig (argv = process.argv.slice(2)) {
       // Upstream Bedrock version = the packet schema the live Realm requires.
       // These are intentionally separate because the local ViaBedrock front door
       // and the live Realm client can drift when ViaProxy/Bedrock releases move.
-      version: bedrockRelayVersion ? String(bedrockRelayVersion) : '1.26.30',
+      version: bedrockRelayVersion ? String(bedrockRelayVersion) : STABLE_VIABEDROCK_VERSION,
       upstreamVersion: bedrockRelayUpstreamVersion ? String(bedrockRelayUpstreamVersion) : undefined,
       motd: String(javaLanMotd),
-      levelName: 'NetherNet Realm Relay',
-      viaProxyTargetVersion: viaProxyBedrockTargetVersion ? String(viaProxyBedrockTargetVersion) : 'Bedrock 1.26.30'
+      levelName: 'Bedrock Realm Relay',
+      viaProxyTargetVersion: viaProxyBedrockTargetVersion ? String(viaProxyBedrockTargetVersion) : `Bedrock ${STABLE_VIABEDROCK_VERSION}`
     },
     logPacketNames: args['log-packet-names'] === true || boolEnv('LOG_PACKET_NAMES', true),
     logPacketJson: args['log-packet-json'] === true || boolEnv('LOG_PACKET_JSON', false),
@@ -169,11 +173,16 @@ function loadConfig (argv = process.argv.slice(2)) {
     },
     probeSeconds: Number.parseInt(firstDefined(args['probe-seconds'], process.env.PROBE_SECONDS, '90'), 10),
     connectTimeoutMs: intEnv('CONNECT_TIMEOUT_MS', 15000),
+    realmListTimeoutMs: intEnv('REALM_LIST_TIMEOUT_MS', 120000),
+    realmLookupTimeoutMs: intEnv('REALM_LOOKUP_TIMEOUT_MS', 45000),
+    realmEndpointTimeoutMs: intEnv('REALM_ENDPOINT_TIMEOUT_MS', 45000),
+    authTimeoutMs: intEnv('BEDROCK_SERVICES_AUTH_TIMEOUT_MS', 110000),
     skipPing: args['skip-ping'] === true || boolEnv('SKIP_PING', true)
   }
 }
 
 module.exports = {
+  STABLE_VIABEDROCK_VERSION,
   loadConfig,
   parseArgs
 }

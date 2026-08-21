@@ -1,6 +1,6 @@
 {
   "name": "javarock-mc-realms-crossplay",
-  "version": "0.3.86",
+  "version": "0.3.87",
   "private": true,
   "description": "Experimental local Java-to-Bedrock Realm bridge for authorized accounts.",
   "license": "SEE LICENSE IN LICENSE",
@@ -43,6 +43,7 @@
     "check:runtime-package": "node scripts/runtime-package-smoke.cjs",
     "check:realm-api-auth-cache": "node scripts/realm-api-auth-cache-smoke.cjs",
     "check:realm-join-info": "node scripts/realm-join-info-smoke.cjs",
+    "check:realm-startup": "node scripts/realm-startup-smoke.cjs",
     "check:nethernet-jsonrpc": "node scripts/nethernet-jsonrpc-format-smoke.cjs",
     "check:nethernet-transport": "node scripts/nethernet-transport-smoke.cjs",
     "check:java-lan": "node scripts/java-lan-smoke.cjs",
@@ -54,7 +55,7 @@
     "check:puppet": "node scripts/puppet-controller-smoke.cjs",
     "check:state-tracker": "node scripts/state-tracker-smoke.cjs",
     "check:viaproxy-installer": "node scripts/viaproxy-installer-smoke.cjs",
-    "check": "node scripts/smoke-check.cjs && node scripts/bridge-desktop-gui-smoke.cjs && node scripts/javarock-bootstrap-smoke.cjs && node scripts/runtime-package-smoke.cjs && node scripts/realm-api-auth-cache-smoke.cjs && node scripts/realm-join-info-smoke.cjs && node scripts/nethernet-jsonrpc-format-smoke.cjs && node scripts/nethernet-transport-smoke.cjs && node scripts/java-lan-smoke.cjs && node scripts/java-compat-proxy-smoke.cjs && node scripts/viaproxy-installer-smoke.cjs && node scripts/bridge-runtime-status-smoke.cjs && node scripts/bridge-dev-relay-startup-smoke.cjs && node scripts/java-entity-id-map-smoke.cjs && node scripts/packet-logger-smoke.cjs && node scripts/packet-census-smoke.cjs && node scripts/inventory-trace-doctor-smoke.cjs && node scripts/terrain-flow-doctor-smoke.cjs && node scripts/puppet-controller-smoke.cjs && node scripts/state-tracker-smoke.cjs && node scripts/nethernet-relay-version-split-smoke.cjs && node scripts/nethernet-relay-native-recorder-smoke.cjs && node scripts/nethernet-relay-container-shim-smoke.cjs && node scripts/nethernet-relay-creative-content-smoke.cjs && node scripts/nethernet-relay-serverbound-interaction-smoke.cjs && node scripts/nethernet-relay-chat-command-smoke.cjs && node scripts/nethernet-relay-item-shape-smoke.cjs && node scripts/nethernet-relay-play-gate-smoke.cjs && node scripts/nethernet-relay-authoritative-inventory-smoke.cjs && node scripts/nethernet-relay-entity-tracker-smoke.cjs && node scripts/nethernet-relay-session-refresh-smoke.cjs && node scripts/viabedrock-relay-config-smoke.cjs && node scripts/nethernet-relay-block-action-smoke.cjs && node scripts/bridge-crafting-recipes-smoke.cjs && node scripts/crafting-output-and-recorder-smoke.cjs && node scripts/viabedrock-inventory-tracker-patch-smoke.cjs && node scripts/item-stack-request-baseline-smoke.cjs",
+    "check": "node scripts/smoke-check.cjs && node scripts/bridge-desktop-gui-smoke.cjs && node scripts/javarock-bootstrap-smoke.cjs && node scripts/runtime-package-smoke.cjs && node scripts/realm-api-auth-cache-smoke.cjs && node scripts/realm-join-info-smoke.cjs && node scripts/realm-startup-smoke.cjs && node scripts/nethernet-jsonrpc-format-smoke.cjs && node scripts/nethernet-transport-smoke.cjs && node scripts/java-lan-smoke.cjs && node scripts/java-compat-proxy-smoke.cjs && node scripts/viaproxy-installer-smoke.cjs && node scripts/bridge-runtime-status-smoke.cjs && node scripts/bridge-dev-relay-startup-smoke.cjs && node scripts/java-entity-id-map-smoke.cjs && node scripts/packet-logger-smoke.cjs && node scripts/packet-census-smoke.cjs && node scripts/inventory-trace-doctor-smoke.cjs && node scripts/terrain-flow-doctor-smoke.cjs && node scripts/puppet-controller-smoke.cjs && node scripts/state-tracker-smoke.cjs && node scripts/nethernet-relay-version-split-smoke.cjs && node scripts/nethernet-relay-native-recorder-smoke.cjs && node scripts/nethernet-relay-container-shim-smoke.cjs && node scripts/nethernet-relay-creative-content-smoke.cjs && node scripts/nethernet-relay-serverbound-interaction-smoke.cjs && node scripts/nethernet-relay-chat-command-smoke.cjs && node scripts/nethernet-relay-item-shape-smoke.cjs && node scripts/nethernet-relay-play-gate-smoke.cjs && node scripts/nethernet-relay-authoritative-inventory-smoke.cjs && node scripts/nethernet-relay-entity-tracker-smoke.cjs && node scripts/nethernet-relay-session-refresh-smoke.cjs && node scripts/viabedrock-relay-config-smoke.cjs && node scripts/nethernet-relay-block-action-smoke.cjs && node scripts/bridge-crafting-recipes-smoke.cjs && node scripts/crafting-output-and-recorder-smoke.cjs && node scripts/viabedrock-inventory-tracker-patch-smoke.cjs && node scripts/item-stack-request-baseline-smoke.cjs",
     "check:relay-version-split": "node scripts/nethernet-relay-version-split-smoke.cjs",
     "check:relay-native-recorder": "node scripts/nethernet-relay-native-recorder-smoke.cjs",
     "check:relay-container-shim": "node scripts/nethernet-relay-container-shim-smoke.cjs",
@@ -78,9 +79,9 @@
     "check:item-stack-baseline": "node scripts/item-stack-request-baseline-smoke.cjs"
   },
   "dependencies": {
-    "bedrock-protocol": "^3.57.0",
-    "dotenv": "^16.4.7",
-    "minecraft-data": "^3.111.0",
+    "bedrock-protocol": "^3.58.2",
+    "dotenv": "^16.6.1",
+    "minecraft-data": "^3.113.2",
     "nethernet": "0.1.0",
     "prismarine-auth": "^3.1.1",
     "prismarine-realms": "^1.6.0"

@@ -4,14 +4,23 @@ const { createBedrockRealmApi } = require('./realmApi')
 const { getRealmId, getRealmName, printRealms, selectRealm } = require('./realmPicker')
 const { getRealmJoinEndpointInfo } = require('./realmJoinInfo')
 const { safeStringify } = require('./safeStringify')
+const { withTimeout } = require('./asyncDeadline')
 
 async function resolveRealm (api, config) {
   if (config.realm.invite) {
     console.log('[realms] Resolving Realm from invite code/link without accepting the invite.')
-    return api.getRealmFromInvite(config.realm.invite, false)
+    return withTimeout(
+      () => api.getRealmFromInvite(config.realm.invite, false),
+      config.realmLookupTimeoutMs,
+      'Realm invite lookup'
+    )
   }
 
-  const realms = await api.getRealms()
+  const realms = await withTimeout(
+    () => api.getRealms(),
+    config.realmLookupTimeoutMs,
+    'Realm account lookup'
+  )
   printRealms(realms)
   return selectRealm(realms, config.realm)
 }
@@ -54,18 +63,20 @@ async function inspectRealmNetherNetInfoOnce (config, options = {}) {
 }
 
 async function inspectRealmNetherNetInfo (config, options = {}) {
-  try {
-    return await inspectRealmNetherNetInfoOnce(config, options)
-  } catch (error) {
-    if (config.authCacheMode !== 'memory' && isAuthCacheWriteError(error, config)) {
-      console.warn(`[auth] Could not update auth cache file (${error.code}). Retrying Realm discovery with read-through memory cache.`)
-      return inspectRealmNetherNetInfoOnce({
-        ...config,
-        authCacheMode: 'memory'
-      }, options)
+  return withTimeout(async () => {
+    try {
+      return await inspectRealmNetherNetInfoOnce(config, options)
+    } catch (error) {
+      if (config.authCacheMode !== 'memory' && isAuthCacheWriteError(error, config)) {
+        console.warn(`[auth] Could not update auth cache file (${error.code}). Retrying Realm discovery with read-through memory cache.`)
+        return inspectRealmNetherNetInfoOnce({
+          ...config,
+          authCacheMode: 'memory'
+        }, options)
+      }
+      throw error
     }
-    throw error
-  }
+  }, config.realmEndpointTimeoutMs || 45000, 'Realm selection and endpoint lookup')
 }
 
 function printRealmNetherNetInfoResult (info) {
