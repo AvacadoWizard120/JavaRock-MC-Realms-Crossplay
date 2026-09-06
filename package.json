@@ -1,6 +1,6 @@
 {
   "name": "javarock-mc-realms-crossplay",
-  "version": "0.3.87",
+  "version": "0.3.88",
   "private": true,
   "description": "Experimental local Java-to-Bedrock Realm bridge for authorized accounts.",
   "license": "SEE LICENSE IN LICENSE",
@@ -79,9 +79,9 @@
     "check:item-stack-baseline": "node scripts/item-stack-request-baseline-smoke.cjs"
   },
   "dependencies": {
-    "bedrock-protocol": "^3.58.2",
+    "bedrock-protocol": "^3.59.0",
     "dotenv": "^16.6.1",
-    "minecraft-data": "^3.113.2",
+    "minecraft-data": "^3.116.0",
     "nethernet": "0.1.0",
     "prismarine-auth": "^3.1.1",
     "prismarine-realms": "^1.6.0"
