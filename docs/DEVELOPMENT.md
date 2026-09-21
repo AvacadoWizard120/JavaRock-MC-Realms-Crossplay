@@ -10,7 +10,7 @@ npm run setup
 npm run check
 ```
 
-Use Node.js 20+ and JDK 17+. `npm run setup` downloads ViaProxy and compiles the included ViaBedrock compatibility sources. The Windows GUI is implemented in PowerShell with Windows Forms and has no Python dependency.
+Use Node.js 20+ and JDK 17+. `npm run setup` downloads ViaProxy 3.4.12 and compiles the included ViaBedrock compatibility sources. JavaRock pins this version because ViaProxy 3.4.13 changes the ViaBedrock packet and generated-enum APIs used by the patch. The Windows GUI is implemented in PowerShell with Windows Forms and has no Python dependency.
 
 ## Useful Checks
 
@@ -19,6 +19,7 @@ npm run check:syntax
 npm run check:bridge-desktop-gui
 npm run check:public-release
 npm run check:runtime-package
+npm run check:updater
 ```
 
 The complete relay suite is `npm run check`. Keep test scope proportional to the protocol behavior being changed.
@@ -42,6 +43,8 @@ npm run release:runtime
 ```
 
 The ZIP is written under `dist/`. Its explicit allowlist includes only launch/runtime source, configuration, and required legal notices. It excludes tests, research notes, history, browser GUI code, dependencies, generated jars, auth data, and logs.
+
+The build also writes a matching `.sha256` file. Publish both files; the built-in updater refuses an archive it cannot verify.
 
 ## Source Release
 

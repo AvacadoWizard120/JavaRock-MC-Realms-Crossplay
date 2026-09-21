@@ -18,6 +18,8 @@ The launcher checks for Node.js 20, JDK 17, project dependencies, and the patche
 
 The JavaRock window uses Windows' built-in desktop controls. It does not need Python, Tkinter, or a web browser.
 
+JavaRock checks for new releases after the window opens and always asks before installing one. You can also use **Help > Check for updates**.
+
 ## Current Support
 
 Working or partially working:

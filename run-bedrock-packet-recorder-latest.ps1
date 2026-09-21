@@ -16,7 +16,7 @@ $ErrorActionPreference = "Stop"
 if (-not $BedrockVersion) {
   Push-Location $PSScriptRoot
   try {
-    $BedrockVersion = (& node.exe -e "process.stdout.write(require('bedrock-protocol/src/options').CURRENT_VERSION)" 2>$null).Trim()
+    $BedrockVersion = (& node.exe -e "require('./src/preferVendoredProtocol').installVendoredProtocolPath(); const compat=require('./src/bedrockProtocolSchemaCompat'); compat.installBedrockProtocolSchemaCompat(); process.stdout.write(compat.currentRealmBedrockVersion())" 2>$null).Trim()
   } finally {
     Pop-Location
   }

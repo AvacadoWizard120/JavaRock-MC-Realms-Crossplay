@@ -48,16 +48,32 @@ public static class JavaRockNativeWindow {
 
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    public static extern int SetWindowTheme(IntPtr window, string subAppName, string subIdList);
+
+    public static void SetImmersiveDarkMode(IntPtr window, bool enabled) {
+        int value = enabled ? 1 : 0;
+        if (DwmSetWindowAttribute(window, 20, ref value, sizeof(int)) != 0) {
+            DwmSetWindowAttribute(window, 19, ref value, sizeof(int));
+        }
+    }
 }
 '@
 }
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$PackageInfo = Get-Content -LiteralPath (Join-Path $ProjectRoot 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$CurrentVersion = [string]$PackageInfo.version
+$UpdaterScript = Join-Path $PSScriptRoot 'Update-JavaRock.ps1'
 $DefaultUpstreamBedrockVersion = ''
 Push-Location $ProjectRoot
 try {
     try {
-        $candidateVersion = (& node.exe -e "process.stdout.write(require('bedrock-protocol/src/options').CURRENT_VERSION)" 2>$null).Trim()
+        $candidateVersion = (& node.exe -e "require('./src/preferVendoredProtocol').installVendoredProtocolPath(); const compat=require('./src/bedrockProtocolSchemaCompat'); compat.installBedrockProtocolSchemaCompat(); process.stdout.write(compat.currentRealmBedrockVersion())" 2>$null).Trim()
         if ($LASTEXITCODE -eq 0 -and $candidateVersion -match '^\d+\.\d+\.\d+$') {
             $DefaultUpstreamBedrockVersion = $candidateVersion
         }
@@ -95,6 +111,9 @@ $RealmStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-realms.out.log'
 $RealmStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-realms.err.log'
 $StopStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-stop.out.log'
 $StopStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-stop.err.log'
+$UpdateStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-update.out.log'
+$UpdateStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-update.err.log'
+$UpdateResultFile = Join-Path $RuntimeDir 'bridge-windows-gui-update-result.json'
 $PreferencesFile = Join-Path $RuntimeDir 'bridge-windows-gui-preferences.json'
 
 function Read-JsonFile {
@@ -370,6 +389,10 @@ $script:RealmProcess = $null
 $script:RealmRefreshStartedAt = $null
 $script:RealmRefreshTimeoutMs = 130000
 $script:StopProcess = $null
+$script:UpdateProcess = $null
+$script:UpdateCheckManual = $false
+$script:UpdatePromptedVersion = ''
+$script:InstallingUpdate = $false
 $script:LogOffsets = @{}
 $script:LogBox = $null
 $script:DarkMode = $false
@@ -378,7 +401,7 @@ $preferences = Read-JsonFile -Path $PreferencesFile
 $script:DarkMode = [bool](Get-ObjectValue $preferences 'darkMode' $false)
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'JavaRock'
+$form.Text = "JavaRock $CurrentVersion"
 $form.StartPosition = 'CenterScreen'
 $form.Size = New-Object Drawing.Size(1020, 730)
 $form.MinimumSize = New-Object Drawing.Size(820, 620)
@@ -398,13 +421,21 @@ $darkMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Dark mode')
 $darkMenuItem.CheckOnClick = $true
 $darkMenuItem.Checked = $script:DarkMode
 [void]$viewMenu.DropDownItems.Add($darkMenuItem)
+$helpMenu = New-Object System.Windows.Forms.ToolStripMenuItem('Help')
+$checkUpdatesMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Check for updates...')
+$versionMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem("JavaRock $CurrentVersion")
+$versionMenuItem.Enabled = $false
+[void]$helpMenu.DropDownItems.Add($checkUpdatesMenuItem)
+[void]$helpMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$helpMenu.DropDownItems.Add($versionMenuItem)
 [void]$menu.Items.Add($accountMenu)
 [void]$menu.Items.Add($viewMenu)
+[void]$menu.Items.Add($helpMenu)
 $form.MainMenuStrip = $menu
 $form.Controls.Add($menu)
 
 $titleLabel = New-Object System.Windows.Forms.Label
-$titleLabel.Text = 'JavaRock'
+$titleLabel.Text = "JavaRock $CurrentVersion"
 $titleLabel.Font = New-Object Drawing.Font('Segoe UI Semibold', 17)
 $titleLabel.Location = New-Object Drawing.Point(14, 36)
 $titleLabel.Size = New-Object Drawing.Size(260, 34)
@@ -606,38 +637,134 @@ $logBox.Dock = 'Fill'
 $script:LogBox = $logBox
 $logGroup.Controls.Add($logBox)
 
+function Initialize-ThemedComboBox {
+    param([Parameter(Mandatory = $true)][System.Windows.Forms.ComboBox]$ComboBox)
+
+    $ComboBox.Add_DrawItem({
+        param($sender, $eventArgs)
+
+        $selected = ($eventArgs.State -band [Windows.Forms.DrawItemState]::Selected) -ne 0
+        $focused = ($eventArgs.State -band [Windows.Forms.DrawItemState]::Focus) -ne 0
+        if ($script:DarkMode) {
+            if (-not $sender.Enabled) {
+                $backColor = [Drawing.Color]::FromArgb(43, 46, 51)
+                $foreColor = [Drawing.Color]::FromArgb(119, 126, 136)
+            } elseif ($selected) {
+                $backColor = [Drawing.Color]::FromArgb(58, 83, 111)
+                $foreColor = [Drawing.Color]::FromArgb(218, 222, 227)
+            } else {
+                $backColor = [Drawing.Color]::FromArgb(51, 55, 61)
+                $foreColor = [Drawing.Color]::FromArgb(198, 203, 211)
+            }
+        } else {
+            $backColor = if ($selected) { [Drawing.SystemColors]::Highlight } else { $sender.BackColor }
+            $foreColor = if ($selected) { [Drawing.SystemColors]::HighlightText } else { $sender.ForeColor }
+        }
+
+        $brush = [Drawing.SolidBrush]::new($backColor)
+        try {
+            $eventArgs.Graphics.FillRectangle($brush, $eventArgs.Bounds)
+        } finally {
+            $brush.Dispose()
+        }
+
+        $text = if ($eventArgs.Index -ge 0) { [string]$sender.Items[$eventArgs.Index] } else { [string]$sender.Text }
+        if ($text) {
+            $textBounds = [Drawing.Rectangle]::new(
+                $eventArgs.Bounds.X + 5,
+                $eventArgs.Bounds.Y,
+                [Math]::Max(0, $eventArgs.Bounds.Width - 9),
+                $eventArgs.Bounds.Height
+            )
+            $flags = [Windows.Forms.TextFormatFlags]::Left -bor
+                [Windows.Forms.TextFormatFlags]::VerticalCenter -bor
+                [Windows.Forms.TextFormatFlags]::EndEllipsis -bor
+                [Windows.Forms.TextFormatFlags]::NoPrefix
+            [Windows.Forms.TextRenderer]::DrawText($eventArgs.Graphics, $text, $sender.Font, $textBounds, $foreColor, $flags)
+        }
+        if ($focused) { $eventArgs.DrawFocusRectangle() }
+    })
+}
+
+foreach ($combo in @($accountCombo, $realmCombo, $modeCombo)) {
+    Initialize-ThemedComboBox -ComboBox $combo
+}
+
+foreach ($textInput in @($manualRealm, $targetVersion, $upstreamVersion)) {
+    $textInput.BorderStyle = 'FixedSingle'
+    $textInput.Add_Enter({
+        param($sender)
+        if ($script:DarkMode) { $sender.BackColor = [Drawing.Color]::FromArgb(58, 62, 69) }
+    })
+    $textInput.Add_Leave({
+        param($sender)
+        if ($script:DarkMode) { $sender.BackColor = [Drawing.Color]::FromArgb(51, 55, 61) }
+    })
+}
+$logBox.BorderStyle = 'FixedSingle'
+
 function Set-DarkTheme {
     param([bool]$Enabled)
 
     $script:DarkMode = $Enabled
     $darkMenuItem.Checked = $Enabled
     $darkCheck.Checked = $Enabled
-    $background = if ($Enabled) { [Drawing.Color]::FromArgb(30, 32, 36) } else { [Drawing.SystemColors]::Control }
-    $panel = if ($Enabled) { [Drawing.Color]::FromArgb(39, 42, 47) } else { [Drawing.SystemColors]::Control }
-    $field = if ($Enabled) { [Drawing.Color]::FromArgb(24, 26, 30) } else { [Drawing.SystemColors]::Window }
-    $foreground = if ($Enabled) { [Drawing.Color]::FromArgb(232, 234, 237) } else { [Drawing.SystemColors]::ControlText }
+    $background = if ($Enabled) { [Drawing.Color]::FromArgb(31, 33, 37) } else { [Drawing.SystemColors]::Control }
+    $panel = if ($Enabled) { [Drawing.Color]::FromArgb(41, 44, 49) } else { [Drawing.SystemColors]::Control }
+    $field = if ($Enabled) { [Drawing.Color]::FromArgb(51, 55, 61) } else { [Drawing.SystemColors]::Window }
+    $fieldText = if ($Enabled) { [Drawing.Color]::FromArgb(198, 203, 211) } else { [Drawing.SystemColors]::WindowText }
+    $logField = if ($Enabled) { [Drawing.Color]::FromArgb(25, 27, 31) } else { [Drawing.SystemColors]::Window }
+    $foreground = if ($Enabled) { [Drawing.Color]::FromArgb(211, 215, 220) } else { [Drawing.SystemColors]::ControlText }
+    $mutedForeground = if ($Enabled) { [Drawing.Color]::FromArgb(157, 164, 174) } else { [Drawing.SystemColors]::GrayText }
+    $border = if ($Enabled) { [Drawing.Color]::FromArgb(76, 82, 91) } else { [Drawing.SystemColors]::ControlDark }
+    $buttonHover = if ($Enabled) { [Drawing.Color]::FromArgb(57, 61, 68) } else { [Drawing.SystemColors]::ControlLight }
+    $buttonPressed = if ($Enabled) { [Drawing.Color]::FromArgb(35, 38, 43) } else { [Drawing.SystemColors]::ControlDark }
 
     $form.BackColor = $background
     $form.ForeColor = $foreground
+    [JavaRockNativeWindow]::SetImmersiveDarkMode($form.Handle, $Enabled)
     $menu.BackColor = $panel
     $menu.ForeColor = $foreground
+    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $helpMenu, $checkUpdatesMenuItem, $versionMenuItem)) {
+        $menuItem.BackColor = $panel
+        $menuItem.ForeColor = $foreground
+    }
+    $accountMenu.DropDown.BackColor = $panel
+    $viewMenu.DropDown.BackColor = $panel
+    $helpMenu.DropDown.BackColor = $panel
     foreach ($group in @($accountGroup, $launchGroup, $logGroup)) {
         $group.BackColor = $background
-        $group.ForeColor = $foreground
+        $group.ForeColor = if ($Enabled) { [Drawing.Color]::FromArgb(126, 134, 145) } else { $foreground }
+        $group.FlatStyle = if ($Enabled) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
     }
     foreach ($control in @($titleLabel, $topStatus, $darkCheck, $accountLabel, $accountStatus, $realmLabel, $manualLabel, $modeLabel, $targetLabel, $upstreamLabel, $runChecks, $joinCaption, $joinStatus, $pidStatus)) {
         $control.BackColor = $background
         $control.ForeColor = $foreground
     }
-    foreach ($control in @($accountCombo, $realmCombo, $manualRealm, $modeCombo, $targetVersion, $upstreamVersion, $logBox)) {
+    foreach ($control in @($accountCombo, $realmCombo, $manualRealm, $modeCombo, $targetVersion, $upstreamVersion)) {
         $control.BackColor = $field
-        $control.ForeColor = $foreground
+        $control.ForeColor = $fieldText
     }
+    foreach ($control in @($accountCombo, $realmCombo, $modeCombo)) {
+        $control.DrawMode = if ($Enabled) { [Windows.Forms.DrawMode]::OwnerDrawFixed } else { [Windows.Forms.DrawMode]::Normal }
+        $control.FlatStyle = if ($Enabled) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
+        $nativeTheme = if ($Enabled) { 'DarkMode_Explorer' } else { $null }
+        [void][JavaRockNativeWindow]::SetWindowTheme($control.Handle, $nativeTheme, $null)
+        $control.Invalidate()
+    }
+    $logBox.BackColor = $logField
+    $logBox.ForeColor = $fieldText
+    foreach ($control in @($topStatus, $accountStatus, $pidStatus)) { $control.ForeColor = $mutedForeground }
     foreach ($button in @($loginButton, $logoutButton, $refreshButton, $startButton, $stopButton, $logsButton)) {
-        $button.FlatStyle = 'Flat'
+        $button.FlatStyle = if ($Enabled) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
+        $button.UseVisualStyleBackColor = -not $Enabled
         $button.BackColor = $panel
         $button.ForeColor = $foreground
+        $button.FlatAppearance.BorderColor = $border
+        $button.FlatAppearance.MouseOverBackColor = $buttonHover
+        $button.FlatAppearance.MouseDownBackColor = $buttonPressed
     }
+    $form.Invalidate($true)
     if (-not $SmokeTest -and -not $WindowSmokeTest) {
         Write-JsonFile -Path $PreferencesFile -Value ([ordered]@{ darkMode = $Enabled })
     }
@@ -872,6 +999,169 @@ function Update-ModeControls {
     Update-TopStatus
 }
 
+function Test-BridgeActivity {
+    if ($null -ne $script:BridgeProcess -and -not $script:BridgeProcess.HasExited) { return $true }
+    $status = Read-JsonFile -Path $StatusFile
+    $bridgePid = Get-ObjectValue $status 'pid' $null
+    $viaProxy = Get-ObjectValue $status 'viaProxy' $null
+    $viaPid = Get-ObjectValue $viaProxy 'pid' $null
+    return (Test-ProcessAlive $bridgePid) -or (Test-ProcessAlive $viaPid)
+}
+
+function Start-UpdateInstall {
+    param([Parameter(Mandatory = $true)]$Update)
+
+    if (Test-BridgeActivity) {
+        [void][Windows.Forms.MessageBox]::Show(
+            'Stop the active bridge or recorder before installing an update.',
+            'JavaRock Update',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Information
+        )
+        return
+    }
+    if (Test-Path -LiteralPath (Join-Path $ProjectRoot '.git')) {
+        [void][Windows.Forms.MessageBox]::Show(
+            'This is a source checkout, so JavaRock will not overwrite it. Update it with Git instead.',
+            'JavaRock Update',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Information
+        )
+        return
+    }
+    if (-not (Test-Path -LiteralPath $UpdaterScript -PathType Leaf)) {
+        [void][Windows.Forms.MessageBox]::Show('The JavaRock updater is missing.', 'JavaRock Update')
+        return
+    }
+
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', $UpdaterScript,
+        '-Install',
+        '-ReleaseTag', [string]$Update.tag,
+        '-ParentProcessId', [string]$PID,
+        '-Restart'
+    )
+    try {
+        Add-Log 'update' "Installing JavaRock $($Update.latestVersion). The launcher will close and restart."
+        Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList (Join-NativeArguments $arguments) `
+            -WorkingDirectory $ProjectRoot `
+            -WindowStyle Hidden | Out-Null
+        $script:InstallingUpdate = $true
+        $form.Close()
+    } catch {
+        Add-Log 'update' "Could not start the updater: $($_.Exception.Message)"
+        [void][Windows.Forms.MessageBox]::Show(
+            $_.Exception.Message,
+            'JavaRock Update',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Error
+        )
+    }
+}
+
+function Show-UpdateCheckResult {
+    param($Result, [bool]$Manual)
+
+    $state = [string](Get-ObjectValue $Result 'state' 'error')
+    if ($state -eq 'update-available') {
+        $latest = [string](Get-ObjectValue $Result 'latestVersion' '')
+        $checkUpdatesMenuItem.Text = "Install JavaRock $latest..."
+        Add-Log 'update' "JavaRock $latest is available."
+        if (-not $Manual -and $script:UpdatePromptedVersion -eq $latest) { return }
+        $script:UpdatePromptedVersion = $latest
+        $notes = [string](Get-ObjectValue $Result 'notes' '')
+        if ($notes.Length -gt 1800) { $notes = $notes.Substring(0, 1800) + "`r`n..." }
+        $message = "JavaRock $latest is available. Install it now?`r`n`r`nJavaRock will verify the download, keep your accounts and settings, then restart."
+        if ($notes.Trim()) { $message += "`r`n`r`n$($notes.Trim())" }
+        $answer = [Windows.Forms.MessageBox]::Show(
+            $message,
+            'JavaRock Update',
+            [Windows.Forms.MessageBoxButtons]::YesNo,
+            [Windows.Forms.MessageBoxIcon]::Information,
+            [Windows.Forms.MessageBoxDefaultButton]::Button1
+        )
+        if ($answer -eq [Windows.Forms.DialogResult]::Yes) { Start-UpdateInstall -Update $Result }
+        return
+    }
+
+    $checkUpdatesMenuItem.Text = 'Check for updates...'
+    if ($state -eq 'current') {
+        Add-Log 'update' "JavaRock $CurrentVersion is up to date."
+        if ($Manual) {
+            [void][Windows.Forms.MessageBox]::Show(
+                "JavaRock $CurrentVersion is up to date.",
+                'JavaRock Update',
+                [Windows.Forms.MessageBoxButtons]::OK,
+                [Windows.Forms.MessageBoxIcon]::Information
+            )
+        }
+        return
+    }
+
+    $message = [string](Get-ObjectValue $Result 'message' 'The update check failed.')
+    Add-Log 'update' $message
+    if ($Manual) {
+        [void][Windows.Forms.MessageBox]::Show(
+            $message,
+            'JavaRock Update',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Warning
+        )
+    }
+}
+
+function Start-UpdateCheck {
+    param([bool]$Manual = $false)
+
+    if ($null -ne $script:UpdateProcess -and -not $script:UpdateProcess.HasExited) {
+        if ($Manual) { Add-Log 'update' 'An update check is already running.' }
+        return
+    }
+    if (-not (Test-Path -LiteralPath $UpdaterScript -PathType Leaf)) {
+        if ($Manual) { Show-UpdateCheckResult -Result ([pscustomobject]@{ state = 'error'; message = 'The JavaRock updater is missing.' }) -Manual $true }
+        return
+    }
+
+    if (Test-Path -LiteralPath $UpdateResultFile -PathType Leaf) { Remove-Item -LiteralPath $UpdateResultFile -Force }
+    Reset-LogCursor 'update-out'
+    Reset-LogCursor 'update-err'
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', $UpdaterScript,
+        '-ResultFile', $UpdateResultFile,
+        '-Quiet'
+    )
+    try {
+        $script:UpdateCheckManual = $Manual
+        $checkUpdatesMenuItem.Enabled = $false
+        $checkUpdatesMenuItem.Text = 'Checking for updates...'
+        $script:UpdateProcess = Start-RedirectedProcess -FilePath 'powershell.exe' -Arguments $arguments -StdoutPath $UpdateStdoutLog -StderrPath $UpdateStderrLog
+        if ($Manual) { Add-Log 'update' 'Checking GitHub for a new JavaRock release...' }
+    } catch {
+        $checkUpdatesMenuItem.Enabled = $true
+        Show-UpdateCheckResult ([pscustomobject]@{ state = 'error'; message = $_.Exception.Message }) $Manual
+    }
+}
+
+function Complete-UpdateCheck {
+    if ($null -eq $script:UpdateProcess -or -not $script:UpdateProcess.HasExited) { return }
+    $manual = $script:UpdateCheckManual
+    $exitCode = $script:UpdateProcess.ExitCode
+    $script:UpdateProcess.Dispose()
+    $script:UpdateProcess = $null
+    $checkUpdatesMenuItem.Enabled = $true
+    $result = Read-JsonFile -Path $UpdateResultFile
+    if ($null -eq $result) {
+        $result = [pscustomobject]@{
+            state = 'error'
+            message = "The update check ended with exit code $exitCode and returned no result."
+        }
+    }
+    Show-UpdateCheckResult -Result $result -Manual $manual
+}
+
 $loginButton.Add_Click({ Add-AccountProfile })
 $loginMenuItem.Add_Click({ Add-AccountProfile })
 $logoutButton.Add_Click({ Remove-AccountProfile })
@@ -881,6 +1171,7 @@ $refreshMenuItem.Add_Click({ Refresh-Realms })
 $startButton.Add_Click({ Start-BridgeOrRecorder })
 $stopButton.Add_Click({ Stop-BridgeOrRecorder })
 $logsButton.Add_Click({ Start-Process -FilePath 'explorer.exe' -ArgumentList (Quote-NativeArgument $RuntimeDir) })
+$checkUpdatesMenuItem.Add_Click({ Start-UpdateCheck -Manual $true })
 $modeCombo.Add_SelectedIndexChanged({ Update-ModeControls })
 $realmCombo.Add_SelectedIndexChanged({
     if ($realmCombo.SelectedIndex -ge 0 -and $realmCombo.SelectedIndex -lt $script:Realms.Count) {
@@ -957,6 +1248,7 @@ $timer.Add_Tick({
         $script:StopProcess.Dispose()
         $script:StopProcess = $null
     }
+    Complete-UpdateCheck
 
     $status = Read-JsonFile -Path $StatusFile
     $state = [string](Get-ObjectValue $status 'state' 'stopped')
@@ -977,6 +1269,7 @@ $timer.Add_Tick({
 })
 
 $form.Add_FormClosing({
+    if ($script:InstallingUpdate) { return }
     if ($null -ne $script:BridgeProcess -and -not $script:BridgeProcess.HasExited) {
         $answer = [Windows.Forms.MessageBox]::Show(
             'Close the launcher while the bridge is still running?',
@@ -998,6 +1291,28 @@ Set-DarkTheme $script:DarkMode
 Add-Log 'gui' 'Windows-native JavaRock launcher ready.'
 
 if ($SmokeTest) {
+    Set-DarkTheme $true
+    $expectedField = ([Drawing.Color]::FromArgb(51, 55, 61)).ToArgb()
+    $expectedFieldText = ([Drawing.Color]::FromArgb(198, 203, 211)).ToArgb()
+    foreach ($control in @($accountCombo, $realmCombo, $manualRealm, $modeCombo, $targetVersion, $upstreamVersion)) {
+        if ($control.BackColor.ToArgb() -ne $expectedField -or $control.ForeColor.ToArgb() -ne $expectedFieldText) {
+            $controlName = if ($control.Name) { $control.Name } else { $control.GetType().Name }
+            throw "Dark theme did not reach $controlName."
+        }
+    }
+    if ($manualRealm.BackColor.ToArgb() -eq ([Drawing.SystemColors]::Window).ToArgb()) {
+        throw 'Dark theme left a text input with the Windows white field color.'
+    }
+    if ($accountCombo.DrawMode -ne [Windows.Forms.DrawMode]::OwnerDrawFixed) {
+        throw 'Dark theme combo boxes are not owner drawn.'
+    }
+    Set-DarkTheme $false
+    if ($manualRealm.BackColor.ToArgb() -ne ([Drawing.SystemColors]::Window).ToArgb()) {
+        throw 'Light theme did not restore the standard text input color.'
+    }
+    if ($accountCombo.DrawMode -ne [Windows.Forms.DrawMode]::Normal) {
+        throw 'Light theme did not restore standard combo-box drawing.'
+    }
     $realmParserSmoke = @(Parse-Realms '[realm-json] {"index":2,"id":"13","name":"Survival | Friends","owner":"owner","state":"OPEN","expired":false}')
     if ($realmParserSmoke.Count -ne 1 -or $realmParserSmoke[0].Id -ne '13' -or $realmParserSmoke[0].Name -ne 'Survival | Friends') {
         throw 'Structured Realm list parsing failed.'
@@ -1033,6 +1348,7 @@ $form.Add_Shown({
     }
 
     $timer.Start()
+    Start-UpdateCheck
     if ($script:Profiles.Count -eq 0) {
         Add-Log 'gui' 'No Microsoft account profiles are on record. Add an account before listing Realms.'
         Add-AccountProfile

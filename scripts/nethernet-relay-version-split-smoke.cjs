@@ -3,7 +3,8 @@
 const assert = require('assert')
 const { loadConfig } = require('../src/config')
 const { buildViaProxyCommand } = require('../src/javaCompatProxy')
-const { CURRENT_VERSION } = require('bedrock-protocol/src/options')
+const { currentRealmBedrockVersion } = require('../src/bedrockProtocolSchemaCompat')
+const CURRENT_VERSION = currentRealmBedrockVersion()
 
 const oldEnv = { ...process.env }
 try {

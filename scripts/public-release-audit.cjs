@@ -24,6 +24,14 @@ const forbiddenPaths = [
   'bridge-station-recipes-future.json'
 ]
 
+const forbiddenPathPatterns = [
+  /(?:^|\/)(?:\.auth|\.auth-profiles)(?:\/|$)/i,
+  /(?:^|\/)(?:accounts|launcher_accounts|profiles|saves)\.json$/i,
+  /(?:^|\/)[0-9a-f]{6}_(?:msal|live|sisu|xbl|bed|mca|mcs|pfb)-cache\.json$/i,
+  /(?:^|\/)(?:credentials?|tokens?|secrets?)\.(?:env|json|log|txt)$/i,
+  /(?:^|\/)(?:id_rsa|id_ed25519|[^/]+\.(?:key|p12|pem|pfx))$/i
+]
+
 const ignoredWalkDirectories = new Set([
   '.git',
   '.auth',
@@ -83,6 +91,7 @@ const secretPatterns = [
   ['private-key', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g],
   ['aws-access-key', /\bAKIA[0-9A-Z]{16}\b/g],
   ['authorization-header', /\b(?:Bearer|MCToken)\s+[A-Za-z0-9._~+/-]{20,}={0,2}\b/g],
+  ['cached-auth-token', /["'](?:access[_-]?token|refresh[_-]?token|mcToken|XSTSToken|EntityToken|SessionTicket|Token)["']\s*:\s*["'](?!\[redacted\]|example|placeholder|test|fake|do-not-store)[^"'\r\n]{20,}["']/gi],
   ['literal-secret-assignment', /\b(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|api[_-]?key|password)\b\s*[:=]\s*['"](?!\[redacted\]|example|placeholder|test|fake|do-not-store)[^'"\r\n]{12,}['"]/gi],
   ['absolute-home-path', /(?:[A-Za-z]:[\\/]Users[\\/]|\/(?:Users|home)\/)[^\s'"<>/\\]+/g]
 ]
@@ -110,9 +119,11 @@ function posixPath (value) {
 
 function isForbiddenPath (relativePath) {
   const normalized = posixPath(relativePath)
-  return forbiddenPaths.some(entry => entry.endsWith('/')
-    ? normalized.startsWith(entry)
-    : normalized === entry)
+  return forbiddenPaths.some(entry => {
+    if (!entry.endsWith('/')) return normalized === entry
+    const directory = entry.slice(0, -1)
+    return normalized === directory || normalized.startsWith(entry)
+  }) || forbiddenPathPatterns.some(pattern => pattern.test(normalized))
 }
 
 function gitCandidateFiles () {
@@ -149,11 +160,19 @@ function walkCandidateFiles () {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const relativePath = posixPath(path.join(relativeDirectory, entry.name))
       if (entry.isDirectory()) {
+        if (isForbiddenPath(relativePath)) {
+          files.push(relativePath)
+          continue
+        }
         if (ignoredWalkDirectories.has(entry.name) || /^tmp-dep-extract-/i.test(entry.name)) continue
         visit(path.join(directory, entry.name), relativePath)
         continue
       }
       if (!entry.isFile()) continue
+      if (isForbiddenPath(relativePath)) {
+        files.push(relativePath)
+        continue
+      }
       if (ignoredWalkFiles.has(relativePath) || ignoredExtensions.has(path.extname(entry.name).toLowerCase())) continue
       if (/^V\d.*\.md$/i.test(entry.name) && !relativeDirectory) continue
       if (/^via(?:proxy|aprilfools|backwards|legacy|rewind|version)\.yml$/i.test(entry.name)) continue

@@ -48,6 +48,11 @@ const rootDirectories = [
 ]
 
 const excludedDirectoryNames = new Set([
+  '.auth',
+  '.auth-profiles',
+  '.runtime',
+  '.runtime-codex',
+  '.runtime-desktop',
   '__pycache__',
   'blob_cache',
   'build',

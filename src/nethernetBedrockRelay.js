@@ -1,7 +1,12 @@
 'use strict'
 
 require('./preferVendoredProtocol').installVendoredProtocolPath()
-require('./bedrockProtocolSchemaCompat').installBedrockProtocolSchemaCompat()
+const {
+  currentRealmBedrockVersion,
+  installBedrockProtocolSchemaCompat
+} = require('./bedrockProtocolSchemaCompat')
+
+installBedrockProtocolSchemaCompat()
 
 const fs = require('fs')
 const path = require('path')
@@ -87,6 +92,17 @@ function protocolVersionAtLeast (version, target) {
     if (actual < required) return false
   }
   return true
+}
+
+function protocolInputFlagEnabled (inputData, name) {
+  if (Array.isArray(inputData)) return inputData.includes(name)
+  return Boolean(inputData && typeof inputData === 'object' && inputData[name])
+}
+
+function protocolInputFlagNames (inputData) {
+  if (Array.isArray(inputData)) return Array.from(new Set(inputData.map(String)))
+  if (!inputData || typeof inputData !== 'object') return []
+  return Object.keys(inputData).filter(name => inputData[name] === true)
 }
 
 function localViaBedrockUsesItemV4 (options = {}) {
@@ -651,6 +667,63 @@ function normalizeClientboundForLocalViaBedrock (name, params = {}, options = {}
   let out = normalizeClientboundEntityNoiseForLocalViaBedrock(name, params)
   out = normalizeClientboundEntityItemFieldsForLocalViaBedrock(name, out, options)
 
+  if (name === 'dimension_data' && Array.isArray(out.definitions)) {
+    return {
+      ...out,
+      definitions: out.definitions.map(definition => {
+        const {
+          default_biome: defaultBiome,
+          height,
+          ...legacyDefinition
+        } = definition || {}
+        const minHeight = numberOrDefault(legacyDefinition.min_height, 0)
+        const maxHeight = height == null
+          ? numberOrDefault(legacyDefinition.max_height, minHeight)
+          : minHeight + numberOrDefault(height, 0)
+        return {
+          ...legacyDefinition,
+          max_height: maxHeight,
+          min_height: minHeight
+        }
+      })
+    }
+  }
+
+  if (name === 'boss_event' && out.player_id == null) {
+    return { ...out, player_id: 0n }
+  }
+
+  if (name === 'move_entity_delta' && !out.flags) {
+    return {
+      ...out,
+      flags: {
+        has_x: out.x != null,
+        has_y: out.y != null,
+        has_z: out.z != null,
+        has_rot_x: out.rot_x != null,
+        has_rot_y: out.rot_y != null,
+        has_rot_z: out.rot_z != null,
+        on_ground: Boolean(out.on_ground),
+        teleport: Boolean(out.teleport),
+        force_move: Boolean(out.force_move || out.force_move_local_entity || out.force_completion)
+      }
+    }
+  }
+
+  if (name === 'subchunk' && Array.isArray(out.entries)) {
+    const flattenHeightMap = value => Array.isArray(value) && value.every(Buffer.isBuffer)
+      ? Buffer.concat(value)
+      : value
+    return {
+      ...out,
+      entries: out.entries.map(entry => ({
+        ...entry,
+        heightmap: flattenHeightMap(entry?.heightmap),
+        render_heightmap: flattenHeightMap(entry?.render_heightmap)
+      }))
+    }
+  }
+
   if (name === 'command_output') {
     return normalizeCommandOutputForLocalViaBedrock(out)
   }
@@ -760,7 +833,9 @@ function isKnownLossyClientboundPacket (name) {
     name === 'player_hotbar' ||
     name === 'inventory_transaction' ||
     name === 'creative_content' ||
-    name === 'crafting_data'
+    name === 'crafting_data' ||
+    name === 'set_player_furnace_options' ||
+    name === 'record_started'
 }
 
 function inventoryTransactionActionItemChanged (action = {}) {
@@ -957,6 +1032,14 @@ function downstreamModeClientLabel (mode) {
 
 function downstreamModeSchemaLabel (mode) {
   return isNativeBedrockRecorderMode(mode) ? 'native Bedrock recorder' : 'ViaBedrock'
+}
+
+function downstreamBedrockVersionForMode (config = {}, mode) {
+  const relayConfig = config.bedrockRelay || {}
+  if (isNativeBedrockRecorderMode(mode)) {
+    return relayConfig.upstreamVersion || config.version || currentRealmBedrockVersion()
+  }
+  return relayConfig.version || config.version || '1.26.30'
 }
 
 function emptyCreativeContentForLocalViaBedrock () {
@@ -1231,7 +1314,9 @@ function isServerboundBlockOrItemInteraction (name, params = {}) {
   if (name !== 'player_auth_input') return false
 
   const input = params.input_data || {}
-  if (input.item_interact || input.item_stack_request || input.block_action) return true
+  if (protocolInputFlagEnabled(input, 'item_interact') ||
+      protocolInputFlagEnabled(input, 'item_stack_request') ||
+      protocolInputFlagEnabled(input, 'block_action')) return true
   if (params.transaction || params.item_stack_request || params.block_action) return true
   return false
 }
@@ -1243,12 +1328,10 @@ function summarizeServerboundInteraction (name, params = {}) {
       name,
       tick: params.tick,
       pos: params.position,
-      itemInteract: Boolean(input.item_interact || params.transaction),
-      itemStackRequest: Boolean(input.item_stack_request || params.item_stack_request),
-      blockAction: Boolean(input.block_action || params.block_action),
-      inputFlags: input && typeof input === 'object'
-        ? Object.keys(input).filter(key => input[key] === true).slice(0, 24)
-        : undefined,
+      itemInteract: protocolInputFlagEnabled(input, 'item_interact') || Boolean(params.transaction),
+      itemStackRequest: protocolInputFlagEnabled(input, 'item_stack_request') || Boolean(params.item_stack_request),
+      blockAction: protocolInputFlagEnabled(input, 'block_action') || Boolean(params.block_action),
+      inputFlags: protocolInputFlagNames(input).slice(0, 24),
       blockActions: Array.isArray(params.block_action)
         ? params.block_action.map(entry => ({ action: entry.action, position: entry.position, face: entry.face })).slice(0, 8)
         : undefined,
@@ -3036,11 +3119,70 @@ function bridgeModernItemStackRequestsForLegacyInventoryTransaction (owner, name
   return null
 }
 
+function normalizeTransactionActionForModernRealm (action = {}) {
+  const out = { ...action }
+  const sourceType = String(firstNonNull(out.source_type, out.sourceType, '') || '').toLowerCase()
+  if (out.window_id == null && out.inventory_id != null && ['container', 'craft', 'craft_slot'].includes(sourceType)) {
+    out.window_id = out.inventory_id
+  }
+  if (sourceType !== 'container' && sourceType !== 'craft' && sourceType !== 'craft_slot') {
+    out.window_id = undefined
+  }
+  if (sourceType !== 'world_interaction') out.flags = undefined
+  return out
+}
+
+function normalizePlayerAuthInputForModernRealm (params = {}) {
+  const out = {
+    ...params,
+    input_data: protocolInputFlagNames(params.input_data),
+    // 26.40/26.45 require these outer cereal markers to be true. The 26.50
+    // schema ignores them and writes only the actual optional-value marker.
+    transaction_presence: true,
+    item_stack_request_presence: true,
+    block_action_presence: true,
+    vehicle_rotation_presence: true,
+    predicted_vehicle_presence: true
+  }
+
+  if (params.transaction && typeof params.transaction === 'object') {
+    out.transaction = {
+      ...params.transaction,
+      actions_presence: true,
+      actions: Array.isArray(params.transaction.actions)
+        ? params.transaction.actions.map(normalizeTransactionActionForModernRealm)
+        : []
+    }
+  }
+
+  return out
+}
+
 function normalizeServerboundForUpstreamRealm (name, params = {}, upstream) {
   let out = { ...params }
+  const upstreamVersion = firstNonEmpty(upstream?.options?.version, currentRealmBedrockVersion())
 
   if (name === 'player_auth_input') {
     out = markPlayerAuthInputAsServerAuthoritativeBreak(out)
+    if (protocolVersionAtLeast(upstreamVersion, '1.26.40')) {
+      out = normalizePlayerAuthInputForModernRealm(out)
+    }
+  }
+
+  if (name === 'inventory_transaction' && protocolVersionAtLeast(upstreamVersion, '1.26.50')) {
+    const transaction = out.transaction && typeof out.transaction === 'object'
+      ? { ...out.transaction }
+      : null
+    if (transaction && String(transaction.transaction_type || '').toLowerCase() === 'item_use') {
+      const transactionData = transaction.transaction_data || transaction.data
+      if (transactionData && typeof transactionData === 'object') {
+        transaction.transaction_data = {
+          ...transactionData,
+          hand: numberOrDefault(transactionData.hand, 0)
+        }
+        out.transaction = transaction
+      }
+    }
   }
 
   if (name === 'text') {
@@ -6325,10 +6467,11 @@ function startNetherNetBedrockRelay (config, info, options = {}) {
   const relayConfig = config.bedrockRelay || {}
   const host = relayConfig.host || '127.0.0.1'
   const port = relayConfig.port || 19133
-  const version = relayConfig.version || config.version || '1.26.30'
+  const downstreamMode = normalizeDownstreamMode(options.downstreamMode || relayConfig.downstreamMode)
+  const upstreamVersion = relayConfig.upstreamVersion || config.version || currentRealmBedrockVersion()
+  const version = downstreamBedrockVersionForMode(config, downstreamMode)
   const motd = relayConfig.motd || config.javaLan?.motd || 'Bedrock Realm Bridge'
   const levelName = relayConfig.levelName || `${info.realm?.name || 'Bedrock Realm'} through JavaRock`
-  const downstreamMode = normalizeDownstreamMode(options.downstreamMode || relayConfig.downstreamMode)
 
   const relay = new NetherNetRealmRelay({
     host,
@@ -6376,7 +6519,7 @@ function startNetherNetBedrockRelay (config, info, options = {}) {
   console.log(`[bedrock-relay]   downstream mode=${downstreamMode}`)
   console.log(`[bedrock-relay]   local ${downstreamModeSchemaLabel(downstreamMode)} version=${version}`)
   console.log(`[bedrock-relay]   upstream Realm=${info.realm?.name || info.realm?.id || '(selected Realm)'}`)
-  console.log(`[bedrock-relay]   upstream Bedrock client version=${relayConfig.upstreamVersion || config.version || '(bedrock-protocol current)'}`)
+  console.log(`[bedrock-relay]   upstream Bedrock client version=${upstreamVersion}`)
 
   const close = () => relay.close('bridge_shutdown')
   process.once('SIGINT', close)
@@ -6461,6 +6604,7 @@ module.exports = {
   isEntityTrackerSensitiveClientboundPacket,
   isServerboundRespawnAction,
   nativeBedrockRawActionDiagnostic,
+  downstreamBedrockVersionForMode,
   normalizeRelayHostForViaProxy,
   startNetherNetBedrockRelay
 }

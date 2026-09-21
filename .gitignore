@@ -38,6 +38,7 @@ vialegacy.yml
 viarewind.yml
 viaversion.yml
 *.jar
+*.jar.release.json
 *.class
 *.tgz
 *.pcap

@@ -3,7 +3,13 @@
 require('dotenv').config()
 const path = require('path')
 require('./preferVendoredProtocol').installVendoredProtocolPath()
-const { CURRENT_VERSION } = require('bedrock-protocol/src/options')
+const {
+  currentRealmBedrockVersion,
+  installBedrockProtocolSchemaCompat
+} = require('./bedrockProtocolSchemaCompat')
+
+installBedrockProtocolSchemaCompat()
+const CURRENT_REALM_BEDROCK_VERSION = currentRealmBedrockVersion()
 
 const STABLE_VIABEDROCK_VERSION = '1.26.30'
 
@@ -91,7 +97,7 @@ function loadConfig (argv = process.argv.slice(2)) {
   const bedrockRelayHost = firstDefined(args['bedrock-relay-host'], args.bedrockRelayHost, process.env.BEDROCK_RELAY_HOST, '127.0.0.1')
   const bedrockRelayPort = Number.parseInt(firstDefined(args['bedrock-relay-port'], args.bedrockRelayPort, process.env.BEDROCK_RELAY_PORT, '19133'), 10)
   const bedrockRelayVersion = firstDefined(args['bedrock-relay-version'], args.bedrockRelayVersion, process.env.BEDROCK_RELAY_VERSION, STABLE_VIABEDROCK_VERSION)
-  const bedrockRelayUpstreamVersion = firstDefined(args['bedrock-relay-upstream-version'], args.bedrockRelayUpstreamVersion, process.env.BEDROCK_RELAY_UPSTREAM_VERSION, version, CURRENT_VERSION)
+  const bedrockRelayUpstreamVersion = firstDefined(args['bedrock-relay-upstream-version'], args.bedrockRelayUpstreamVersion, process.env.BEDROCK_RELAY_UPSTREAM_VERSION, version, CURRENT_REALM_BEDROCK_VERSION)
 
   const profilesFolder = path.resolve(firstDefined(args['profiles-folder'], process.env.PROFILES_FOLDER, '.auth'))
   const authCacheMode = String(firstDefined(args['auth-cache-mode'], args.authCacheMode, process.env.AUTH_CACHE_MODE, 'file')).toLowerCase()

@@ -221,9 +221,21 @@ function Test-NodeModulesReady {
 
 function Test-ViaProxyReady {
     $jar = Join-Path $ProjectRoot 'tools\ViaProxy.jar'
+    $releaseMetadata = "$jar.release.json"
     $sourceRoot = Join-Path $ProjectRoot 'patches\viabedrock-inventory'
     $classFile = Join-Path $sourceRoot 'net\raphimc\viabedrock\protocol\packet\UnhandledPackets.class'
-    if (-not (Test-Path -LiteralPath $jar -PathType Leaf) -or -not (Test-Path -LiteralPath $classFile -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $jar -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $releaseMetadata -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $classFile -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $installedRelease = Get-Content -LiteralPath $releaseMetadata -Raw | ConvertFrom-Json
+        if ($installedRelease.tag -ne 'v3.4.12' -or $installedRelease.asset -ne 'ViaProxy-3.4.12.jar') {
+            return $false
+        }
+    } catch {
         return $false
     }
 
