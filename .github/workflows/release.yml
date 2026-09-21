@@ -14,10 +14,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -36,10 +36,12 @@ jobs:
         run: ./scripts/Build-JavaRockRelease.ps1
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: JavaRock-Windows
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
           if-no-files-found: error
 
       - name: Publish tagged release
@@ -50,6 +52,11 @@ jobs:
         run: |
           $zip = Get-ChildItem -LiteralPath dist -Filter '*.zip' | Select-Object -First 1
           if (-not $zip) { throw 'Release ZIP was not created.' }
+          $checksum = Get-Item -LiteralPath "$($zip.FullName).sha256" -ErrorAction Stop
+          $expected = ((Get-Content -LiteralPath $checksum.FullName -Raw).Trim() -split '\s+')[0].ToUpperInvariant()
+          $actual = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($expected -ne $actual) { throw 'Release ZIP does not match its checksum file.' }
+          $assets = @($zip.FullName, $checksum.FullName)
 
           $previousErrorActionPreference = $ErrorActionPreference
           $ErrorActionPreference = 'SilentlyContinue'
@@ -58,7 +65,7 @@ jobs:
           $ErrorActionPreference = $previousErrorActionPreference
 
           if ($releaseExists) {
-            gh release upload $env:GITHUB_REF_NAME $zip.FullName --clobber
+            gh release upload $env:GITHUB_REF_NAME @assets --clobber
           } else {
-            gh release create $env:GITHUB_REF_NAME $zip.FullName --generate-notes --title "JavaRock $env:GITHUB_REF_NAME"
+            gh release create $env:GITHUB_REF_NAME @assets --generate-notes --title "JavaRock $env:GITHUB_REF_NAME"
           }
