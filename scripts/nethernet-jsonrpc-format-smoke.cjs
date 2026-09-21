@@ -5,6 +5,7 @@ const {
   addTurnCredentials,
   candidateType,
   jsonRpcSignalingUrl,
+  loadNethernet,
   makeDeliveryInnerMessage,
   makeIceServers,
   makeJsonRpcRequest,
@@ -28,6 +29,11 @@ const {
 } = require('../src/simpleWebSocketClient')
 
 function main () {
+  const nethernetPackage = require('nethernet/package.json')
+  const nethernet = loadNethernet()
+  assert.strictEqual(nethernetPackage.version, '1.1.1')
+  assert.strictEqual(typeof nethernet.Client, 'function')
+
   assert.match(randomUint64DecimalString(), /^\d+$/)
   assert.strictEqual(
     jsonRpcSignalingUrl('signal.example.net'),
@@ -101,12 +107,16 @@ function main () {
   }), { username: 'u', password: 'p', urls: ['turn:a'] })
 
   assert.deepStrictEqual(makeIceServers({ username: 'u', password: 'p' }), [
-    'stun:relay.communication.microsoft.com:3478',
-    'turn:u:p@relay.communication.microsoft.com:3478'
+    { urls: 'stun:relay.communication.microsoft.com:3478' },
+    {
+      urls: 'turn:relay.communication.microsoft.com:3478',
+      username: 'u',
+      credential: 'p'
+    }
   ])
 
   assert.deepStrictEqual(makeIceServers({ username: 'u', password: 'p', urls: ['turn:a'] }), [
-    'turn:u:p@a'
+    { urls: 'turn:a', username: 'u', credential: 'p' }
   ])
 
   assert.strictEqual(

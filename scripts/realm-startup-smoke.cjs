@@ -3,7 +3,10 @@
 const assert = require('assert')
 const fs = require('fs')
 const path = require('path')
-const { CURRENT_VERSION } = require('bedrock-protocol/src/options')
+require('../src/preferVendoredProtocol').installVendoredProtocolPath()
+const { currentRealmBedrockVersion, installBedrockProtocolSchemaCompat } = require('../src/bedrockProtocolSchemaCompat')
+installBedrockProtocolSchemaCompat()
+const CURRENT_VERSION = currentRealmBedrockVersion()
 const { loadConfig, STABLE_VIABEDROCK_VERSION } = require('../src/config')
 const {
   REALM_RECORD_PREFIX,
@@ -12,7 +15,10 @@ const {
 } = require('../src/realmPicker')
 const { realmJoinRetryOptions } = require('../src/realmJoinInfo')
 const { NetherNetRealmRelay } = require('../src/nethernetBedrockRelay')
-const { buildRakNetBedrockClientOptions } = require('../src/nethernetBedrockProbe')
+const {
+  buildRakNetBedrockClientOptions,
+  createNetherNetIdentityProvider
+} = require('../src/nethernetBedrockProbe')
 
 const environmentKeys = [
   'BEDROCK_VERSION',
@@ -76,13 +82,24 @@ try {
   assert.strictEqual(rakNetOptions.version, CURRENT_VERSION)
   assert.strictEqual(rakNetOptions.raknetBackend, 'jsp-raknet')
 
+  const privateKey = { type: 'private' }
+  const identityProvider = createNetherNetIdentityProvider({
+    ecdhKeyPair: { privateKey },
+    multiplayerToken: 'multiplayer-token'
+  })
+  assert.deepStrictEqual(identityProvider(), { privateKey, token: 'multiplayer-token' })
+  assert.throws(
+    createNetherNetIdentityProvider({ ecdhKeyPair: { privateKey } }),
+    /multiplayer token required by NetherNet/
+  )
+
   const root = path.resolve(__dirname, '..')
   const bridgeLauncher = fs.readFileSync(path.join(root, 'run-bridge-via-bedrock-relay-latest.ps1'), 'utf8')
   const recorderLauncher = fs.readFileSync(path.join(root, 'run-bedrock-packet-recorder-latest.ps1'), 'utf8')
   assert.doesNotMatch(bridgeLauncher, /REALM_JOIN_MAX_ATTEMPTS\) \{ \$env:REALM_JOIN_MAX_ATTEMPTS = "0"/)
   assert.doesNotMatch(recorderLauncher, /REALM_JOIN_MAX_ATTEMPTS\) \{ \$env:REALM_JOIN_MAX_ATTEMPTS = "0"/)
-  assert.match(bridgeLauncher, /CURRENT_VERSION/)
-  assert.match(recorderLauncher, /CURRENT_VERSION/)
+  assert.match(bridgeLauncher, /currentRealmBedrockVersion/)
+  assert.match(recorderLauncher, /currentRealmBedrockVersion/)
 
   console.log(`Realm startup smoke check passed (Realm ${CURRENT_VERSION}, ViaBedrock ${STABLE_VIABEDROCK_VERSION}).`)
 } finally {

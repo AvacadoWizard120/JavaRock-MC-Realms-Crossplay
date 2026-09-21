@@ -1,11 +1,15 @@
 'use strict'
 
 require('./preferVendoredProtocol').installVendoredProtocolPath()
-require('./bedrockProtocolSchemaCompat').installBedrockProtocolSchemaCompat()
+const {
+  currentRealmBedrockVersion,
+  installBedrockProtocolSchemaCompat
+} = require('./bedrockProtocolSchemaCompat')
+
+installBedrockProtocolSchemaCompat()
 
 const { Client } = require('bedrock-protocol/src/client')
 const bedrock = require('bedrock-protocol')
-const Options = require('bedrock-protocol/src/options')
 const { ClientStatus } = require('bedrock-protocol/src/connection')
 const { BridgeStateTracker } = require('./stateTracker')
 const { attachPacketLogger } = require('./packetLogger')
@@ -26,7 +30,7 @@ function buildNetherNetBedrockClientOptions (config, info) {
     skipPing: true,
     host: info.endpoint.host,
     port: info.endpoint.port || 19132,
-    version: config.version || Options.CURRENT_VERSION,
+    version: config.version || currentRealmBedrockVersion(),
     authflow: createBedrockAuthflow(config, {
       cache: createReadThroughMemoryCacheFactory(config.profilesFolder)
     }),
@@ -46,7 +50,7 @@ function buildRakNetBedrockClientOptions (config, info) {
     skipPing: true,
     host: info.endpoint.host,
     port: info.endpoint.port || 19132,
-    version: config.version || Options.CURRENT_VERSION,
+    version: config.version || currentRealmBedrockVersion(),
     authflow: createBedrockAuthflow(config, {
       cache: createReadThroughMemoryCacheFactory(config.profilesFolder)
     }),
@@ -88,6 +92,19 @@ function installNetherNetEncryptionBypass (client) {
     client.decrypt = null
     client.encrypt = null
     client.inLog?.('Skipping Bedrock packet encryption for NetherNet transport.')
+  }
+}
+
+function createNetherNetIdentityProvider (client) {
+  if (!client) throw new TypeError('A Bedrock client is required for NetherNet identity.')
+
+  return () => {
+    const privateKey = client.ecdhKeyPair?.privateKey || client.privateKeyPEM
+    const token = client.multiplayerToken
+    if (!privateKey || !token) {
+      throw new Error('Bedrock authentication did not provide the key and multiplayer token required by NetherNet.')
+    }
+    return { privateKey, token }
   }
 }
 
@@ -169,7 +186,8 @@ function createNetherNetBedrockClient (config, info, options = {}) {
   installViaBedrockStyleLoginEnvelope(client)
   client.connection = new NetherNetRealmTransport(config, info, {
     timeoutMs: Math.max(config.connectTimeoutMs || 0, 15000),
-    logger: message => console.log(message)
+    logger: message => console.log(message),
+    identityProvider: createNetherNetIdentityProvider(client)
   })
   client.connect()
 
@@ -242,6 +260,7 @@ module.exports = {
   attachBedrockLoginResponses,
   buildNetherNetBedrockClientOptions,
   buildRakNetBedrockClientOptions,
+  createNetherNetIdentityProvider,
   createNetherNetBedrockClient,
   createRakNetBedrockClient,
   createRealmBedrockClient,

@@ -32,16 +32,12 @@ function jsonRpcSignalingUrl (host = DEFAULT_SIGNAL_HOST) {
 }
 
 function loadNethernet () {
-  let modulePath
-  let nethernet
   try {
-    modulePath = require.resolve('nethernet')
-    nethernet = require('nethernet')
+    return require('nethernet')
   } catch (rootError) {
     const vendorPath = path.resolve(__dirname, '..', '.vendor', 'nethernet', 'node_modules', 'nethernet')
     try {
-      modulePath = require.resolve(vendorPath)
-      nethernet = require(vendorPath)
+      return require(vendorPath)
     } catch {
       const error = new Error([
         'Missing nethernet package.',
@@ -52,91 +48,6 @@ function loadNethernet () {
       throw error
     }
   }
-
-  return patchNethernetDataChannelOptions(nethernet, modulePath)
-}
-
-function patchNethernetDataChannelOptions (nethernet, modulePath) {
-  if (nethernet.Client.__realmBridgePatchedDataChannels === true) return nethernet
-
-  const moduleRoot = path.dirname(modulePath)
-  const { Connection } = require(path.join(moduleRoot, 'src', 'connection'))
-  const { PeerConnection } = loadNodeDataChannel()
-  const { SignalType, SignalStructure } = nethernet
-
-  nethernet.Client.prototype.createOffer = async function createOfferWithBedrockChannelOptions () {
-    this.rtcConnection = new PeerConnection('client', { iceServers: this.credentials })
-    this.connection = new Connection(this, this.connectionId, this.rtcConnection)
-
-    this.rtcConnection.onLocalCandidate(candidate => {
-      this.signalHandler(
-        new SignalStructure(SignalType.CandidateAdd, this.connectionId, candidate, this.serverNetworkId)
-      )
-    })
-
-    this.rtcConnection.onLocalDescription(desc => {
-      const pattern = /o=rtc \d+ 0 IN IP4 127\.0\.0\.1/
-      const newOLine = `o=- ${this.networkId} 2 IN IP4 127.0.0.1`
-      const offerDescription = process.env.NETHERNET_REWRITE_SDP_ORIGIN === 'false'
-        ? desc
-        : desc.replace(pattern, newOLine)
-      this.signalHandler(
-        new SignalStructure(SignalType.ConnectRequest, this.connectionId, offerDescription, this.serverNetworkId)
-      )
-    })
-
-    this.rtcConnection.onStateChange(state => {
-      if (state === 'closed' || state === 'disconnected' || state === 'failed') this.emit('disconnect', this.connectionId, 'disconnected')
-    })
-
-    setTimeout(() => {
-      let emittedOpen = false
-      const emitDataChannelOpen = () => {
-        if (emittedOpen) return
-        emittedOpen = true
-        this.emit('connected', this.connection)
-      }
-      const originalFlushQueue = this.connection.flushQueue.bind(this.connection)
-      this.connection.flushQueue = () => {
-        originalFlushQueue()
-        emitDataChannelOpen()
-      }
-      const reliable = this.rtcConnection.createDataChannel('ReliableDataChannel', { protocol: 'ReliableDataChannel' })
-      const unreliable = this.rtcConnection.createDataChannel('UnreliableDataChannel', {
-        protocol: 'UnreliableDataChannel',
-        unordered: true,
-        maxRetransmits: 0
-      })
-
-      this.connection.setChannels(
-        reliable,
-        unreliable
-      )
-
-      if (reliable.readyState === 'open') emitDataChannelOpen()
-    }, 500)
-  }
-
-  Object.defineProperty(nethernet.Client, '__realmBridgePatchedDataChannels', {
-    value: true,
-    enumerable: false
-  })
-
-  return nethernet
-}
-
-function loadNodeDataChannel () {
-  try {
-    return require('node-datachannel')
-  } catch {
-    return require(path.resolve(__dirname, '..', '.vendor', 'nethernet', 'node_modules', 'node-datachannel'))
-  }
-}
-
-function cleanupNodeDataChannel () {
-  try {
-    loadNodeDataChannel().cleanup?.()
-  } catch {}
 }
 
 function delay (ms) {
@@ -216,7 +127,6 @@ class NetherNetJsonRpcDataChannelSession extends EventEmitter {
         try {
           this.ws?.terminate()
         } catch {}
-        cleanupNodeDataChannel()
       }, 250)
       timer.unref?.()
     }
@@ -321,7 +231,25 @@ function makeIceServers (credentials) {
           'turn:relay.communication.microsoft.com:3478'
         ]
 
-  return urls.map(url => addTurnCredentials(url, credentials))
+  return urls.map(url => {
+    if (url && typeof url === 'object') {
+      const normalized = { ...url }
+      const values = Array.isArray(normalized.urls) ? normalized.urls : [normalized.urls]
+      if (values.some(value => /^turns?:/i.test(String(value)))) {
+        normalized.username = normalized.username || credentials.username
+        normalized.credential = normalized.credential || credentials.password
+      }
+      return normalized
+    }
+
+    const text = String(url)
+    if (!/^turns?:/i.test(text)) return { urls: text }
+    return {
+      urls: text.replace(/^(turns?):[^@/]+@/i, '$1:'),
+      username: String(credentials.username),
+      credential: String(credentials.password)
+    }
+  })
 }
 
 function addTurnCredentials (url, credentials) {
@@ -554,6 +482,7 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
   const log = options.log || (() => {})
   const logSignalFrames = options.logSignalFrames === true
   const abortSignal = options.signal
+  const identity = options.identity
   const url = jsonRpcSignalingUrl(signalHost)
 
   if (abortSignal?.aborted) throw netherNetConnectAbortedError(abortSignal.reason)
@@ -658,8 +587,13 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
   }
 
   function createNethernetClient () {
-    const client = new Client(remoteNetworkId, '127.0.0.1')
-    client.networkId = BigInt(localNetworkId)
+    const client = new Client(remoteNetworkId, '127.0.0.1', {
+      networkId: BigInt(localNetworkId),
+      credentials: makeIceServers(turnCredentials),
+      identity,
+      responseTimeoutMs: handshakeAttemptTimeoutMs,
+      inactivityTimeoutMs: handshakeAttemptTimeoutMs
+    })
     client.signalHandler = sendWebRtcSignal
 
     if (!session) {
@@ -694,6 +628,12 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
       setTimeout(() => beginHandshakeAttempt('peer connection closed'), 0)
     })
 
+    client.on('error', error => {
+      if (client !== nethernetClient || session.closed) return
+      log(`[nethernet-jsonrpc] WebRTC attempt ${handshakeAttempt} failed locally: ${error.message || error}`)
+      session.emit('warning', error)
+    })
+
     return client
   }
 
@@ -721,7 +661,6 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
 
     nethernetClient = createNethernetClient()
     currentAttemptDiagnostics.connectionId = String(nethernetClient.connectionId)
-    nethernetClient.credentials = makeIceServers(turnCredentials)
 
     log(
       `[nethernet-jsonrpc] Starting WebRTC handshake ${handshakeAttempt}/${maxHandshakeAttempts}` +
@@ -832,7 +771,6 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
         try {
           ws.terminate()
         } catch {}
-        cleanupNodeDataChannel()
       }
       reject(error)
     }
@@ -939,8 +877,12 @@ async function runNetherNetJsonRpcProbe (config) {
   }
 
   function createNethernetClient () {
-    const client = new Client(info.endpoint.host, '127.0.0.1')
-    client.networkId = BigInt(localNetworkId)
+    const client = new Client(info.endpoint.host, '127.0.0.1', {
+      networkId: BigInt(localNetworkId),
+      credentials: makeIceServers(turnCredentials),
+      responseTimeoutMs: 15000,
+      inactivityTimeoutMs: 5000
+    })
 
     client.signalHandler = sendWebRtcSignal
 
@@ -951,6 +893,10 @@ async function runNetherNetJsonRpcProbe (config) {
 
     client.on('encapsulated', buffer => {
       console.log(`[nethernet-jsonrpc] Received NetherNet payload (${Buffer.byteLength(buffer)} bytes).`)
+    })
+
+    client.on('error', error => {
+      console.error(`[nethernet-jsonrpc] NetherNet offer failed: ${error.stack || error.message || error}`)
     })
 
     return client
@@ -980,11 +926,12 @@ async function runNetherNetJsonRpcProbe (config) {
           if (turnCredentials) {
             console.log('[nethernet-jsonrpc] TURN credentials received. Creating NetherNet offer.')
             nethernetClient = createNethernetClient()
-            nethernetClient.credentials = makeIceServers(turnCredentials)
-            nethernetClient.connect().catch(error => {
+            try {
+              nethernetClient.connect()
+            } catch (error) {
               console.error(`[nethernet-jsonrpc] NetherNet offer failed: ${error.stack || error.message || error}`)
               finish()
-            })
+            }
             return
           }
         }
@@ -1012,7 +959,6 @@ async function runNetherNetJsonRpcProbe (config) {
   ws.close()
   if (nethernetClient) nethernetClient.close('probe complete')
   await delay(500)
-  cleanupNodeDataChannel()
   ws.terminate()
 
   console.log(`[nethernet-jsonrpc] Probe complete. Messages received: ${messages.length}. WebRTC connected: ${connected}`)
@@ -1041,6 +987,7 @@ module.exports = {
   candidateType,
   connectNetherNetJsonRpcDataChannel,
   jsonRpcSignalingUrl,
+  loadNethernet,
   makeDeliveryInnerMessage,
   makeIceServers,
   makeJsonRpcRequest,

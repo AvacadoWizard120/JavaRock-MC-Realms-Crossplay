@@ -57,6 +57,10 @@ class NetherNetRealmTransport extends EventEmitter {
   }
 
   async _connect () {
+    const identity = typeof this.options.identityProvider === 'function'
+      ? await this.options.identityProvider()
+      : this.options.identity
+
     this.session = await this.sessionFactory(this.config, this.info, {
       log: message => this.logger(message),
       timeoutMs: this.options.timeoutMs,
@@ -67,6 +71,7 @@ class NetherNetRealmTransport extends EventEmitter {
       handshakeAttemptTimeoutMs: this.options.handshakeAttemptTimeoutMs,
       maxHandshakeAttempts: this.options.maxHandshakeAttempts,
       logSignalFrames: this.options.logSignalFrames,
+      identity,
       signal: this.abortController?.signal
     })
 

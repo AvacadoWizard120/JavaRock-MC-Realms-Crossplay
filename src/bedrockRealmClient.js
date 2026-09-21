@@ -1,7 +1,12 @@
 'use strict'
 
 require('./preferVendoredProtocol').installVendoredProtocolPath()
-require('./bedrockProtocolSchemaCompat').installBedrockProtocolSchemaCompat()
+const {
+  currentRealmBedrockVersion,
+  installBedrockProtocolSchemaCompat
+} = require('./bedrockProtocolSchemaCompat')
+
+installBedrockProtocolSchemaCompat()
 
 const bedrock = require('bedrock-protocol')
 const { BridgeStateTracker } = require('./stateTracker')
@@ -34,6 +39,7 @@ function buildClientOptions (config, listOnly = false) {
   const options = {
     username: config.username,
     profilesFolder: config.profilesFolder,
+    version: config.version || currentRealmBedrockVersion(),
     connectTimeout: config.connectTimeoutMs,
     raknetBackend: config.raknetBackend,
     skipPing: config.skipPing,
@@ -50,8 +56,6 @@ function buildClientOptions (config, listOnly = false) {
   } else {
     options.realms = buildRealmOptions(config, listOnly)
   }
-
-  if (config.version) options.version = config.version
 
   return options
 }

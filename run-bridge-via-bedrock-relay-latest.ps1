@@ -12,7 +12,7 @@ if (-not $ViaProxyBedrockTargetVersion) { $ViaProxyBedrockTargetVersion = 'Bedro
 if (-not $UpstreamBedrockVersion) {
   Push-Location $PSScriptRoot
   try {
-    $UpstreamBedrockVersion = (& node.exe -e "process.stdout.write(require('bedrock-protocol/src/options').CURRENT_VERSION)" 2>$null).Trim()
+    $UpstreamBedrockVersion = (& node.exe -e "require('./src/preferVendoredProtocol').installVendoredProtocolPath(); const compat=require('./src/bedrockProtocolSchemaCompat'); compat.installBedrockProtocolSchemaCompat(); process.stdout.write(compat.currentRealmBedrockVersion())" 2>$null).Trim()
   } finally {
     Pop-Location
   }

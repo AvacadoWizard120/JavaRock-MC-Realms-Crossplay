@@ -31,10 +31,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($zip)
 try {
     $names = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($required in @('START-JAVAROCK.bat', 'README-FIRST.txt', 'scripts/Start-JavaRock.ps1', 'scripts/JavaRock-Gui.ps1', 'src/index.js')) {
+    foreach ($required in @('START-JAVAROCK.bat', 'README-FIRST.txt', 'javarock-release-manifest.json', 'scripts/Start-JavaRock.ps1', 'scripts/JavaRock-Gui.ps1', 'scripts/Update-JavaRock.ps1', 'scripts/javarock-update-http.cjs', 'src/index.js')) {
         if ($names -notcontains $required) { throw "Release ZIP is missing $required." }
     }
-    if ($names | Where-Object { $_ -match 'bridge-gui|bridgeGui|node_modules|packet-census|\.auth' }) {
+    $forbiddenArchivePath = 'bridge-gui|bridgeGui|(?:^|/)(?:node_modules|packet-census|packet-logs|logs|\.auth|\.auth-profiles|\.runtime|\.runtime-codex|\.runtime-desktop)(?:/|$)|(?:^|/)(?:accounts|launcher_accounts|profiles|saves)\.json$|(?:^|/)[0-9a-f]{6}_(?:msal|live|sisu|xbl|bed|mca|mcs|pfb)-cache\.json$'
+    if ($names | Where-Object { $_ -match $forbiddenArchivePath }) {
         throw 'Release ZIP contains a forbidden development or private path.'
     }
     if ($names | Where-Object { $_ -match '\.py$|bridge_desktop_gui' }) {
@@ -51,5 +52,8 @@ if (-not $stageResolved.StartsWith($outputFull.TrimEnd('\') + '\', [StringCompar
 Remove-Item -LiteralPath $stageResolved -Recurse -Force
 
 $hash = Get-FileHash -LiteralPath $zip -Algorithm SHA256
+$checksum = "$zip.sha256"
+[IO.File]::WriteAllText($checksum, "$($hash.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($zip))`n", [Text.Encoding]::ASCII)
 Write-Host "[JavaRock] Release ZIP: $zip"
 Write-Host "[JavaRock] SHA256: $($hash.Hash)"
+Write-Host "[JavaRock] Checksum file: $checksum"

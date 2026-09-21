@@ -31,6 +31,9 @@ try {
     'LICENSES/GPL-3.0-or-later.txt',
     'scripts/Start-JavaRock.ps1',
     'scripts/JavaRock-Gui.ps1',
+    'scripts/Update-JavaRock.ps1',
+    'scripts/javarock-update-http.cjs',
+    'javarock-release-manifest.json',
     'src/index.js',
     'patches/viabedrock-inventory/InventoryContainer.java'
   ]
@@ -57,6 +60,14 @@ try {
   ])
   assert(!JSON.stringify(runtimePackage).includes('bridge:gui'))
   assert(!JSON.stringify(runtimePackage).match(/python|tkinter/i))
+
+  const releaseManifest = JSON.parse(fs.readFileSync(path.join(destination, 'javarock-release-manifest.json'), 'utf8'))
+  assert.strictEqual(releaseManifest.format, 1)
+  assert.strictEqual(releaseManifest.product, 'JavaRock')
+  assert.strictEqual(releaseManifest.version, runtimePackage.version)
+  assert(releaseManifest.files.includes('javarock-release-manifest.json'))
+  assert(releaseManifest.files.includes('scripts/Update-JavaRock.ps1'))
+  assert(!releaseManifest.files.some(file => /(?:^|\/)\.auth-profiles(?:\/|$)/i.test(file)))
 
   const runtimeIndex = fs.readFileSync(path.join(destination, 'src', 'index.js'), 'utf8')
   assert.doesNotMatch(runtimeIndex, /bridgeGui|bridge-gui|gui-port|localhost:8765/i)

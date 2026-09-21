@@ -11,6 +11,7 @@ const {
 } = require('../src/viaProxyInventoryPatch')
 
 const DEFAULT_REPO = 'ViaVersion/ViaProxy'
+const DEFAULT_RELEASE_TAG = 'v3.4.12'
 
 function readOptionValue (argv, index, option) {
   const value = argv[index + 1]
@@ -31,6 +32,7 @@ function parseTimeoutMs (value) {
 function parseArgs (argv = process.argv.slice(2)) {
   const args = {
     repo: DEFAULT_REPO,
+    releaseTag: process.env.VIAPROXY_RELEASE_TAG || DEFAULT_RELEASE_TAG,
     dest: path.resolve(__dirname, '..', 'tools', 'ViaProxy.jar'),
     force: false,
     dryRun: false,
@@ -46,6 +48,11 @@ function parseArgs (argv = process.argv.slice(2)) {
     } else if (token === '--repo') {
       args.repo = readOptionValue(argv, i, token)
       i++
+    } else if (token === '--tag') {
+      args.releaseTag = readOptionValue(argv, i, token)
+      i++
+    } else if (token === '--latest') {
+      args.releaseTag = null
     } else if (token === '--dest') {
       args.dest = path.resolve(readOptionValue(argv, i, token))
       i++
@@ -75,8 +82,10 @@ Usage:
 
 Options:
   --dest <path>          Output jar path. Default: tools/ViaProxy.jar
+  --tag <tag>            ViaProxy release tag. Default: ${DEFAULT_RELEASE_TAG}
+  --latest               Test the latest ViaProxy release instead of the compatible tag.
   --force                Replace an existing jar.
-  --dry-run              Resolve the latest release and asset without writing.
+  --dry-run              Resolve the selected release and asset without writing.
   --release-json <path>  Use a local release JSON file for offline testing.
   --timeout-ms <ms>      HTTP timeout. Default: 30000
 `)
@@ -220,7 +229,34 @@ async function loadRelease (args) {
   if (args.releaseJson) {
     return JSON.parse(fs.readFileSync(args.releaseJson, 'utf8'))
   }
-  return requestJson(`https://api.github.com/repos/${args.repo}/releases/latest`, args.timeoutMs)
+  const releasePath = args.releaseTag
+    ? `releases/tags/${encodeURIComponent(args.releaseTag)}`
+    : 'releases/latest'
+  return requestJson(`https://api.github.com/repos/${args.repo}/${releasePath}`, args.timeoutMs)
+}
+
+function releaseMetadataPath (dest) {
+  return `${dest}.release.json`
+}
+
+function readReleaseMetadata (dest) {
+  try {
+    return JSON.parse(fs.readFileSync(releaseMetadataPath(dest), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function releaseMetadataMatches (metadata, release, asset) {
+  return metadata?.tag === release?.tag_name && metadata?.asset === asset?.name
+}
+
+function writeReleaseMetadata (dest, release, asset) {
+  fs.writeFileSync(releaseMetadataPath(dest), `${JSON.stringify({
+    tag: release.tag_name,
+    asset: asset.name,
+    source: asset.browser_download_url
+  }, null, 2)}\n`)
 }
 
 async function installViaProxy (args = parseArgs()) {
@@ -232,10 +268,10 @@ async function installViaProxy (args = parseArgs()) {
   const release = await loadRelease(args)
   const asset = selectViaProxyAsset(release)
   if (!asset?.browser_download_url) {
-    throw new Error(`Could not find a ViaProxy jar asset in latest release ${release?.tag_name || '(unknown)'}.`)
+    throw new Error(`Could not find a ViaProxy jar asset in release ${release?.tag_name || '(unknown)'}.`)
   }
 
-  console.log(`[viaproxy] Latest release: ${release.tag_name || release.name || '(unknown)'}`)
+  console.log(`[viaproxy] Selected release: ${release.tag_name || release.name || '(unknown)'}`)
   console.log(`[viaproxy] Selected asset: ${asset.name}`)
   console.log(`[viaproxy] Destination: ${args.dest}`)
 
@@ -244,18 +280,26 @@ async function installViaProxy (args = parseArgs()) {
     return { installed: false, release, asset, dest: args.dest }
   }
 
-  if (fs.existsSync(args.dest) && !args.force) {
-    console.log('[viaproxy] Destination already exists. Use --force to replace it.')
+  const existingMetadata = readReleaseMetadata(args.dest)
+  const compatibleExistingJar = fs.existsSync(args.dest) &&
+    releaseMetadataMatches(existingMetadata, release, asset)
+
+  if (compatibleExistingJar && !args.force) {
+    console.log('[viaproxy] Compatible destination already exists. Use --force to replace it.')
     const patch = compileViaBedrockPatch(args.dest)
     console.log('[viaproxy] Next: npm run bridge:desktop-gui')
     return { installed: false, release, asset, dest: args.dest, patch }
+  }
+
+  if (fs.existsSync(args.dest) && !args.force) {
+    console.log('[viaproxy] Existing jar is unverified or incompatible with the JavaRock patch; replacing it.')
   }
 
   fs.mkdirSync(path.dirname(args.dest), { recursive: true })
   const temp = `${args.dest}.tmp`
   try {
     await downloadFile(asset.browser_download_url, temp, args.timeoutMs)
-    if (fs.existsSync(args.dest) && args.force) fs.unlinkSync(args.dest)
+    if (fs.existsSync(args.dest)) fs.unlinkSync(args.dest)
     fs.renameSync(temp, args.dest)
   } finally {
     try {
@@ -265,6 +309,7 @@ async function installViaProxy (args = parseArgs()) {
 
   console.log('[viaproxy] Installed.')
   const patch = compileViaBedrockPatch(args.dest)
+  writeReleaseMetadata(args.dest, release, asset)
   console.log('[viaproxy] Next: npm run bridge:desktop-gui')
   return { installed: true, release, asset, dest: args.dest, patch }
 }
@@ -278,9 +323,13 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULT_REPO,
+  DEFAULT_RELEASE_TAG,
   compileViaBedrockPatch,
   installViaProxy,
   markCompiledClassesFresh,
   parseArgs,
+  readReleaseMetadata,
+  releaseMetadataMatches,
+  releaseMetadataPath,
   selectViaProxyAsset
 }

@@ -33,11 +33,13 @@ async function main () {
   }
 
   let receivedSessionOptions = null
+  const identity = { privateKey: 'test-private-key', token: 'test-token' }
   const transport = new NetherNetRealmTransport({}, fakeInfo(), {
     logger: () => {},
     handshakeAttemptTimeoutMs: 2500,
     maxHandshakeAttempts: 5,
     logSignalFrames: true,
+    identityProvider: async () => identity,
     sessionFactory: async (config, info, options) => {
       receivedSessionOptions = options
       return fakeSession
@@ -64,6 +66,7 @@ async function main () {
   assert.strictEqual(receivedSessionOptions.handshakeAttemptTimeoutMs, 2500)
   assert.strictEqual(receivedSessionOptions.maxHandshakeAttempts, 5)
   assert.strictEqual(receivedSessionOptions.logSignalFrames, true)
+  assert.strictEqual(receivedSessionOptions.identity, identity)
 
   const sent = Buffer.from([0xfe, 0x01, 0x02])
   assert.deepStrictEqual(bedrockRakNetBatchToNetherNetPayload(sent), Buffer.from([0x01, 0x02]))

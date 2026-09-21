@@ -1,13 +1,18 @@
 'use strict'
 
 require('./preferVendoredProtocol').installVendoredProtocolPath()
+const {
+  currentRealmBedrockVersion,
+  installBedrockProtocolSchemaCompat
+} = require('./bedrockProtocolSchemaCompat')
+
+installBedrockProtocolSchemaCompat()
 
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { Authflow, Titles } = require('prismarine-auth')
 const { RealmAPI } = require('prismarine-realms')
-const { CURRENT_VERSION } = require('bedrock-protocol/src/options')
 const { printDeviceCode } = require('./bedrockRealmClient')
 const { withTimeout } = require('./asyncDeadline')
 
@@ -17,7 +22,7 @@ const AUTH_HEADER_CACHE_FALLBACK_TTL_MS = 600000
 const bedrockServicesAuthorizationHeaderCache = new Map()
 
 function minecraftVersionForRealmsApi (version) {
-  const selected = version || CURRENT_VERSION
+  const selected = version || currentRealmBedrockVersion()
   return selected.startsWith('1.') ? selected : `1.${selected}`
 }
 

@@ -1,8 +1,20 @@
 'use strict'
 
 const assert = require('assert')
-const { ViaBedrockRelayPlayer, nativeBedrockRawActionDiagnostic } = require('../src/nethernetBedrockRelay')
+const { currentRealmBedrockVersion } = require('../src/bedrockProtocolSchemaCompat')
+const {
+  ViaBedrockRelayPlayer,
+  downstreamBedrockVersionForMode,
+  nativeBedrockRawActionDiagnostic
+} = require('../src/nethernetBedrockRelay')
 const { createDeserializer, createSerializer } = require('bedrock-protocol/src/transforms/serializer')
+
+assert.strictEqual(downstreamBedrockVersionForMode({
+  bedrockRelay: { version: '1.26.30', upstreamVersion: currentRealmBedrockVersion() }
+}, 'native-bedrock-recorder'), currentRealmBedrockVersion())
+assert.strictEqual(downstreamBedrockVersionForMode({
+  bedrockRelay: { version: '1.26.30', upstreamVersion: currentRealmBedrockVersion() }
+}, 'viabedrock'), '1.26.30')
 
 function makePlayer () {
   const player = Object.create(ViaBedrockRelayPlayer.prototype)

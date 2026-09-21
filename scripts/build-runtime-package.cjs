@@ -26,7 +26,9 @@ const scriptFiles = [
   'JavaRock-Gui.ps1',
   'Install-JavaRockRequirements.ps1',
   'install-viaproxy.cjs',
-  'Start-JavaRock.ps1'
+  'javarock-update-http.cjs',
+  'Start-JavaRock.ps1',
+  'Update-JavaRock.ps1'
 ]
 
 function parseArgs (argv = process.argv.slice(2)) {
@@ -135,6 +137,18 @@ function listFiles (directory) {
   return files.sort()
 }
 
+function writeReleaseManifest (destination) {
+  const manifestName = 'javarock-release-manifest.json'
+  const files = listFiles(destination)
+  files.push(manifestName)
+  fs.writeFileSync(path.join(destination, manifestName), `${JSON.stringify({
+    format: 1,
+    product: 'JavaRock',
+    version: packageJson.version,
+    files: files.sort()
+  }, null, 2)}\n`)
+}
+
 function assertTrimmed (destination) {
   const files = listFiles(destination)
   const forbidden = [
@@ -144,7 +158,9 @@ function assertTrimmed (destination) {
     /(?:^|\/)test/i,
     /smoke\.cjs$/i,
     /bridgeGui|bridge-gui/i,
-    /(?:^|\/)(?:node_modules|tools|viaproxy-run|packet-census|\.auth)(?:\/|$)/i,
+    /(?:^|\/)(?:node_modules|tools|viaproxy-run|packet-census|packet-logs|logs|\.auth|\.auth-profiles|\.runtime|\.runtime-codex|\.runtime-desktop)(?:\/|$)/i,
+    /(?:^|\/)(?:accounts|launcher_accounts|profiles|saves)\.json$/i,
+    /(?:^|\/)[0-9a-f]{6}_(?:msal|live|sisu|xbl|bed|mca|mcs|pfb)-cache\.json$/i,
     /\.(?:class|jar|log|jsonl|pcap|pcapng)$/i
   ]
   const rejected = files.filter(file => forbidden.some(pattern => pattern.test(file)))
@@ -165,6 +181,7 @@ function main () {
   copyFilteredDirectory('patches/viabedrock-inventory', args.destination, new Set(['.java']))
   copyFilteredDirectory('LICENSES', args.destination, new Set(['.txt']))
   writeRuntimePackageJson(args.destination)
+  writeReleaseManifest(args.destination)
   assertTrimmed(args.destination)
   auditRuntime(args.destination)
 

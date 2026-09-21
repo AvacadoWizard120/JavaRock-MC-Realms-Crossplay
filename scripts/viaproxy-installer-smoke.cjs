@@ -5,8 +5,11 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const {
+  DEFAULT_RELEASE_TAG,
   markCompiledClassesFresh,
   parseArgs,
+  releaseMetadataMatches,
+  releaseMetadataPath,
   selectViaProxyAsset
 } = require('./install-viaproxy.cjs')
 
@@ -24,10 +27,16 @@ function main () {
   assert.strictEqual(asset.name, 'ViaProxy-3.4.6.jar')
 
   const parsed = parseArgs(['--dest', 'tools/VP.jar', '--force', '--dry-run', '--timeout-ms', '1234'])
+  assert.strictEqual(parsed.releaseTag, DEFAULT_RELEASE_TAG)
   assert.strictEqual(parsed.force, true)
   assert.strictEqual(parsed.dryRun, true)
   assert.strictEqual(parsed.timeoutMs, 1234)
   assert(parsed.dest.endsWith('tools\\VP.jar') || parsed.dest.endsWith('tools/VP.jar'))
+  assert.strictEqual(parseArgs(['--tag', 'v3.4.11']).releaseTag, 'v3.4.11')
+  assert.strictEqual(parseArgs(['--latest']).releaseTag, null)
+  assert.strictEqual(releaseMetadataPath('ViaProxy.jar'), 'ViaProxy.jar.release.json')
+  assert.strictEqual(releaseMetadataMatches({ tag: 'v3.4.6', asset: 'ViaProxy-3.4.6.jar' }, release, asset), true)
+  assert.strictEqual(releaseMetadataMatches({ tag: 'v3.4.5', asset: 'ViaProxy-3.4.6.jar' }, release, asset), false)
 
   assert.throws(() => parseArgs(['--dest']), /requires a value/)
   assert.throws(() => parseArgs(['--timeout-ms', 'nope']), /positive integer/)

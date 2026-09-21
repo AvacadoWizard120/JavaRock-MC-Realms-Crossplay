@@ -19,6 +19,8 @@ Choosing **No** installs nothing and closes the launcher. You can run it again l
 
 JavaRock requires Node.js 20 or newer and a JDK 17 or newer. Its desktop window is built with Windows Forms, so Python and Tkinter are not required.
 
+The window checks GitHub for updates in the background. When one is available, JavaRock asks before installing it, verifies the release checksum, keeps local accounts and settings, and restarts. Use **Help > Check for updates** to check manually.
+
 ## Add Your Account
 
 1. Click **Login / Add**.
