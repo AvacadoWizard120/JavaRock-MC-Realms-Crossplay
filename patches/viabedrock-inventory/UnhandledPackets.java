@@ -19,7 +19,7 @@ import net.raphimc.viabedrock.api.util.PacketFactory;
 import net.raphimc.viabedrock.api.util.TextUtil;
 import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.ClientboundBedrockPackets;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerType;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
 import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
 import net.raphimc.viabedrock.protocol.storage.ChunkTracker;
 import net.raphimc.viabedrock.protocol.storage.InventoryTracker;
@@ -145,17 +145,13 @@ public class UnhandledPackets {
         protocol.cancelClientbound(ClientboundBedrockPackets.CAMERA_AIM_ASSIST);
         protocol.cancelClientbound(ClientboundBedrockPackets.CAMERA_AIM_ASSIST_PRESETS);
         protocol.cancelClientbound(ClientboundBedrockPackets.PLAYER_VIDEO_CAPTURE);
-        protocol.cancelClientbound(ClientboundBedrockPackets.GRAPHICS_OVERRIDE_PARAMETER);
-        protocol.cancelClientbound(ClientboundBedrockPackets.TEXTURE_SHIFT);
-        protocol.cancelClientbound(ClientboundBedrockPackets.CAMERA_SPLINE);
-        protocol.cancelClientbound(ClientboundBedrockPackets.CAMERA_AIM_ASSIST_ACTOR_PRIORITY);
 
         protocol.registerServerboundTransition(ServerboundConfigurationPackets1_21_9.KEEP_ALIVE, null, PacketWrapper::cancel);
         protocol.cancelServerbound(ServerboundPackets26_1.CHAT_ACK);
         protocol.cancelServerbound(ServerboundPackets26_1.CHAT_SESSION_UPDATE);
         protocol.cancelServerbound(ServerboundPackets26_1.CHUNK_BATCH_RECEIVED);
         protocol.cancelServerbound(ServerboundPackets26_1.COOKIE_RESPONSE);
-        protocol.cancelServerbound(ServerboundPackets26_1.DEBUG_SAMPLE_SUBSCRIPTION);
+        protocol.cancelServerbound(ServerboundPackets26_1.DEBUG_SUBSCRIPTION_REQUEST);
         protocol.cancelServerbound(ServerboundPackets26_1.KEEP_ALIVE);
         protocol.cancelServerbound(ServerboundPackets26_1.PLAYER_LOADED);
         protocol.cancelServerbound(ServerboundPackets26_1.RECIPE_BOOK_CHANGE_SETTINGS);

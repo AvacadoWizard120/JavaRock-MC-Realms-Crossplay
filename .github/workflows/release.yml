@@ -2,9 +2,6 @@ name: Build Windows release
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: write
@@ -30,6 +27,18 @@ jobs:
           npm run check:public-release
           npm run check:bootstrap
           npm run check:runtime-package
+
+      - name: Load release signing key
+        shell: powershell
+        env:
+          JAVAROCK_RELEASE_SIGNING_KEY_PEM: ${{ secrets.JAVAROCK_RELEASE_SIGNING_KEY_PEM }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:JAVAROCK_RELEASE_SIGNING_KEY_PEM)) {
+            throw 'JAVAROCK_RELEASE_SIGNING_KEY_PEM is not configured.'
+          }
+          $keyPath = Join-Path $env:RUNNER_TEMP 'javarock-release-signing.pem'
+          [IO.File]::WriteAllText($keyPath, $env:JAVAROCK_RELEASE_SIGNING_KEY_PEM + "`n", [Text.UTF8Encoding]::new($false))
+          "JAVAROCK_RELEASE_SIGNING_KEY=$keyPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build trimmed runtime ZIP
         shell: powershell

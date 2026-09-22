@@ -188,6 +188,104 @@ const legacySubChunk = normalizeClientboundForLocalViaBedrock('subchunk', subChu
 })
 assert(Buffer.isBuffer(legacySubChunk.entries[0].heightmap))
 assert.strictEqual(legacySubChunk.entries[0].heightmap.length, 256)
+assert(Buffer.isBuffer(legacySubChunk.entries[0].payload))
+assert.strictEqual(legacySubChunk.entries[0].payload.length, 0)
+
+const legacySubChunkSerializer = createSerializer('1.26.30')
+const legacySubChunkDeserializer = createDeserializer('1.26.30')
+const legacySubChunkBuffer = legacySubChunkSerializer.createPacketBuffer({
+  name: 'subchunk',
+  params: legacySubChunk
+})
+const decodedLegacySubChunk = legacySubChunkDeserializer.parsePacketBuffer(legacySubChunkBuffer).data
+assert.strictEqual(decodedLegacySubChunk.name, 'subchunk')
+assert.strictEqual(decodedLegacySubChunk.params.entries[0].result, 'success_all_air')
+assert(Buffer.isBuffer(decodedLegacySubChunk.params.entries[0].payload))
+assert.strictEqual(decodedLegacySubChunk.params.entries[0].payload.length, 0)
+assert.strictEqual(decodedLegacySubChunk.params.entries[0].heightmap.length, 256)
+
+const currentLocalSubChunk = normalizeClientboundForLocalViaBedrock('subchunk', subChunk, {
+  localBedrockVersion: '1.26.45'
+})
+const currentLocalSubChunkSerializer = createSerializer('1.26.45')
+const currentLocalSubChunkDeserializer = createDeserializer('1.26.45')
+const currentLocalSubChunkBuffer = currentLocalSubChunkSerializer.createPacketBuffer({
+  name: 'subchunk',
+  params: currentLocalSubChunk
+})
+const decodedCurrentLocalSubChunk = currentLocalSubChunkDeserializer.parsePacketBuffer(currentLocalSubChunkBuffer).data
+assert.strictEqual(decodedCurrentLocalSubChunk.name, 'subchunk')
+assert.strictEqual(decodedCurrentLocalSubChunk.params.entries[0].result, 'success_all_air')
+assert.strictEqual(decodedCurrentLocalSubChunk.params.entries[0].payload, undefined)
+assert(Buffer.isBuffer(decodedCurrentLocalSubChunk.params.entries[0].heightmap))
+assert.strictEqual(decodedCurrentLocalSubChunk.params.entries[0].heightmap.length, 256)
+
+const mixedLegacySubChunk = normalizeClientboundForLocalViaBedrock('subchunk', {
+  cache_enabled: false,
+  dimension: 0,
+  origin: { x: 10, y: 0, z: 0 },
+  entries: [{
+    dx: 0,
+    dy: 0,
+    dz: 0,
+    result: 'success',
+    payload: Buffer.from([8, 9, 10]),
+    heightmap_type: 'no_data',
+    heightmap: undefined,
+    render_heightmap_type: 'no_data',
+    render_heightmap: undefined,
+    blob_id: undefined
+  }, {
+    dx: 0,
+    dy: 1,
+    dz: 0,
+    result: 'success_all_air',
+    payload: undefined,
+    heightmap_type: 'no_data',
+    heightmap: undefined,
+    render_heightmap_type: 'no_data',
+    render_heightmap: undefined,
+    blob_id: undefined
+  }]
+}, { localBedrockVersion: '1.26.30' })
+const mixedLegacySubChunkBuffer = legacySubChunkSerializer.createPacketBuffer({
+  name: 'subchunk',
+  params: mixedLegacySubChunk
+})
+const decodedMixedLegacySubChunk = legacySubChunkDeserializer.parsePacketBuffer(mixedLegacySubChunkBuffer).data.params
+assert.deepStrictEqual(decodedMixedLegacySubChunk.entries[0].payload, Buffer.from([8, 9, 10]))
+assert.strictEqual(decodedMixedLegacySubChunk.entries[1].payload.length, 0)
+
+const cachedLegacySubChunk = normalizeClientboundForLocalViaBedrock('subchunk', {
+  cache_enabled: true,
+  dimension: 0,
+  origin: { x: 10, y: 0, z: 0 },
+  entries: [{
+    dx: 0,
+    dy: 6,
+    dz: 0,
+    result: 'success_all_air',
+    payload: undefined,
+    heightmap_type: 'no_data',
+    heightmap: undefined,
+    render_heightmap_type: 'no_data',
+    render_heightmap: undefined,
+    blob_id: undefined
+  }]
+}, { localBedrockVersion: '1.26.30' })
+assert.strictEqual(cachedLegacySubChunk.entries[0].payload, undefined)
+assert.strictEqual(cachedLegacySubChunk.entries[0].blob_id, 0n)
+const cachedLegacySubChunkBuffer = legacySubChunkSerializer.createPacketBuffer({
+  name: 'subchunk',
+  params: cachedLegacySubChunk
+})
+const decodedCachedLegacySubChunk = legacySubChunkDeserializer.parsePacketBuffer(cachedLegacySubChunkBuffer).data.params
+assert.strictEqual(decodedCachedLegacySubChunk.entries[0].result, 'success_all_air')
+assert.strictEqual(decodedCachedLegacySubChunk.entries[0].payload, undefined)
+assert(
+  decodedCachedLegacySubChunk.entries[0].blob_id === 0n ||
+  (decodedCachedLegacySubChunk.entries[0].blob_id?.[0] === 0 && decodedCachedLegacySubChunk.entries[0].blob_id?.[1] === 0)
+)
 
 const levelChunk = roundTrip('level_chunk', {
   x: 10,
@@ -218,6 +316,21 @@ assert.strictEqual(decodedLegacyLevelChunk.name, 'level_chunk')
 assert.strictEqual(decodedLegacyLevelChunk.params.sub_chunk_count, -2)
 assert.strictEqual(decodedLegacyLevelChunk.params.highest_subchunk_count, 24)
 assert.deepStrictEqual(decodedLegacyLevelChunk.params.payload, Buffer.from([1, 2, 3]))
+
+const currentLocalLevelChunk = normalizeClientboundForLocalViaBedrock('level_chunk', levelChunk, {
+  localBedrockVersion: '1.26.45'
+})
+const currentLocalLevelChunkSerializer = createSerializer('1.26.45')
+const currentLocalLevelChunkDeserializer = createDeserializer('1.26.45')
+const currentLocalLevelChunkBuffer = currentLocalLevelChunkSerializer.createPacketBuffer({
+  name: 'level_chunk',
+  params: currentLocalLevelChunk
+})
+const decodedCurrentLocalLevelChunk = currentLocalLevelChunkDeserializer.parsePacketBuffer(currentLocalLevelChunkBuffer).data
+assert.strictEqual(decodedCurrentLocalLevelChunk.name, 'level_chunk')
+assert.strictEqual(decodedCurrentLocalLevelChunk.params.sub_chunk_count, 0)
+assert.strictEqual(decodedCurrentLocalLevelChunk.params.highest_subchunk_count, 24)
+assert.deepStrictEqual(decodedCurrentLocalLevelChunk.params.payload, Buffer.from([1, 2, 3]))
 
 const dimensionData = roundTrip('dimension_data', {
   definitions: [{

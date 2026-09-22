@@ -112,7 +112,7 @@ function localViaBedrockUsesItemV4 (options = {}) {
     options.version ||
     process.env.NETHERNET_RELAY_LOCAL_BEDROCK_VERSION ||
     process.env.BEDROCK_RELAY_VERSION ||
-    '1.26.30'
+    '1.26.45'
   return protocolVersionAtLeast(version, '1.26.30')
 }
 
@@ -665,18 +665,72 @@ function summarizeClientboundInventoryForLog (name, params = {}) {
   return { name }
 }
 
+function normalizeSubchunkForLocalViaBedrock (params = {}, options = {}) {
+  const localVersion = options.localBedrockVersion || options.version || '1.26.45'
+  if (protocolVersionAtLeast(localVersion, '1.26.50') || !Array.isArray(params.entries)) return params
+
+  const cacheEnabled = Boolean(firstNonNull(params.cache_enabled, params.cacheEnabled, false))
+  const requiresPayloadForNonCachedEntries = !protocolVersionAtLeast(localVersion, '1.26.40')
+  const flattenHeightMap = value => Array.isArray(value) && value.every(Buffer.isBuffer)
+    ? Buffer.concat(value)
+    : value
+  const normalizeHeightMap = (type, value) => {
+    const flattened = flattenHeightMap(value)
+    if (type === 'has_data' && Buffer.isBuffer(flattened) && flattened.length === 256) {
+      return { type, value: flattened }
+    }
+    return {
+      type: type === 'has_data' ? 'no_data' : (type || 'no_data'),
+      value: undefined
+    }
+  }
+
+  return {
+    ...params,
+    cache_enabled: cacheEnabled,
+    entries: params.entries.map(entry => {
+      const result = entry?.result
+      const heightMap = normalizeHeightMap(entry?.heightmap_type, entry?.heightmap)
+      const renderHeightMap = normalizeHeightMap(entry?.render_heightmap_type, entry?.render_heightmap)
+      let payload = entry?.payload
+
+      // Bedrock 1.26.40 made the subchunk payload optional. Older local
+      // schemas still require an empty byte array for non-cached all-air data.
+      if (requiresPayloadForNonCachedEntries) {
+        if (cacheEnabled && result === 'success_all_air') {
+          payload = undefined
+        } else if (!Buffer.isBuffer(payload)) {
+          payload = Buffer.alloc(0)
+        }
+      }
+
+      return {
+        ...entry,
+        payload,
+        heightmap_type: heightMap.type,
+        heightmap: heightMap.value,
+        render_heightmap_type: renderHeightMap.type,
+        render_heightmap: renderHeightMap.value,
+        blob_id: requiresPayloadForNonCachedEntries && cacheEnabled
+          ? firstNonNull(entry?.blob_id, entry?.blobId, 0n)
+          : firstNonNull(entry?.blob_id, entry?.blobId)
+      }
+    })
+  }
+}
+
 function normalizeClientboundForLocalViaBedrock (name, params = {}, options = {}) {
   let out = normalizeClientboundEntityNoiseForLocalViaBedrock(name, params)
   out = normalizeClientboundEntityItemFieldsForLocalViaBedrock(name, out, options)
 
   if (name === 'level_chunk') {
-    const localVersion = options.localBedrockVersion || options.version || '1.26.30'
+    const localVersion = options.localBedrockVersion || options.version || '1.26.45'
     const highestSubchunkCount = firstNonNull(out.highest_subchunk_count, out.highestSubchunkCount)
     const numericHighestSubchunkCount = Number(highestSubchunkCount)
 
     // Bedrock 1.26.40 replaced the negative request-subchunks marker with an
-    // optional highest_subchunk_count. ViaBedrock still consumes the 1.26.30
-    // form, so preserve the request instead of presenting an empty full chunk.
+    // optional highest_subchunk_count. Older ViaBedrock targets consume the
+    // 1.26.30 form, so preserve the request instead of presenting an empty chunk.
     if (!protocolVersionAtLeast(localVersion, '1.26.40') &&
       highestSubchunkCount != null &&
       Number.isFinite(numericHighestSubchunkCount)) {
@@ -745,17 +799,7 @@ function normalizeClientboundForLocalViaBedrock (name, params = {}, options = {}
   }
 
   if (name === 'subchunk' && Array.isArray(out.entries)) {
-    const flattenHeightMap = value => Array.isArray(value) && value.every(Buffer.isBuffer)
-      ? Buffer.concat(value)
-      : value
-    return {
-      ...out,
-      entries: out.entries.map(entry => ({
-        ...entry,
-        heightmap: flattenHeightMap(entry?.heightmap),
-        render_heightmap: flattenHeightMap(entry?.render_heightmap)
-      }))
-    }
+    return normalizeSubchunkForLocalViaBedrock(out, options)
   }
 
   if (name === 'command_output') {
@@ -1073,7 +1117,7 @@ function downstreamBedrockVersionForMode (config = {}, mode) {
   if (isNativeBedrockRecorderMode(mode)) {
     return relayConfig.upstreamVersion || config.version || currentRealmBedrockVersion()
   }
-  return relayConfig.version || config.version || '1.26.30'
+  return relayConfig.version || config.version || '1.26.45'
 }
 
 function emptyCreativeContentForLocalViaBedrock () {
@@ -6258,7 +6302,7 @@ class NetherNetRealmRelay extends Relay {
       }
     )
     this.debugBridgeRelay = process.env.DEBUG_NETHERNET_RELAY === 'true'
-    this.downstreamBedrockVersion = options.version || options.bridgeConfig?.bedrockRelay?.version || '1.26.30'
+    this.downstreamBedrockVersion = options.version || options.bridgeConfig?.bedrockRelay?.version || '1.26.45'
     this.realmInfoPrefetchPromise = null
     this.prefetchedRealmInfo = null
     this.lastRealmInfoPrefetchFailureAt = 0
@@ -6408,7 +6452,7 @@ class NetherNetRealmRelay extends Relay {
       ds.disconnect(message)
       return
     }
-    const downstreamBedrockVersion = this.downstreamBedrockVersion || this.bridgeConfig?.bedrockRelay?.version || '1.26.30'
+    const downstreamBedrockVersion = this.downstreamBedrockVersion || this.bridgeConfig?.bedrockRelay?.version || '1.26.45'
     const upstreamBedrockVersion = this.bridgeConfig?.bedrockRelay?.upstreamVersion || this.bridgeConfig?.version
     this.runtimeStatus?.event?.('bedrock_relay_endpoint_ready', {
       state: 'connecting_to_realm',
@@ -6636,6 +6680,7 @@ module.exports = {
   emptyItemForLocalViaBedrock,
   emptyItemV4ForLocalViaBedrock,
   normalizeClientboundForLocalViaBedrock,
+  normalizeSubchunkForLocalViaBedrock,
   normalizeCommandOutputForLocalViaBedrock,
   normalizeItemForLocalViaBedrock,
   normalizeItemArrayForLocalViaBedrock,

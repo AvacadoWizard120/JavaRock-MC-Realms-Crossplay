@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.95 - 2026-09-22
+
+- Added Java 26.3 support through ViaProxy 3.4.13 and its Bedrock 1.26.45 connection layer.
+- Fixed the terrain regression from 0.3.94. Realm subchunks were arriving, but JavaRock was dropping them while converting the newer heightmap and payload layout.
+- Support uploads are encrypted before leaving the computer. The readable ZIP stays local and the inbox receives an encrypted copy.
+- Official release files are signed. Remote support sharing is disabled when packaged files have been changed or the signature is missing.
+- Packet census reports now include subchunk payload and heightmap sizes for terrain troubleshooting.
+- Replaced outdated transitive `cmake-js`, `tar`, and `uuid` installs; a clean production install now passes `npm audit` with no known vulnerabilities.
+
 ## 0.3.94 - 2026-09-22
 
 - Restored terrain loading on Bedrock 1.26.50 Realms. JavaRock now converts the new partial-chunk marker into the form used by the local ViaBedrock build, so subchunks are requested instead of treating the world as empty.

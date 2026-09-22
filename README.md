@@ -20,7 +20,9 @@ The JavaRock window uses Windows' built-in desktop controls. It does not need Py
 
 JavaRock checks for new releases after the window opens and always asks before installing one. You can also use **Help > Check for updates**.
 
-When a test fails, click **Support ZIP**. JavaRock collects the launcher and bridge logs, the active packet census run, and up to three completed runs without adding Microsoft sign-in caches, `.env` files, raw packet journals, or the binary packet ledger. Testers can enter the project support-inbox access code under **Diagnostics > Support upload settings**. The URL is already filled in, the code is protected for the current Windows user, and every send keeps a local copy under `.runtime/support-bundles/`.
+When a test fails, click **Support ZIP**. JavaRock collects the launcher and bridge logs, the active packet census run, and up to three completed runs without adding Microsoft sign-in caches, `.env` files, raw packet journals, or the binary packet ledger. Testers can enter the project support-inbox access code under **Diagnostics > Support upload settings**. The URL is already filled in, the code is protected for the current Windows user, and every send keeps a local ZIP under `.runtime/support-bundles/`.
+
+Before sharing, JavaRock verifies the signed release files and refuses to upload from a changed or unsigned installation. The ZIP is encrypted with AES-256-GCM, and its one-time key is encrypted with the project support public key. The inbox never receives the readable ZIP or a decryption key.
 
 ## Current Support
 

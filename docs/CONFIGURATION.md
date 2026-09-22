@@ -30,7 +30,9 @@ Realm names are matched exactly first. A partial name is accepted only when it i
 
 The project support-inbox URL is included in the launcher, but uploads require an access code from the project maintainer. Open **Diagnostics > Support upload settings**, enter the code, and save it once. Windows encrypts the saved code for the current user.
 
-Support ZIPs remain under `.runtime/support-bundles/` after sending. The private inbox deletes uploaded bundles after 30 days.
+Support ZIPs remain under `.runtime/support-bundles/` after sending. Only an encrypted `.jrsupport` copy is uploaded. The decryption key is not included in JavaRock, the public repository, or the inbox. The private inbox deletes uploaded bundles after 30 days.
+
+Remote sharing is available only from an official package with a valid signed release manifest. If a protected JavaRock file was changed or deleted, JavaRock creates the local ZIP but disables its upload.
 
 ## Optional `.env`
 

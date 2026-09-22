@@ -296,7 +296,8 @@ function Read-ReleaseManifest {
         throw 'The downloaded release has no JavaRock release manifest.'
     }
     $manifest = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ([int](Get-PropertyValue $manifest 'format' 0) -ne 1 -or [string](Get-PropertyValue $manifest 'product' '') -ne 'JavaRock') {
+    $manifestFormat = [int](Get-PropertyValue $manifest 'format' 0)
+    if ($manifestFormat -notin @(1, 2) -or [string](Get-PropertyValue $manifest 'product' '') -ne 'JavaRock') {
         throw 'The downloaded release manifest is not recognized.'
     }
     $files = @()
@@ -313,6 +314,7 @@ function Read-ReleaseManifest {
         throw 'The release manifest does not include itself.'
     }
     return [pscustomobject]@{
+        Format = $manifestFormat
         Version = [string](Get-PropertyValue $manifest 'version' '')
         Files = @($files)
     }
@@ -372,6 +374,17 @@ function Install-Release {
         $newPackage = Get-Content -LiteralPath (Join-Path $stage 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([string]$newPackage.name -ne 'javarock-mc-realms-crossplay' -or [string]$newPackage.version -ne $ReleaseInfo.LatestVersion) {
             throw 'The downloaded package identity does not match the requested JavaRock release.'
+        }
+        if ($newManifest.Format -ge 2) {
+            $currentIntegrityVerifier = Join-Path $ProjectRoot 'scripts\verify-release-integrity.cjs'
+            $stagedIntegrityVerifier = Join-Path $stage 'scripts\verify-release-integrity.cjs'
+            $integrityVerifier = if (Test-Path -LiteralPath $currentIntegrityVerifier -PathType Leaf) { $currentIntegrityVerifier } else { $stagedIntegrityVerifier }
+            if (-not (Test-Path -LiteralPath $integrityVerifier -PathType Leaf)) {
+                throw 'The downloaded release has no JavaRock integrity verifier.'
+            }
+            Write-Host '[JavaRock] Verifying signed release files...'
+            & node.exe $integrityVerifier --root $stage
+            if ($LASTEXITCODE -ne 0) { throw 'The downloaded JavaRock release failed its signed integrity check.' }
         }
 
         $oldManifest = Read-ReleaseManifest -Root $ProjectRoot -Optional

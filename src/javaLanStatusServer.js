@@ -5,12 +5,13 @@ const net = require('net')
 
 const LAN_MULTICAST_HOST = '224.0.2.60'
 const LAN_MULTICAST_PORT = 4445
+const JAVA_26_3 = { name: '26.3', protocol: 777 }
 
 function getDefaultJavaVersion () {
   try {
     const versions = require('minecraft-data/minecraft-data/data/pc/common/protocolVersions.json')
     const latestRelease = versions.find(version => version.releaseType === 'release')
-    if (latestRelease) {
+    if (latestRelease && latestRelease.version >= JAVA_26_3.protocol) {
       return {
         name: latestRelease.minecraftVersion,
         protocol: latestRelease.version
@@ -20,7 +21,7 @@ function getDefaultJavaVersion () {
     // Fall back below when minecraft-data is unavailable or changes layout.
   }
 
-  return { name: '26.1.2', protocol: 775 }
+  return JAVA_26_3
 }
 
 function readVarInt (buffer, offset = 0) {

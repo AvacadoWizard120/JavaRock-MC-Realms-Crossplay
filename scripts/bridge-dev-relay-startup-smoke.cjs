@@ -55,7 +55,7 @@ Module._load = function patchedSmokeLoad (request, parent, isMain) {
           host: '127.0.0.1',
           viaProxyHost: '127.0.0.1',
           port: 19133,
-          version: '1.26.30'
+          version: '1.26.45'
         }
       }
     }
@@ -71,7 +71,7 @@ Module._load = function patchedSmokeLoad (request, parent, isMain) {
           command: {
             bindAddress: '0.0.0.0:25565',
             targetAddress: '127.0.0.1:19133',
-            targetVersion: 'Bedrock 1.26.30'
+            targetVersion: 'Bedrock 1.26.45'
           }
         }
       }
@@ -95,8 +95,8 @@ async function main () {
       compatMode: 'viaproxy'
     },
     bedrockRelay: {
-      version: '1.26.30',
-      viaProxyTargetVersion: 'Bedrock 1.26.30'
+      version: '1.26.45',
+      viaProxyTargetVersion: 'Bedrock 1.26.45'
     }
   }))
 

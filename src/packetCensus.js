@@ -230,6 +230,14 @@ function normalizeValueForSummary (value) {
   return value
 }
 
+function bufferLikeByteLength (value) {
+  if (Buffer.isBuffer(value)) return value.length
+  if (Array.isArray(value) && value.every(Buffer.isBuffer)) {
+    return value.reduce((total, part) => total + part.length, 0)
+  }
+  return undefined
+}
+
 function compactKeys (value, limit = 16) {
   return value && typeof value === 'object' ? Object.keys(value).slice(0, limit) : []
 }
@@ -578,7 +586,14 @@ function summarizePacketForCensus (name, params = {}) {
       dy: entry?.dy ?? entry?.y,
       dz: entry?.dz ?? entry?.z,
       result: entry?.result,
-      payloadBytes: Buffer.isBuffer(entry?.payload) ? entry.payload.length : undefined,
+      payloadPresent: entry?.payload != null,
+      payloadBytes: bufferLikeByteLength(entry?.payload),
+      heightmap_type: entry?.heightmap_type ?? entry?.heightmapType,
+      heightmapPresent: entry?.heightmap != null,
+      heightmapBytes: bufferLikeByteLength(entry?.heightmap),
+      render_heightmap_type: entry?.render_heightmap_type ?? entry?.renderHeightmapType,
+      renderHeightmapPresent: entry?.render_heightmap != null,
+      renderHeightmapBytes: bufferLikeByteLength(entry?.render_heightmap),
       blob_id: entry?.blob_id ?? entry?.blobId
     }))
     return out

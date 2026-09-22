@@ -54,7 +54,7 @@ Useful flags:
   --java-facade-mode <m>  bridge:dev facade mode: status or via-bedrock-relay.
   --java-compat-mode <m>  Java client compatibility mode: direct or viaproxy.
   --bedrock-relay-port <n> Local Bedrock UDP relay port for via-bedrock-relay. Default: 19133.
-  --viaproxy-bedrock-target-version <v> ViaProxy Bedrock target label. Default: Bedrock 1.26.30.
+  --viaproxy-bedrock-target-version <v> ViaProxy Bedrock target label. Default: Bedrock 1.26.45.
   --viaproxy-jar <path>   ViaProxy jar for Java compatibility mode.
 
 First login uses Microsoft device-code auth. Tokens are cached in .auth/.

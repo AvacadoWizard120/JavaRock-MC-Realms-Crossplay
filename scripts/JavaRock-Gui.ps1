@@ -689,7 +689,7 @@ $targetLabel.AutoSize = $true
 $launchGroup.Controls.Add($targetLabel)
 
 $targetVersion = New-Object System.Windows.Forms.TextBox
-$targetVersion.Text = 'Bedrock 1.26.30'
+$targetVersion.Text = 'Bedrock 1.26.45'
 $targetVersion.Location = New-Object Drawing.Point(215, 102)
 $targetVersion.Size = New-Object Drawing.Size(155, 25)
 $launchGroup.Controls.Add($targetVersion)
@@ -1114,7 +1114,7 @@ function Start-BridgeOrRecorder {
         $arguments += @('-BedrockVersion', $upstreamVersion.Text.Trim(), '-StatusFile', $StatusFile)
     } else {
         $arguments += @(
-            '-ViaProxyBedrockTargetVersion', $(if ($targetVersion.Text.Trim()) { $targetVersion.Text.Trim() } else { 'Bedrock 1.26.30' }),
+            '-ViaProxyBedrockTargetVersion', $(if ($targetVersion.Text.Trim()) { $targetVersion.Text.Trim() } else { 'Bedrock 1.26.45' }),
             '-UpstreamBedrockVersion', $upstreamVersion.Text.Trim()
         )
     }
@@ -1567,7 +1567,7 @@ function Complete-SupportBundle {
     if ($success) {
         Add-Log 'support' "$message $bundlePath"
         $detail = if ($uploaded) {
-            "The support ZIP was created and sent to the configured destination.`r`n`r`nA local copy is at:`r`n$bundlePath"
+            "The support ZIP was created. An encrypted copy was sent to the configured destination.`r`n`r`nThe local ZIP is at:`r`n$bundlePath"
         } elseif ($uploadFailed) {
             "The support ZIP was created, but it could not be sent after three attempts.`r`n`r`n$uploadMessage`r`n`r`nThe ZIP is still available at:`r`n$bundlePath"
         } else {

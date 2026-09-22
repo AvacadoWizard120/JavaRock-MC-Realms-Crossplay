@@ -25,19 +25,19 @@ function main () {
       ...config.javaLan,
       host: '127.0.0.1',
       port: 19133,
-      playVersion: 'Bedrock 1.26.30'
+      playVersion: 'Bedrock 1.26.45'
     }
   }
   assert.strictEqual(backendConfig.javaLan.host, '127.0.0.1')
   assert.strictEqual(backendConfig.javaLan.port, 19133)
 
   const command = buildViaProxyCommand(config, backendConfig, config.javaLan.viaProxyJar, {
-    targetVersion: 'Bedrock 1.26.30'
+    targetVersion: 'Bedrock 1.26.45'
   })
   assert.strictEqual(command.executable, 'java')
   assert.strictEqual(command.bindAddress, '0.0.0.0:25565')
   assert.strictEqual(command.targetAddress, '127.0.0.1:19133')
-  assert.strictEqual(command.targetVersion, 'Bedrock 1.26.30')
+  assert.strictEqual(command.targetVersion, 'Bedrock 1.26.45')
   assert(command.args.includes('cli'))
   assert(command.args.includes('--bind-address'))
   assert(command.args.includes('--target-address'))
