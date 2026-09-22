@@ -32,6 +32,7 @@ try {
     'scripts/Start-JavaRock.ps1',
     'scripts/JavaRock-Gui.ps1',
     'scripts/New-JavaRockSupportBundle.ps1',
+    'scripts/redact-support-file.cjs',
     'scripts/Update-JavaRock.ps1',
     'scripts/javarock-update-http.cjs',
     'javarock-release-manifest.json',

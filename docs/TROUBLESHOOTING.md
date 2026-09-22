@@ -30,7 +30,7 @@ JavaRock stops a Realm endpoint lookup after 45 seconds. A timeout or repeated `
 
 ## Joining World, Empty Terrain, or Desync
 
-These can be protocol translation bugs. Reproduce the problem once, then click **Support ZIP** in the launcher. The ZIP includes the active logs, the SQLite packet ledger files, and the three most recent census runs. Microsoft sign-in caches, `.env` files, launcher preferences, and raw packet journals are left out.
+These can be protocol translation bugs. Reproduce the problem once, then click **Support ZIP** in the launcher. The ZIP includes the active logs, the current packet census run, and up to three completed census runs. Microsoft sign-in caches, `.env` files, launcher preferences, raw packet journals, and the binary packet ledger are left out.
 
 Use **Diagnostics > Set upload destination** to enter a private HTTPS endpoint that accepts `PUT` uploads, or choose a shared/synced folder path. JavaRock keeps a local copy under `.runtime/support-bundles/` even when it sends the ZIP successfully. Packet census data can still describe player and world activity, so only send it somewhere you trust.
 

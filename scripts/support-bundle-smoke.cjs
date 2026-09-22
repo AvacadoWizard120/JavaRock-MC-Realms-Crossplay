@@ -22,19 +22,26 @@ function write (file, value) {
 
 try {
   write(path.join(fixture, 'package.json'), '{"version":"9.9.9"}\n')
-  write(path.join(runtime, 'bridge-windows-gui-bridge.out.log'), 'profilesFolder: C:\\Users\\Private Person\\JavaRock\n"username":"PrivateName"\n')
-  write(path.join(runtime, 'bridge-status.json'), '{"state":"joining"}\n')
+  write(path.join(runtime, 'bridge-windows-gui-bridge.out.log'), 'profilesFolder: C:\\Users\\Private Person\\JavaRock\n"username":"PrivateName"\nRefreshing Realm list for PrivateName...\nSelected Realm: PrivateRealm (12345)\n')
+  write(path.join(runtime, 'bridge-status.json'), JSON.stringify({
+    state: 'joining',
+    realm: { id: '12345', name: 'PrivateRealm', owner: 'PrivateOwner' },
+    profile: { name: 'PrivateName', uuid: 'private-uuid', xuid: 'private-xuid' },
+    lastEvent: { name: 'resource_packs_info', id: 6 }
+  }))
   write(path.join(runtime, 'bridge-windows-gui-preferences.json'), '{"supportUploadDestination":"secret"}\n')
   write(path.join(fixture, '.env'), 'SECRET=do-not-ship\n')
   write(path.join(fixture, '.auth-profiles', 'account', 'token-cache.json'), 'do-not-ship\n')
   write(path.join(census, 'packet-ledger.sqlite'), 'sqlite-main')
   write(path.join(census, 'packet-ledger.sqlite-wal'), 'sqlite-wal')
   write(path.join(census, 'packet-ledger.sqlite-shm'), 'sqlite-shm')
-  write(path.join(census, 'latest-run.json'), '{"run_id":"run-1"}\n')
+  write(path.join(census, 'latest-run.json'), '{"run_id":"run-2"}\n')
   write(path.join(census, 'census.json'), '{"ok":true}\n')
   write(path.join(census, 'run-summary-run-1.json'), '{"run_id":"run-1"}\n')
   write(path.join(census, 'events-run-1.jsonl'), '{"username":"PrivateName"}\n')
   write(path.join(census, 'inventory-trace-run-1.jsonl'), '{"event":"slot"}\n')
+  write(path.join(census, 'events-run-2.jsonl'), '{"profile":{"name":"PrivateName"},"packet":{"name":"resource_packs_info","id":6}}\n')
+  write(path.join(census, 'inventory-trace-run-2.jsonl'), '{"realm":{"name":"PrivateRealm","id":"12345"}}\n')
   write(path.join(census, 'raw-packets-run-1.jsonl'), 'do-not-ship\n')
 
   const run = spawnSync('powershell.exe', [
@@ -85,12 +92,11 @@ try {
   const expected = [
     'manifest.json',
     'system-info.json',
-    'packet-census/packet-ledger.sqlite',
-    'packet-census/packet-ledger.sqlite-wal',
-    'packet-census/packet-ledger.sqlite-shm',
     'packet-census/run-summary-run-1.json',
     'packet-census/events-run-1.jsonl',
     'packet-census/inventory-trace-run-1.jsonl',
+    'packet-census/events-run-2.jsonl',
+    'packet-census/inventory-trace-run-2.jsonl',
     'runtime/.runtime/bridge-windows-gui-bridge.out.log',
     'runtime/.runtime/bridge-status.json'
   ]
@@ -99,6 +105,7 @@ try {
   }
 
   assert(!fs.existsSync(path.join(extracted, 'packet-census', 'raw-packets-run-1.jsonl')))
+  assert(!fs.existsSync(path.join(extracted, 'packet-census', 'packet-ledger.sqlite')))
   assert(!fs.existsSync(path.join(extracted, '.env')))
   assert(!fs.existsSync(path.join(extracted, '.auth-profiles')))
   assert(!fs.existsSync(path.join(extracted, 'runtime', '.runtime', 'bridge-windows-gui-preferences.json')))
@@ -106,7 +113,26 @@ try {
   const redactedLog = fs.readFileSync(path.join(extracted, 'runtime', '.runtime', 'bridge-windows-gui-bridge.out.log'), 'utf8')
   assert(!redactedLog.includes('Private Person'))
   assert(!redactedLog.includes('PrivateName'))
+  assert(!redactedLog.includes('PrivateRealm'))
   assert(redactedLog.includes('[redacted]'))
+
+  const redactedStatus = JSON.parse(fs.readFileSync(path.join(extracted, 'runtime', '.runtime', 'bridge-status.json'), 'utf8'))
+  assert.strictEqual(redactedStatus.realm.id, '[redacted]')
+  assert.strictEqual(redactedStatus.realm.name, '[redacted]')
+  assert.strictEqual(redactedStatus.realm.owner, '[redacted]')
+  assert.strictEqual(redactedStatus.profile.name, '[redacted]')
+  assert.strictEqual(redactedStatus.profile.uuid, '[redacted]')
+  assert.strictEqual(redactedStatus.profile.xuid, '[redacted]')
+  assert.strictEqual(redactedStatus.lastEvent.name, 'resource_packs_info')
+  assert.strictEqual(redactedStatus.lastEvent.id, 6)
+
+  const activeEvents = fs.readFileSync(path.join(extracted, 'packet-census', 'events-run-2.jsonl'), 'utf8')
+  assert(!activeEvents.includes('PrivateName'))
+  assert(activeEvents.includes('resource_packs_info'))
+
+  const systemInfo = JSON.parse(fs.readFileSync(path.join(extracted, 'system-info.json'), 'utf8'))
+  const localJava = spawnSync('java.exe', ['-version'], { encoding: 'utf8', windowsHide: true })
+  if (localJava.status === 0) assert(!String(systemInfo.java).startsWith('unavailable:'), 'java -version stderr should still be captured')
 
   console.log('JavaRock support bundle smoke check passed.')
 } finally {

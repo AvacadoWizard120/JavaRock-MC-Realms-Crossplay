@@ -8,6 +8,7 @@ param(
     [string]$ResultFile = '',
     [ValidateRange(1, 10)][int]$RecentRuns = 3,
     [switch]$NoUpload,
+    [switch]$IncludePacketLedger,
     [switch]$IncludeRawPackets
 )
 
@@ -40,11 +41,16 @@ function Write-Result {
 function Get-CommandOutput {
     param([string]$Command, [string[]]$Arguments)
 
+    $previousErrorAction = $ErrorActionPreference
     try {
-        $output = & $Command @Arguments 2>&1
-        return (@($output) -join "`n").Trim()
+        $resolved = Get-Command $Command -ErrorAction Stop
+        $ErrorActionPreference = 'Continue'
+        $output = & $resolved.Source @Arguments 2>&1
+        return (@($output | ForEach-Object { $_.ToString() }) -join "`n").Trim()
     } catch {
         return "unavailable: $($_.Exception.Message)"
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
     }
 }
 
@@ -64,19 +70,6 @@ function Get-Sha256 {
     }
 }
 
-function Protect-SupportText {
-    param([string]$Text)
-
-    if ($null -eq $Text) { return '' }
-    $redacted = [regex]::Replace($Text, '(?i)[A-Z]:\\Users\\[^\\\r\n"'']+', '[user-home]')
-    $redacted = [regex]::Replace($redacted, '(?im)("?(?:username|owner|realmName|realmId|profilesFolder)"?\s*[:=]\s*)"?[^,"\r\n}]+"?', '$1"[redacted]"')
-    $redacted = [regex]::Replace($redacted, '(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+', '$1[redacted]')
-    $redacted = [regex]::Replace($redacted, '(?i)("?(?:access_token|refresh_token|accessToken|refreshToken|multiplayerToken)"?\s*[:=]\s*)"?[^,"\r\n}]+"?', '$1"[redacted]"')
-    $redacted = [regex]::Replace($redacted, '(?i)XBL3\.0\s+x=[^;\s]+;[^\s"'']+', 'XBL3.0 [redacted]')
-    $redacted = [regex]::Replace($redacted, '(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]{10,})?', '[redacted-jwt]')
-    return $redacted
-}
-
 function Copy-ReadableFile {
     param(
         [Parameter(Mandatory = $true)][string]$Source,
@@ -87,14 +80,12 @@ function Copy-ReadableFile {
     if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { return $false }
     [IO.Directory]::CreateDirectory((Split-Path -Parent $Destination)) | Out-Null
     if ($RedactText) {
-        $stream = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
-        try {
-            $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
-            try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
-        } finally {
-            $stream.Dispose()
+        $redactor = Join-Path $PSScriptRoot 'redact-support-file.cjs'
+        if (-not (Test-Path -LiteralPath $redactor -PathType Leaf)) {
+            throw "Support redactor is missing: $redactor"
         }
-        [IO.File]::WriteAllText($Destination, (Protect-SupportText $text), [Text.UTF8Encoding]::new($false))
+        & node.exe $redactor $Source $Destination
+        if ($LASTEXITCODE -ne 0) { throw "Support redactor failed for $Source" }
         return $true
     }
 
@@ -117,7 +108,8 @@ function Add-SupportFile {
 
     $destination = Join-Path $script:StageDirectory $RelativePath
     if (Copy-ReadableFile -Source $Source -Destination $destination -RedactText:$RedactText) {
-        $script:IncludedFiles.Add(($RelativePath -replace '\\', '/'))
+        $normalized = $RelativePath -replace '\\', '/'
+        if (-not $script:IncludedFiles.Contains($normalized)) { $script:IncludedFiles.Add($normalized) }
     }
 }
 
@@ -156,11 +148,28 @@ try {
     $packetDirectory = Join-Path $ProjectRoot 'packet-census'
     if (Test-Path -LiteralPath $packetDirectory -PathType Container) {
         Write-Host '[JavaRock] Collecting the packet ledger and recent packet census runs...'
-        foreach ($name in @('packet-ledger.sqlite', 'packet-ledger.sqlite-wal', 'packet-ledger.sqlite-shm')) {
-            Add-SupportFile -Source (Join-Path $packetDirectory $name) -RelativePath (Join-Path 'packet-census' $name)
+        if ($IncludePacketLedger) {
+            Write-Warning '[JavaRock] The optional SQLite packet ledger is binary and cannot be fully redacted.'
+            foreach ($name in @('packet-ledger.sqlite', 'packet-ledger.sqlite-wal', 'packet-ledger.sqlite-shm')) {
+                Add-SupportFile -Source (Join-Path $packetDirectory $name) -RelativePath (Join-Path 'packet-census' $name)
+            }
         }
         foreach ($name in @('census.json', 'latest-run.json')) {
             Add-SupportFile -Source (Join-Path $packetDirectory $name) -RelativePath (Join-Path 'packet-census' $name) -RedactText
+        }
+
+        $activeRunId = ''
+        try {
+            $latestRun = Get-Content -LiteralPath (Join-Path $packetDirectory 'latest-run.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            $activeRunId = [string]$latestRun.run_id
+        } catch {}
+        if ($activeRunId -match '^[A-Za-z0-9_-]+$') {
+            foreach ($name in @("run-summary-$activeRunId.json", "events-$activeRunId.jsonl", "inventory-trace-$activeRunId.jsonl")) {
+                Add-SupportFile -Source (Join-Path $packetDirectory $name) -RelativePath (Join-Path 'packet-census' $name) -RedactText
+            }
+            if ($IncludeRawPackets) {
+                Add-SupportFile -Source (Join-Path $packetDirectory "raw-packets-$activeRunId.jsonl") -RelativePath (Join-Path 'packet-census' "raw-packets-$activeRunId.jsonl")
+            }
         }
 
         $summaries = @(Get-ChildItem -LiteralPath $packetDirectory -Filter 'run-summary-*.json' -File -ErrorAction SilentlyContinue |
@@ -208,7 +217,7 @@ try {
         product = 'JavaRock support bundle'
         version = $version
         created_at = [DateTime]::UtcNow.ToString('o')
-        privacy = 'Microsoft authentication caches, .env files, and raw packet journals are excluded by default.'
+        privacy = 'Microsoft authentication caches, .env files, raw packet journals, and the binary packet ledger are excluded by default.'
         files = $manifestEntries
     }
     [IO.File]::WriteAllText((Join-Path $script:StageDirectory 'manifest.json'), (($manifest | ConvertTo-Json -Depth 6) + "`r`n"), [Text.UTF8Encoding]::new($false))
