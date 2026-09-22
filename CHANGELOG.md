@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.94 - 2026-09-22
+
+- Restored terrain loading on Bedrock 1.26.50 Realms. JavaRock now converts the new partial-chunk marker into the form used by the local ViaBedrock build, so subchunks are requested instead of treating the world as empty.
+- Spawn-floor preloading now recognizes both the old and new partial-chunk formats.
+- Added a red/green launcher light that says when the Java or Bedrock client can connect.
+- Dark mode now uses dark menu highlights and reapplies the Windows dark theme to log and text-field scrollbars after the window opens.
+- Support ZIP packet summaries now include the partial-chunk limit, cache state, and blob count.
+
 ## 0.3.93 - 2026-09-22
 
 - Fixed the connection reset just after Realm spawn when terrain preloading had not received a chunk origin yet.

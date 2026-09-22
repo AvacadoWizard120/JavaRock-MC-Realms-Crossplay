@@ -36,9 +36,43 @@ Add-Type -AssemblyName System.Security
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 if (-not ('JavaRockNativeWindow' -as [type])) {
-    Add-Type -TypeDefinition @'
+    Add-Type -ReferencedAssemblies @('System.Windows.Forms.dll', 'System.Drawing.dll') -TypeDefinition @'
 using System;
+using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+public sealed class JavaRockDarkColorTable : ProfessionalColorTable {
+    private static Color C(int red, int green, int blue) { return Color.FromArgb(red, green, blue); }
+
+    public override Color ToolStripDropDownBackground { get { return C(41, 44, 49); } }
+    public override Color ToolStripGradientBegin { get { return C(41, 44, 49); } }
+    public override Color ToolStripGradientMiddle { get { return C(41, 44, 49); } }
+    public override Color ToolStripGradientEnd { get { return C(41, 44, 49); } }
+    public override Color ToolStripBorder { get { return C(76, 82, 91); } }
+    public override Color MenuBorder { get { return C(76, 82, 91); } }
+    public override Color MenuItemBorder { get { return C(91, 111, 132); } }
+    public override Color MenuItemSelected { get { return C(58, 83, 111); } }
+    public override Color MenuItemSelectedGradientBegin { get { return C(58, 83, 111); } }
+    public override Color MenuItemSelectedGradientEnd { get { return C(58, 83, 111); } }
+    public override Color MenuItemPressedGradientBegin { get { return C(47, 66, 85); } }
+    public override Color MenuItemPressedGradientMiddle { get { return C(47, 66, 85); } }
+    public override Color MenuItemPressedGradientEnd { get { return C(47, 66, 85); } }
+    public override Color ImageMarginGradientBegin { get { return C(36, 39, 44); } }
+    public override Color ImageMarginGradientMiddle { get { return C(36, 39, 44); } }
+    public override Color ImageMarginGradientEnd { get { return C(36, 39, 44); } }
+    public override Color SeparatorDark { get { return C(65, 70, 78); } }
+    public override Color SeparatorLight { get { return C(65, 70, 78); } }
+    public override Color CheckBackground { get { return C(58, 83, 111); } }
+    public override Color CheckSelectedBackground { get { return C(68, 94, 123); } }
+    public override Color CheckPressedBackground { get { return C(47, 66, 85); } }
+}
+
+public sealed class JavaRockDarkToolStripRenderer : ToolStripProfessionalRenderer {
+    public JavaRockDarkToolStripRenderer() : base(new JavaRockDarkColorTable()) {
+        RoundedEdges = false;
+    }
+}
 
 public static class JavaRockNativeWindow {
     [DllImport("user32.dll")]
@@ -56,11 +90,43 @@ public static class JavaRockNativeWindow {
     [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
     public static extern int SetWindowTheme(IntPtr window, string subAppName, string subIdList);
 
+    [DllImport("uxtheme.dll", EntryPoint = "#133")]
+    private static extern bool AllowDarkModeForWindow(IntPtr window, bool allow);
+
+    [DllImport("uxtheme.dll", EntryPoint = "#135")]
+    private static extern int SetPreferredAppMode(int preferredAppMode);
+
+    [DllImport("uxtheme.dll", EntryPoint = "#136")]
+    private static extern void FlushMenuThemes();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool RedrawWindow(IntPtr window, IntPtr updateRect, IntPtr updateRegion, uint flags);
+
     public static void SetImmersiveDarkMode(IntPtr window, bool enabled) {
         int value = enabled ? 1 : 0;
         if (DwmSetWindowAttribute(window, 20, ref value, sizeof(int)) != 0) {
             DwmSetWindowAttribute(window, 19, ref value, sizeof(int));
         }
+    }
+
+    public static void SetAppDarkMode(bool enabled) {
+        try { SetPreferredAppMode(enabled ? 1 : 3); } catch { }
+        try { FlushMenuThemes(); } catch { }
+    }
+
+    public static void ApplyControlTheme(IntPtr window, bool enabled, string darkTheme) {
+        if (window == IntPtr.Zero) return;
+        try { AllowDarkModeForWindow(window, enabled); } catch { }
+        try { SetWindowTheme(window, enabled ? darkTheme : null, null); } catch { }
+        SetWindowPos(window, IntPtr.Zero, 0, 0, 0, 0, 0x0037);
+        RedrawWindow(window, IntPtr.Zero, IntPtr.Zero, 0x0585);
+    }
+
+    public static ToolStripRenderer CreateMenuRenderer(bool enabled) {
+        return enabled ? (ToolStripRenderer)new JavaRockDarkToolStripRenderer() : new ToolStripSystemRenderer();
     }
 }
 '@
@@ -665,24 +731,56 @@ $supportButton.Location = New-Object Drawing.Point(264, 145)
 $supportButton.Size = New-Object Drawing.Size(110, 32)
 $launchGroup.Controls.Add($supportButton)
 
-$joinCaption = New-Object System.Windows.Forms.Label
-$joinCaption.Text = 'Join'
-$joinCaption.Location = New-Object Drawing.Point(395, 151)
-$joinCaption.AutoSize = $true
-$launchGroup.Controls.Add($joinCaption)
+$script:JoinReady = $false
+$joinLight = New-Object System.Windows.Forms.Panel
+$joinLight.Location = New-Object Drawing.Point(395, 153)
+$joinLight.Size = New-Object Drawing.Size(15, 15)
+$joinLight.AccessibleName = 'Connection readiness light'
+$joinLight.Add_Paint({
+    param($sender, $eventArgs)
+    $eventArgs.Graphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $fillColor = if ($script:JoinReady) {
+        [Drawing.Color]::FromArgb(52, 199, 89)
+    } else {
+        [Drawing.Color]::FromArgb(255, 69, 58)
+    }
+    $brush = [Drawing.SolidBrush]::new($fillColor)
+    $borderPen = [Drawing.Pen]::new([Drawing.Color]::FromArgb(26, 28, 32))
+    try {
+        $eventArgs.Graphics.FillEllipse($brush, 1, 1, 12, 12)
+        $eventArgs.Graphics.DrawEllipse($borderPen, 1, 1, 12, 12)
+    } finally {
+        $brush.Dispose()
+        $borderPen.Dispose()
+    }
+})
+$launchGroup.Controls.Add($joinLight)
+
+$joinReadyLabel = New-Object System.Windows.Forms.Label
+$joinReadyLabel.Text = 'Java: wait'
+$joinReadyLabel.Location = New-Object Drawing.Point(416, 149)
+$joinReadyLabel.Size = New-Object Drawing.Size(105, 22)
+$joinReadyLabel.TextAlign = 'MiddleLeft'
+$launchGroup.Controls.Add($joinReadyLabel)
 
 $joinStatus = New-Object System.Windows.Forms.Label
 $joinStatus.Text = 'localhost:25565'
-$joinStatus.Location = New-Object Drawing.Point(432, 151)
-$joinStatus.Size = New-Object Drawing.Size(145, 22)
+$joinStatus.Location = New-Object Drawing.Point(520, 149)
+$joinStatus.Size = New-Object Drawing.Size(130, 22)
+$joinStatus.TextAlign = 'MiddleLeft'
 $launchGroup.Controls.Add($joinStatus)
 
 $pidStatus = New-Object System.Windows.Forms.Label
 $pidStatus.Text = 'Bridge: -   ViaProxy: -'
 $pidStatus.Anchor = 'Top,Left,Right'
-$pidStatus.Location = New-Object Drawing.Point(585, 151)
-$pidStatus.Size = New-Object Drawing.Size(370, 22)
+$pidStatus.Location = New-Object Drawing.Point(655, 149)
+$pidStatus.Size = New-Object Drawing.Size(300, 22)
+$pidStatus.TextAlign = 'MiddleLeft'
 $launchGroup.Controls.Add($pidStatus)
+
+$joinToolTip = New-Object System.Windows.Forms.ToolTip
+$joinToolTip.SetToolTip($joinLight, 'Wait for green before connecting the game client.')
+$joinToolTip.SetToolTip($joinReadyLabel, 'Wait for green before connecting the game client.')
 
 $logGroup = New-Object System.Windows.Forms.GroupBox
 $logGroup.Text = 'Log'
@@ -783,11 +881,14 @@ function Set-DarkTheme {
     $buttonHover = if ($Enabled) { [Drawing.Color]::FromArgb(57, 61, 68) } else { [Drawing.SystemColors]::ControlLight }
     $buttonPressed = if ($Enabled) { [Drawing.Color]::FromArgb(35, 38, 43) } else { [Drawing.SystemColors]::ControlDark }
 
+    [JavaRockNativeWindow]::SetAppDarkMode($Enabled)
     $form.BackColor = $background
     $form.ForeColor = $foreground
     [JavaRockNativeWindow]::SetImmersiveDarkMode($form.Handle, $Enabled)
     $menu.BackColor = $panel
     $menu.ForeColor = $foreground
+    $menuRenderer = [JavaRockNativeWindow]::CreateMenuRenderer($Enabled)
+    $menu.Renderer = $menuRenderer
     foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $versionMenuItem)) {
         $menuItem.BackColor = $panel
         $menuItem.ForeColor = $foreground
@@ -796,12 +897,15 @@ function Set-DarkTheme {
     $viewMenu.DropDown.BackColor = $panel
     $diagnosticsMenu.DropDown.BackColor = $panel
     $helpMenu.DropDown.BackColor = $panel
+    foreach ($dropDown in @($accountMenu.DropDown, $viewMenu.DropDown, $diagnosticsMenu.DropDown, $helpMenu.DropDown)) {
+        $dropDown.Renderer = $menuRenderer
+    }
     foreach ($group in @($accountGroup, $launchGroup, $logGroup)) {
         $group.BackColor = $background
         $group.ForeColor = if ($Enabled) { [Drawing.Color]::FromArgb(126, 134, 145) } else { $foreground }
         $group.FlatStyle = if ($Enabled) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
     }
-    foreach ($control in @($titleLabel, $topStatus, $darkCheck, $accountLabel, $accountStatus, $realmLabel, $manualLabel, $modeLabel, $targetLabel, $upstreamLabel, $runChecks, $joinCaption, $joinStatus, $pidStatus)) {
+    foreach ($control in @($titleLabel, $topStatus, $darkCheck, $accountLabel, $accountStatus, $realmLabel, $manualLabel, $modeLabel, $targetLabel, $upstreamLabel, $runChecks, $joinReadyLabel, $joinStatus, $pidStatus)) {
         $control.BackColor = $background
         $control.ForeColor = $foreground
     }
@@ -812,13 +916,11 @@ function Set-DarkTheme {
     foreach ($control in @($accountCombo, $realmCombo, $modeCombo)) {
         $control.DrawMode = if ($Enabled) { [Windows.Forms.DrawMode]::OwnerDrawFixed } else { [Windows.Forms.DrawMode]::Normal }
         $control.FlatStyle = if ($Enabled) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
-        $nativeTheme = if ($Enabled) { 'DarkMode_Explorer' } else { $null }
-        [void][JavaRockNativeWindow]::SetWindowTheme($control.Handle, $nativeTheme, $null)
+        [JavaRockNativeWindow]::ApplyControlTheme($control.Handle, $Enabled, 'DarkMode_Explorer')
         $control.Invalidate()
     }
-    $nativeFieldTheme = if ($Enabled) { 'DarkMode_Explorer' } else { $null }
     foreach ($control in @($manualRealm, $targetVersion, $upstreamVersion, $logBox)) {
-        [void][JavaRockNativeWindow]::SetWindowTheme($control.Handle, $nativeFieldTheme, $null)
+        [JavaRockNativeWindow]::ApplyControlTheme($control.Handle, $Enabled, 'DarkMode_Explorer')
         $control.Invalidate()
     }
     $logBox.BackColor = $logField
@@ -833,6 +935,7 @@ function Set-DarkTheme {
         $button.FlatAppearance.MouseOverBackColor = $buttonHover
         $button.FlatAppearance.MouseDownBackColor = $buttonPressed
     }
+    Update-JoinReadiness
     $form.Invalidate($true)
     if (-not $SmokeTest -and -not $WindowSmokeTest) {
         Save-Preferences
@@ -1067,6 +1170,7 @@ function Update-ModeControls {
     $runChecks.Enabled = -not $recorder
     if ($recorder) { $joinStatus.Text = '127.0.0.1:19133' } else { $joinStatus.Text = 'localhost:25565' }
     Update-PrimaryActionButton
+    Update-JoinReadiness
     Update-TopStatus
 }
 
@@ -1077,6 +1181,29 @@ function Test-BridgeActivity {
     $viaProxy = Get-ObjectValue $status 'viaProxy' $null
     $viaPid = Get-ObjectValue $viaProxy 'pid' $null
     return (Test-ProcessAlive $bridgePid) -or (Test-ProcessAlive $viaPid)
+}
+
+function Update-JoinReadiness {
+    param($Status = $null)
+
+    if ($null -eq $Status) { $Status = Read-JsonFile -Path $StatusFile }
+    $bridgePid = Get-ObjectValue $Status 'pid' $null
+    $viaProxy = Get-ObjectValue $Status 'viaProxy' $null
+    $viaPid = Get-ObjectValue $viaProxy 'pid' $null
+    $bridgeAlive = Test-ProcessAlive $bridgePid
+    $viaAlive = Test-ProcessAlive $viaPid
+    $recorder = $modeCombo.Text -eq 'Bedrock packet recorder'
+    $script:JoinReady = if ($recorder) { $bridgeAlive } else { $bridgeAlive -and $viaAlive }
+    $clientName = if ($recorder) { 'Bedrock' } else { 'Java' }
+    $joinReadyLabel.Text = if ($script:JoinReady) { "$clientName`: join now" } else { "$clientName`: wait" }
+    $joinReadyLabel.ForeColor = if ($script:JoinReady) {
+        if ($script:DarkMode) { [Drawing.Color]::FromArgb(103, 214, 125) } else { [Drawing.Color]::FromArgb(20, 122, 46) }
+    } else {
+        if ($script:DarkMode) { [Drawing.Color]::FromArgb(255, 116, 108) } else { [Drawing.Color]::FromArgb(184, 36, 29) }
+    }
+    $joinToolTip.SetToolTip($joinLight, "Connect $clientName to $($joinStatus.Text) when this light is green.")
+    $joinToolTip.SetToolTip($joinReadyLabel, "Connect $clientName to $($joinStatus.Text) when this light is green.")
+    $joinLight.Invalidate()
 }
 
 function Update-PrimaryActionButton {
@@ -1573,6 +1700,7 @@ $timer.Add_Tick({
     $bridgeText = if ($bridgePid) { "$bridgePid $(if (Test-ProcessAlive $bridgePid) { 'running' } else { 'stopped' })" } else { '-' }
     $viaText = if ($viaPid) { "$viaPid $(if (Test-ProcessAlive $viaPid) { 'running' } else { 'stopped' })" } else { '-' }
     $pidStatus.Text = "Bridge: $bridgeText   ViaProxy: $viaText"
+    Update-JoinReadiness $status
     Update-PrimaryActionButton
     if ($null -ne $script:RealmProcess -and -not $script:RealmProcess.HasExited -and $null -ne $script:RealmRefreshStartedAt) {
         $elapsedSeconds = [Math]::Floor(([DateTime]::UtcNow - $script:RealmRefreshStartedAt).TotalSeconds)
@@ -1619,12 +1747,28 @@ if ($SmokeTest) {
     if ($accountCombo.DrawMode -ne [Windows.Forms.DrawMode]::OwnerDrawFixed) {
         throw 'Dark theme combo boxes are not owner drawn.'
     }
+    if ($menu.Renderer.GetType().Name -ne 'JavaRockDarkToolStripRenderer') {
+        throw 'Dark theme menu renderer was not applied.'
+    }
+    if ($joinReadyLabel.Text -notmatch 'wait|join now') {
+        throw 'Connection readiness status is missing.'
+    }
+    Update-JoinReadiness ([pscustomobject]@{
+        pid = $PID
+        viaProxy = [pscustomobject]@{ pid = $PID }
+    })
+    if (-not $script:JoinReady -or $joinReadyLabel.Text -ne 'Java: join now') {
+        throw 'Connection readiness did not turn green when both relay processes were running.'
+    }
     Set-DarkTheme $false
     if ($manualRealm.BackColor.ToArgb() -ne ([Drawing.SystemColors]::Window).ToArgb()) {
         throw 'Light theme did not restore the standard text input color.'
     }
     if ($accountCombo.DrawMode -ne [Windows.Forms.DrawMode]::Normal) {
         throw 'Light theme did not restore standard combo-box drawing.'
+    }
+    if ($menu.Renderer.GetType().Name -ne 'ToolStripSystemRenderer') {
+        throw 'Light theme did not restore the system menu renderer.'
     }
     $realmParserSmoke = @(Parse-Realms '[realm-json] {"index":2,"id":"13","name":"Survival | Friends","owner":"owner","state":"OPEN","expired":false}')
     if ($realmParserSmoke.Count -ne 1 -or $realmParserSmoke[0].Id -ne '13' -or $realmParserSmoke[0].Name -ne 'Survival | Friends') {
@@ -1644,6 +1788,7 @@ $form.Add_Shown({
     $form.Activate()
     [void][JavaRockNativeWindow]::SetForegroundWindow($form.Handle)
     [Windows.Forms.Application]::DoEvents()
+    Set-DarkTheme $script:DarkMode
 
     $visible = [JavaRockNativeWindow]::IsWindowVisible($form.Handle)
     if (-not $visible) { throw 'Windows created the JavaRock form but did not make it visible.' }

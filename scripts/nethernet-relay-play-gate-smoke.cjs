@@ -58,6 +58,53 @@ assert.deepStrictEqual(queuedChunks, [{
   context: 'chunk_cache_flush:smoke'
 }])
 
+const modernPartialLevelChunk = {
+  x: 10,
+  z: 1,
+  dimension: 0,
+  sub_chunk_count: 0,
+  highest_subchunk_count: 24,
+  cache_enabled: false,
+  blobs: [],
+  payload: Buffer.from([1, 2, 3])
+}
+const legacyPartialLevelChunk = normalizeClientboundForLocalViaBedrock('level_chunk', modernPartialLevelChunk, {
+  localBedrockVersion: '1.26.30'
+})
+assert.strictEqual(legacyPartialLevelChunk.sub_chunk_count, -2)
+assert.strictEqual(legacyPartialLevelChunk.highest_subchunk_count, 24)
+assert.strictEqual(legacyPartialLevelChunk.cache_enabled, false)
+assert.strictEqual(legacyPartialLevelChunk.blobs, undefined)
+assert.deepStrictEqual(legacyPartialLevelChunk.payload, modernPartialLevelChunk.payload)
+assert.deepStrictEqual(
+  normalizeClientboundForLocalViaBedrock('level_chunk', modernPartialLevelChunk, {
+    localBedrockVersion: '1.26.40'
+  }),
+  modernPartialLevelChunk
+)
+const unlimitedLegacyPartialLevelChunk = normalizeClientboundForLocalViaBedrock('level_chunk', {
+  ...modernPartialLevelChunk,
+  highest_subchunk_count: -1
+}, { localBedrockVersion: '1.26.30' })
+assert.strictEqual(unlimitedLegacyPartialLevelChunk.sub_chunk_count, -1)
+assert.strictEqual(unlimitedLegacyPartialLevelChunk.highest_subchunk_count, undefined)
+
+const modernLevelChunkRelay = Object.create(ViaBedrockRelayPlayer.prototype)
+modernLevelChunkRelay.latestSyntheticSubchunkOrigin = null
+assert.strictEqual(modernLevelChunkRelay.rememberSyntheticSubchunkOriginFromLevelChunk(modernPartialLevelChunk), true)
+assert.deepStrictEqual(modernLevelChunkRelay.latestSyntheticSubchunkOrigin, {
+  x: 10,
+  y: 0,
+  z: 1,
+  dimension: 0
+})
+assert.strictEqual(modernLevelChunkRelay.rememberSyntheticSubchunkOriginFromLevelChunk({
+  x: 11,
+  z: 2,
+  dimension: 0,
+  sub_chunk_count: 0
+}), false)
+
 function makeOutboundRelay (downstreamMode = 'viabedrock') {
   const sentPackets = []
   const shimRequests = []

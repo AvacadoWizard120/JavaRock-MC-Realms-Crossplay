@@ -189,6 +189,36 @@ const legacySubChunk = normalizeClientboundForLocalViaBedrock('subchunk', subChu
 assert(Buffer.isBuffer(legacySubChunk.entries[0].heightmap))
 assert.strictEqual(legacySubChunk.entries[0].heightmap.length, 256)
 
+const levelChunk = roundTrip('level_chunk', {
+  x: 10,
+  z: 1,
+  dimension: 0,
+  sub_chunk_count: 0,
+  highest_subchunk_count: 24,
+  cache_enabled: false,
+  blobs: [],
+  payload: Buffer.from([1, 2, 3])
+})
+assert.strictEqual(levelChunk.sub_chunk_count, 0)
+assert.strictEqual(levelChunk.highest_subchunk_count, 24)
+
+const legacyLevelChunk = normalizeClientboundForLocalViaBedrock('level_chunk', levelChunk, {
+  localBedrockVersion: '1.26.30'
+})
+assert.strictEqual(legacyLevelChunk.sub_chunk_count, -2)
+assert.strictEqual(legacyLevelChunk.highest_subchunk_count, 24)
+const legacyLevelChunkSerializer = createSerializer('1.26.30')
+const legacyLevelChunkDeserializer = createDeserializer('1.26.30')
+const legacyLevelChunkBuffer = legacyLevelChunkSerializer.createPacketBuffer({
+  name: 'level_chunk',
+  params: legacyLevelChunk
+})
+const decodedLegacyLevelChunk = legacyLevelChunkDeserializer.parsePacketBuffer(legacyLevelChunkBuffer).data
+assert.strictEqual(decodedLegacyLevelChunk.name, 'level_chunk')
+assert.strictEqual(decodedLegacyLevelChunk.params.sub_chunk_count, -2)
+assert.strictEqual(decodedLegacyLevelChunk.params.highest_subchunk_count, 24)
+assert.deepStrictEqual(decodedLegacyLevelChunk.params.payload, Buffer.from([1, 2, 3]))
+
 const dimensionData = roundTrip('dimension_data', {
   definitions: [{
     id: 'minecraft:overworld',

@@ -559,6 +559,10 @@ function summarizePacketForCensus (name, params = {}) {
     out.z = params.z ?? params.chunk_z ?? params.chunkZ
     out.dimension = params.dimension
     out.sub_chunk_count = params.sub_chunk_count ?? params.subChunkCount
+    out.highest_subchunk_count = params.highest_subchunk_count ?? params.highestSubchunkCount
+    out.cache_enabled = params.cache_enabled ?? params.cacheEnabled
+    const blobs = Array.isArray(params.blobs) ? params.blobs : params.blobs?.hashes
+    out.blobCount = Array.isArray(blobs) ? blobs.length : undefined
     out.payloadBytes = Buffer.isBuffer(params.payload) ? params.payload.length : undefined
     return out
   }
