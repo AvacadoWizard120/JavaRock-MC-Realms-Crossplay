@@ -1232,7 +1232,7 @@ function Start-SupportBundle {
     }
 
     $answer = [Windows.Forms.MessageBox]::Show(
-        "This creates a ZIP containing JavaRock logs, the packet ledger, and the three most recent packet census runs.`r`n`r`nMicrosoft sign-in caches, .env files, and raw packet journals are excluded. Packet census data can still describe player and world activity.`r`n`r`nCreate the support ZIP?",
+        "This creates a ZIP containing JavaRock logs, the active packet census run, and up to three completed packet census runs.`r`n`r`nMicrosoft sign-in caches, .env files, raw packet journals, and the binary packet ledger are excluded. Packet census data can still describe player and world activity.`r`n`r`nCreate the support ZIP?",
         'Create JavaRock support ZIP',
         [Windows.Forms.MessageBoxButtons]::YesNo,
         [Windows.Forms.MessageBoxIcon]::Information,

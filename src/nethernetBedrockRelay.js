@@ -3160,6 +3160,41 @@ function normalizePlayerAuthInputForModernRealm (params = {}) {
   return out
 }
 
+const MODERN_RESOURCE_PACK_RESPONSE = Object.freeze({
+  none: { status: 'refused', name: 'cancel' },
+  refused: { status: 'refused', name: 'cancel' },
+  sendpacks: { status: 'send_packs', name: 'downloading' },
+  downloading: { status: 'send_packs', name: 'downloading' },
+  haveallpacks: { status: 'have_all_packs', name: 'downloadingfinished' },
+  downloadingfinished: { status: 'have_all_packs', name: 'downloadingfinished' },
+  completed: { status: 'completed', name: 'resourcepackstackfinished' },
+  resourcepackstackfinished: { status: 'completed', name: 'resourcepackstackfinished' }
+})
+
+function normalizeResourcePackClientResponseForModernRealm (params = {}) {
+  const out = { ...params }
+  const existingStatusName = firstNonEmpty(out.response_status_name, out.responseStatusName)
+  if (existingStatusName != null) {
+    out.response_status_name = String(existingStatusName)
+    if (out.response_status == null && out.responseStatus != null) out.response_status = out.responseStatus
+    return out
+  }
+
+  const rawStatus = firstNonNull(out.response_status, out.responseStatus)
+  const legacyNumericStatuses = ['none', 'refused', 'send_packs', 'have_all_packs', 'completed']
+  const numericStatus = Number(rawStatus)
+  const status = Number.isInteger(numericStatus) && numericStatus >= 0 && numericStatus < legacyNumericStatuses.length
+    ? legacyNumericStatuses[numericStatus]
+    : String(rawStatus || '').toLowerCase()
+  const key = status.replace(/[^a-z0-9]/g, '')
+  const modern = MODERN_RESOURCE_PACK_RESPONSE[key]
+  if (!modern) return out
+
+  out.response_status = modern.status
+  out.response_status_name = modern.name
+  return out
+}
+
 function normalizeServerboundForUpstreamRealm (name, params = {}, upstream) {
   let out = { ...params }
   const upstreamVersion = firstNonEmpty(upstream?.options?.version, currentRealmBedrockVersion())
@@ -3185,6 +3220,10 @@ function normalizeServerboundForUpstreamRealm (name, params = {}, upstream) {
         out.transaction = transaction
       }
     }
+  }
+
+  if (name === 'resource_pack_client_response' && protocolVersionAtLeast(upstreamVersion, '1.26.40')) {
+    out = normalizeResourcePackClientResponseForModernRealm(out)
   }
 
   if (name === 'text') {

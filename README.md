@@ -20,7 +20,7 @@ The JavaRock window uses Windows' built-in desktop controls. It does not need Py
 
 JavaRock checks for new releases after the window opens and always asks before installing one. You can also use **Help > Check for updates**.
 
-When a test fails, click **Support ZIP**. JavaRock collects the launcher and bridge logs, the packet ledger, and the three most recent packet census runs without adding Microsoft sign-in caches or `.env` files. Under **Diagnostics**, you can set a private HTTPS upload endpoint or a shared folder so future ZIPs are sent there automatically.
+When a test fails, click **Support ZIP**. JavaRock collects the launcher and bridge logs, the active packet census run, and up to three completed runs without adding Microsoft sign-in caches, `.env` files, raw packet journals, or the binary packet ledger. Under **Diagnostics**, you can set a private HTTPS upload endpoint or a shared folder so future ZIPs are sent there automatically.
 
 ## Current Support
 

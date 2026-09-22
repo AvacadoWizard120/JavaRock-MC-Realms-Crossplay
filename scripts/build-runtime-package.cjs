@@ -28,6 +28,7 @@ const scriptFiles = [
   'install-viaproxy.cjs',
   'javarock-update-http.cjs',
   'New-JavaRockSupportBundle.ps1',
+  'redact-support-file.cjs',
   'Start-JavaRock.ps1',
   'Update-JavaRock.ps1'
 ]

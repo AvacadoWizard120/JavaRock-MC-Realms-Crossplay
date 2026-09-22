@@ -93,6 +93,43 @@ const modernItemUse = normalizeServerboundForUpstreamRealm('inventory_transactio
 })
 assert.strictEqual(modernItemUse.transaction.transaction_data.hand, 0)
 
+const modernResourcePackResponse = normalizeServerboundForUpstreamRealm('resource_pack_client_response', {
+  response_status: 'completed',
+  resourcepackids: []
+}, {
+  options: { version: BEDROCK_26_50_VERSION }
+})
+assert.strictEqual(modernResourcePackResponse.response_status, 'completed')
+assert.strictEqual(modernResourcePackResponse.response_status_name, 'resourcepackstackfinished')
+const decodedResourcePackResponse = roundTrip('resource_pack_client_response', modernResourcePackResponse)
+assert.strictEqual(decodedResourcePackResponse.response_status, 'completed')
+assert.strictEqual(decodedResourcePackResponse.response_status_name, 'resourcepackstackfinished')
+
+for (const [legacyStatus, modernName] of [
+  ['refused', 'cancel'],
+  ['send_packs', 'downloading'],
+  ['have_all_packs', 'downloadingfinished'],
+  ['completed', 'resourcepackstackfinished']
+]) {
+  const normalized = normalizeServerboundForUpstreamRealm('resource_pack_client_response', {
+    response_status: legacyStatus,
+    resourcepackids: legacyStatus === 'send_packs' ? ['test-pack'] : []
+  }, {
+    options: { version: BEDROCK_26_50_VERSION }
+  })
+  assert.strictEqual(normalized.response_status_name, modernName)
+  assert.strictEqual(roundTrip('resource_pack_client_response', normalized).response_status_name, modernName)
+}
+
+const numericLegacyResourcePackResponse = normalizeServerboundForUpstreamRealm('resource_pack_client_response', {
+  response_status: 4,
+  resourcepackids: []
+}, {
+  options: { version: BEDROCK_26_50_VERSION }
+})
+assert.strictEqual(numericLegacyResourcePackResponse.response_status, 'completed')
+assert.strictEqual(numericLegacyResourcePackResponse.response_status_name, 'resourcepackstackfinished')
+
 const transaction = roundTrip('inventory_transaction', {
   transaction: {
     legacy: { legacy_request_id: 0, legacy_transactions: undefined },

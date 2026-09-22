@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.92 - 2026-09-21
+
+- Fixed the Joining World hang caused by Bedrock 1.26.40+ resource-pack replies missing their new status-name field.
+- Support ZIPs now include the active packet census run, even when the bridge is still stuck.
+- Fixed support redaction producing broken JSON and expanded it to cover account and Realm details.
+- The binary SQLite packet ledger is no longer added to Support ZIPs by default because text redaction cannot safely clean it.
+
 ## 0.3.91 - 2026-09-21
 
 - Fixed Realm signaling messages that arrive across more than one WebSocket frame.
