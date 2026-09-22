@@ -13,6 +13,8 @@ const path = require('path')
 const { Relay } = require('bedrock-protocol')
 const { Player } = require('bedrock-protocol/src/serverPlayer')
 const { ClientStatus } = require('bedrock-protocol/src/connection')
+const { parseLoginEnvelope } = require('bedrock-protocol/src/auth/loginEnvelope')
+const { LoginPhase } = require('bedrock-protocol/src/auth/loginState')
 const { createRealmBedrockClient } = require('./nethernetBedrockProbe')
 const { inspectRealmNetherNetInfo } = require('./nethernetInfo')
 const { safeStringify } = require('./safeStringify')
@@ -4971,64 +4973,68 @@ class ViaBedrockRelayPlayer extends Player {
     }
   }
 
-  onLogin (packet) {
-    const body = packet.data
+  async onLogin (packet) {
+    const body = packet?.data
     this.emit('loggingIn', body)
 
-    const clientVer = body.params.protocol_version
-    if (!this.handleClientProtocolVersion(clientVer)) return
-
-    const tokens = body.params.tokens
-    let key
-    let userData
-    let skinData
-
     try {
-      const skinChain = tokens.client
-      const authChain = normalizeMaybeJson(tokens.identity)
-      const authToken = authChain.Token || authChain.token || ''
-      const chain = normalizeChain(authChain)
-      const decoded = this.decodeLoginJWT(chain, skinChain, authToken)
-      key = decoded.key
-      userData = decoded.userData
-      skinData = decoded.skinData
-    } catch (error) {
-      if (!this.server.options.allowViaBedrockLoginFallback) {
-        this.downInLog?.('Strict login verification failed', error)
-        this.disconnect('Server authentication error')
+      this.loginState.transition(LoginPhase.VerifyingLogin)
+
+      const clientVer = body?.params?.protocol_version
+      if (!this.handleClientProtocolVersion(clientVer)) {
+        this.loginState.reject()
         return
       }
 
+      const tokens = body?.params?.tokens || {}
+      let key
+      let userData
+      let skinData
+      let authentication
+
       try {
+        const verified = await this.verifyLogin(parseLoginEnvelope(packet))
+        this.loginState.require(LoginPhase.VerifyingLogin)
+        key = verified.clientPublicKey
+        userData = verified.identity
+        skinData = verified.clientData
+        authentication = verified.authentication
+      } catch (error) {
+        if (!this.server.options.allowViaBedrockLoginFallback) throw error
+
         const loose = extractLooseLoginData(tokens)
         key = loose.key
         userData = loose.userData
         skinData = loose.skinData
+        authentication = {
+          authenticated: false,
+          method: 'permissive-offline-fallback',
+          issuer: null
+        }
         console.warn(`[bedrock-relay] Accepted ${this.downstreamClientLabel()} login with permissive offline auth fallback: ${error.message || error}`)
-      } catch (fallbackError) {
-        console.error(`[bedrock-relay] ${this.downstreamClientLabel()} login fallback failed: ${fallbackError.stack || fallbackError.message || fallbackError}`)
-        this.disconnect('Server authentication error')
-        return
       }
-    }
 
-    if (!key) {
-      console.error(`[bedrock-relay] ${this.downstreamClientLabel()} login did not expose a usable client public key; cannot start Bedrock encryption.`)
-      this.disconnect('Server authentication error')
-      return
-    }
+      this.loginState.require(LoginPhase.VerifyingLogin)
+      if (!key) throw new Error(`${this.downstreamClientLabel()} login did not expose a usable client public key`)
 
-    this.emit('server.client_handshake', { key })
+      this.authentication = authentication
+      this.userData = userData?.extraData || userData || {}
+      this.skinData = skinData || {}
+      this.profile = {
+        name: this.userData.displayName || this.skinData.ThirdPartyName || 'ViaBedrockPlayer',
+        uuid: this.userData.identity || this.skinData.SelfSignedId,
+        xuid: this.userData.xuid || this.userData.XUID || '0'
+      }
+      this.version = clientVer
 
-    this.userData = userData.extraData || {}
-    this.skinData = skinData || {}
-    this.profile = {
-      name: this.userData.displayName || this.skinData.ThirdPartyName || 'ViaBedrockPlayer',
-      uuid: this.userData.identity || this.skinData.SelfSignedId,
-      xuid: this.userData.xuid || this.userData.XUID || '0'
+      const handshake = this.createServerHandshake(key)
+      this.write('server_to_client_handshake', { token: handshake.token })
+      this.enableEncryption(handshake)
+      this.loginState.transition(LoginPhase.AwaitingClientHandshake)
+      this.emit('login', { user: this.userData, authentication })
+    } catch (error) {
+      this.rejectLogin(error)
     }
-    this.version = clientVer
-    this.emit('login', { user: this.userData })
   }
 
   parseDownstreamPacket (packet) {
