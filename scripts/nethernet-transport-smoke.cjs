@@ -2,6 +2,8 @@
 
 const assert = require('assert')
 const { EventEmitter } = require('events')
+const { ClientStatus } = require('bedrock-protocol/src/connection')
+const { forwardEarlyTransportCloseToClient } = require('../src/nethernetBedrockProbe')
 const {
   NetherNetRealmTransport,
   bedrockRakNetBatchToNetherNetPayload,
@@ -99,6 +101,24 @@ async function main () {
   await pendingConnect
   assert.strictEqual(aborted, true)
   assert.strictEqual(pendingTransport.closed, true)
+
+  const earlyClient = new EventEmitter()
+  earlyClient.status = ClientStatus.Disconnected
+  const earlyTransport = new EventEmitter()
+  let earlyCloseReason = null
+  earlyClient.once('close', reason => { earlyCloseReason = reason })
+  forwardEarlyTransportCloseToClient(earlyClient, earlyTransport)
+  earlyTransport.emit('close', 'signaling failed')
+  assert.strictEqual(earlyCloseReason, 'signaling failed')
+
+  const connectedClient = new EventEmitter()
+  connectedClient.status = ClientStatus.Connecting
+  const connectedTransport = new EventEmitter()
+  let duplicateClose = false
+  connectedClient.once('close', () => { duplicateClose = true })
+  forwardEarlyTransportCloseToClient(connectedClient, connectedTransport)
+  connectedTransport.emit('close', 'normal close')
+  assert.strictEqual(duplicateClose, false)
 
   console.log('NetherNet transport smoke check passed.')
 }

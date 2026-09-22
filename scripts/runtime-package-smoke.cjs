@@ -31,6 +31,7 @@ try {
     'LICENSES/GPL-3.0-or-later.txt',
     'scripts/Start-JavaRock.ps1',
     'scripts/JavaRock-Gui.ps1',
+    'scripts/New-JavaRockSupportBundle.ps1',
     'scripts/Update-JavaRock.ps1',
     'scripts/javarock-update-http.cjs',
     'javarock-release-manifest.json',
@@ -67,6 +68,7 @@ try {
   assert.strictEqual(releaseManifest.version, runtimePackage.version)
   assert(releaseManifest.files.includes('javarock-release-manifest.json'))
   assert(releaseManifest.files.includes('scripts/Update-JavaRock.ps1'))
+  assert(releaseManifest.files.includes('scripts/New-JavaRockSupportBundle.ps1'))
   assert(!releaseManifest.files.some(file => /(?:^|\/)\.auth-profiles(?:\/|$)/i.test(file)))
 
   const runtimeIndex = fs.readFileSync(path.join(destination, 'src', 'index.js'), 'utf8')

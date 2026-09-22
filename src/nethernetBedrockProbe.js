@@ -108,6 +108,15 @@ function createNetherNetIdentityProvider (client) {
   }
 }
 
+function forwardEarlyTransportCloseToClient (client, transport) {
+  transport.once('close', reason => {
+    // bedrock-protocol does not emit Client#close when its transport fails
+    // before onConnected changes the client status. Relay that early failure so
+    // the downstream player leaves Joining World immediately.
+    if (client.status === ClientStatus.Disconnected) client.emit('close', reason)
+  })
+}
+
 function attachBedrockLoginResponses (client) {
   client.once('resource_packs_info', () => {
     client.write('resource_pack_client_response', {
@@ -189,6 +198,7 @@ function createNetherNetBedrockClient (config, info, options = {}) {
     logger: message => console.log(message),
     identityProvider: createNetherNetIdentityProvider(client)
   })
+  forwardEarlyTransportCloseToClient(client, client.connection)
   client.connect()
 
   return { client, state, transport: client.connection }
@@ -261,6 +271,7 @@ module.exports = {
   buildNetherNetBedrockClientOptions,
   buildRakNetBedrockClientOptions,
   createNetherNetIdentityProvider,
+  forwardEarlyTransportCloseToClient,
   createNetherNetBedrockClient,
   createRakNetBedrockClient,
   createRealmBedrockClient,
