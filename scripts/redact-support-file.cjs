@@ -48,6 +48,7 @@ function protectText (value) {
     .replace(/XBL3\.0\s+x=[^;\s]+;[^\s"']+/gi, 'XBL3.0 [redacted]')
     .replace(/(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]{10,})?/g, '[redacted-jwt]')
     .replace(/("?(?:accountName|displayName|gamertag|identityUuid|owner|profileId|profileName|profilesFolder|realmId|realmName|username|uuid|xuid)"?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^,\s;}\r\n]+)/gi, '$1"[redacted]"')
+    .replace(/(\bRealm\s+)\d{4,}\b/gi, '$1[redacted]')
     .replace(/(\b(?:selected\s+)?Realm(?:\s+(?:name|id))?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n]+)/gim, '$1[redacted]')
     .replace(/(\bRefreshing Realm list for\s+)[^\r\n.]+(?=\.\.\.)/gi, '$1[redacted]')
     .replace(/(\baccount profile\s+['"])[^'"]+(['"])/gi, '$1[redacted]$2')

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.93 - 2026-09-22
+
+- Fixed the connection reset just after Realm spawn when terrain preloading had not received a chunk origin yet.
+- Support ZIPs can now be sent to the permanent JavaRock support inbox with an access code stored through Windows account encryption.
+- Support uploads retry three times. If they still fail, the ZIP stays on the computer and the launcher shows the upload error instead of claiming the whole ZIP failed.
+- Support ZIP redaction now catches numeric Realm ids in warning text.
+- Start and Stop are now one button that changes with the bridge or recorder state.
+
 ## 0.3.92 - 2026-09-21
 
 - Fixed the Joining World hang caused by Bedrock 1.26.40+ resource-pack replies missing their new status-name field.

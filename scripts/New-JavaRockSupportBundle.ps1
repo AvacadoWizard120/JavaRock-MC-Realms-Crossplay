@@ -125,6 +125,8 @@ $bundlePath = Join-Path $OutputDirectory $bundleName
 $script:StageDirectory = Join-Path $OutputDirectory ".support-stage-$PID-$suffix"
 $script:IncludedFiles = [Collections.Generic.List[string]]::new()
 $uploaded = $false
+$uploadFailed = $false
+$uploadMessage = ''
 $remoteLocation = ''
 
 try {
@@ -140,7 +142,7 @@ try {
         if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) { continue }
         $runtimeLabel = Split-Path -Leaf $runtimeRoot
         foreach ($file in @(Get-ChildItem -LiteralPath $runtimeRoot -File -ErrorAction SilentlyContinue)) {
-            if ($file.Name -notmatch '(?i)(\.log$|bridge-status\.json$|update-result\.json$|startup.*\.err\.log$)') { continue }
+            if ($file.Name -notmatch '(?i)(\.log$|bridge-status\.json$|(?:update|support)-result\.json$|startup.*\.err\.log$)') { continue }
             Add-SupportFile -Source $file.FullName -RelativePath (Join-Path "runtime\$runtimeLabel" $file.Name) -RedactText
         }
     }
@@ -229,38 +231,59 @@ try {
     Write-Host "[JavaRock] Support ZIP created: $bundlePath"
 
     if (-not $NoUpload -and $UploadDestination) {
-        if ($UploadDestination -match '^https?://') {
-            Write-Host '[JavaRock] Uploading support ZIP to the configured private endpoint...'
-            $headers = @{
-                'X-JavaRock-Filename' = $bundleName
-                'X-JavaRock-Version' = $version
+        try {
+            if ($UploadDestination -match '^https?://') {
+                $headers = @{
+                    'X-JavaRock-Filename' = $bundleName
+                    'X-JavaRock-Version' = $version
+                }
+                if ($UploadToken) { $headers.Authorization = "Bearer $UploadToken" }
+                $lastUploadError = $null
+                foreach ($attempt in 1..3) {
+                    try {
+                        Write-Host "[JavaRock] Uploading support ZIP (attempt $attempt of 3)..."
+                        $response = Invoke-WebRequest -Uri $UploadDestination -Method Put -InFile $bundlePath -ContentType 'application/zip' -Headers $headers -UseBasicParsing -TimeoutSec 60
+                        if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) {
+                            throw "The upload endpoint returned HTTP $($response.StatusCode)."
+                        }
+                        $uploaded = $true
+                        $remoteLocation = $UploadDestination
+                        break
+                    } catch {
+                        $lastUploadError = $_.Exception
+                        if ($attempt -lt 3) {
+                            Write-Warning "[JavaRock] Upload attempt $attempt failed. Retrying shortly..."
+                            Start-Sleep -Seconds (2 * $attempt)
+                        }
+                    }
+                }
+                if (-not $uploaded) { throw $lastUploadError }
+            } else {
+                Write-Host '[JavaRock] Copying support ZIP to the configured shared folder...'
+                $remoteDirectory = [IO.Path]::GetFullPath($UploadDestination)
+                [IO.Directory]::CreateDirectory($remoteDirectory) | Out-Null
+                $remotePath = Join-Path $remoteDirectory $bundleName
+                Copy-Item -LiteralPath $bundlePath -Destination $remotePath -Force
+                $uploaded = $true
+                $remoteLocation = $remotePath
             }
-            if ($UploadToken) { $headers.Authorization = "Bearer $UploadToken" }
-            $response = Invoke-WebRequest -Uri $UploadDestination -Method Put -InFile $bundlePath -ContentType 'application/zip' -Headers $headers -UseBasicParsing
-            if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) {
-                throw "The upload endpoint returned HTTP $($response.StatusCode)."
-            }
-            $uploaded = $true
-            $remoteLocation = $UploadDestination
-        } else {
-            Write-Host '[JavaRock] Copying support ZIP to the configured shared folder...'
-            $remoteDirectory = [IO.Path]::GetFullPath($UploadDestination)
-            [IO.Directory]::CreateDirectory($remoteDirectory) | Out-Null
-            $remotePath = Join-Path $remoteDirectory $bundleName
-            Copy-Item -LiteralPath $bundlePath -Destination $remotePath -Force
-            $uploaded = $true
-            $remoteLocation = $remotePath
+            Write-Host '[JavaRock] Support ZIP sent successfully.'
+        } catch {
+            $uploadFailed = $true
+            $uploadMessage = $_.Exception.Message
+            Write-Warning "[JavaRock] The ZIP was created, but upload failed: $uploadMessage"
         }
-        Write-Host '[JavaRock] Support ZIP sent successfully.'
     }
 
     Write-Result @{
         success = $true
         bundlePath = $bundlePath
         uploaded = $uploaded
+        uploadFailed = $uploadFailed
+        uploadMessage = $uploadMessage
         remoteLocation = $remoteLocation
         includedFiles = $script:IncludedFiles.Count
-        message = if ($uploaded) { 'Support ZIP created and sent.' } else { 'Support ZIP created.' }
+        message = if ($uploaded) { 'Support ZIP created and sent.' } elseif ($uploadFailed) { 'Support ZIP created, but it could not be sent.' } else { 'Support ZIP created.' }
     }
 } catch {
     $message = $_.Exception.Message
