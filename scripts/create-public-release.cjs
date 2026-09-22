@@ -13,6 +13,7 @@ const rootFiles = [
   '.env.example',
   '.gitattributes',
   '.gitignore',
+  'CHANGELOG.md',
   'LICENSE',
   'NONCOMMERCIAL.md',
   'README-FIRST.txt',

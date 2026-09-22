@@ -323,4 +323,6 @@ const recordStarted = roundTrip('record_started', {
 })
 assert.deepStrictEqual(Array.from(recordStarted.server_sound_handle), [0, 12])
 
+require('./viabedrock-login-compat-smoke.cjs')
+
 console.log('Bedrock 1.26.50 protocol compatibility smoke check passed.')

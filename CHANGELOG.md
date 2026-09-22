@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.90 - 2026-09-21
+
+- Fixed Java connections being reset immediately after ViaProxy accepted the player login.
+- Updated the local ViaBedrock login handshake for `bedrock-protocol` 3.59.
+- Added a release check that runs the login packet through the same code path that caused the reset.
+
+## 0.3.89 - 2026-09-21
+
+- Added support for the Bedrock 1.26.50 Realm protocol while keeping ViaBedrock on its compatible local protocol.
+- Updated NetherNet to 1.1.1.
+- Added update checks and signed ZIP installation to the Windows launcher.
+- Improved clean-install checks and kept account data out of release packages.
+
+## 0.3.88 - 2026-09-06
+
+- Updated Bedrock protocol data for 1.26.50.
+- Updated ViaProxy setup checks so incompatible jars are replaced before launch.
+
+## 0.3.87 - 2026-08-21
+
+- Fixed Realm startup and Realm selection across fresh account profiles.
+- Fixed the packaged launcher paths used by Realm list and bridge commands.
+
 ## 0.3.86 - 2026-07-23
 
 - Fixed fresh ViaProxy patch classes being rejected as stale after extracting the Windows ZIP.
