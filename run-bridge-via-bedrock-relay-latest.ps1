@@ -2,13 +2,14 @@ param(
   [string]$RealmName = "",
   [string]$RealmId = "",
   [int]$RealmIndex = -1,
-  [string]$ViaProxyBedrockTargetVersion = "Bedrock 1.26.30",
+  [string]$ViaProxyBedrockTargetVersion = "Bedrock 1.26.45",
   [string]$UpstreamBedrockVersion = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-if (-not $ViaProxyBedrockTargetVersion) { $ViaProxyBedrockTargetVersion = 'Bedrock 1.26.30' }
+$StableViaBedrockVersion = '1.26.45'
+$ViaProxyBedrockTargetVersion = "Bedrock $StableViaBedrockVersion"
 if (-not $UpstreamBedrockVersion) {
   Push-Location $PSScriptRoot
   try {
@@ -101,8 +102,11 @@ if (-not $env:NETHERNET_RELAY_TERRAIN_SPAWN_DELAY_MS) { $env:NETHERNET_RELAY_TER
 # The real-terrain relay needs those paths enabled, or Java can render ghosts without authoritative Bedrock interactions.
 $env:VIABEDROCK_ENABLE_EXPERIMENTAL_FEATURES = "true"
 
-# This is the local Bedrock packet schema ViaProxy/ViaBedrock can currently target.
-$env:BEDROCK_RELAY_VERSION = "1.26.30"
+# The local relay must speak the exact Bedrock protocol selected in ViaProxy.
+# JavaRock's ViaBedrock patch is currently built against this version, so do
+# not inherit an older value from .env or a previous release.
+$env:VIAPROXY_BEDROCK_TARGET_VERSION = $ViaProxyBedrockTargetVersion
+$env:BEDROCK_RELAY_VERSION = $StableViaBedrockVersion
 
 # This is the real Bedrock client version used to join the modern Realm over NetherNet.
 # Keep it separate from BEDROCK_RELAY_VERSION when the Realm and ViaProxy targets drift.

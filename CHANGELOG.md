@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.96 - 2026-09-22
+
+- Fixed Java 26.2 and 26.3 being rejected before Realm login because ViaProxy used Bedrock 1.26.45 while the local relay still started as 1.26.30.
+- Old `.env` values can no longer split the two sides of the local ViaBedrock connection; both now stay on Bedrock 1.26.45.
+- Support ZIP redaction now removes Realm names, ids, and owners from Realm-list log lines.
+
 ## 0.3.95 - 2026-09-22
 
 - Added Java 26.3 support through ViaProxy 3.4.13 and its Bedrock 1.26.45 connection layer.
