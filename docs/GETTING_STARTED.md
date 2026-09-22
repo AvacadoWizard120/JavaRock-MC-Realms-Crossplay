@@ -40,7 +40,7 @@ JavaRock stores the resulting token cache under `.auth-profiles/`. Never send th
 5. Open Minecraft Java Edition and add a server at `localhost:25565`.
 6. Join that server.
 
-The bridge must stay open while you play. Use **Stop** before switching accounts or closing JavaRock.
+The bridge must stay open while you play. The launch button changes to **Stop Bridge** while it is running; click it before switching accounts or closing JavaRock.
 
 ## Record a Bedrock Session
 
@@ -48,6 +48,6 @@ The bridge must stay open while you play. Use **Stop** before switching accounts
 2. Select the account and Realm, then click **Start Recorder**.
 3. Connect Minecraft Bedrock Edition to `127.0.0.1:19133`.
 4. Reproduce only the behavior needed for the test.
-5. Stop the recorder before reviewing the files under `packet-census/`.
+5. Click **Stop Recorder** before reviewing the files under `packet-census/`.
 
 Recorder output can contain account names, Realm details, player chat, inventories, and network information. Redact it before sharing.

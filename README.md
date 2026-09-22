@@ -11,7 +11,7 @@ JavaRock is still experimental. Inventory actions, crafting, entity translation,
 3. Double-click `START-JAVAROCK.bat`.
 4. Approve any missing requirements you want the launcher to install.
 5. Add your Microsoft account and finish the device-code sign-in.
-6. Select a Realm, then click **Start Bridge**.
+6. Select a Realm, then click **Start Bridge**. The same button becomes **Stop Bridge** while it is running.
 7. In Minecraft Java Edition, connect to `localhost:25565`.
 
 The launcher checks for Node.js 20, JDK 17, project dependencies, and the patched ViaProxy runtime. It prints every result before making changes and skips anything that is already ready. Long installs show their current action and elapsed time.
@@ -20,7 +20,7 @@ The JavaRock window uses Windows' built-in desktop controls. It does not need Py
 
 JavaRock checks for new releases after the window opens and always asks before installing one. You can also use **Help > Check for updates**.
 
-When a test fails, click **Support ZIP**. JavaRock collects the launcher and bridge logs, the active packet census run, and up to three completed runs without adding Microsoft sign-in caches, `.env` files, raw packet journals, or the binary packet ledger. Under **Diagnostics**, you can set a private HTTPS upload endpoint or a shared folder so future ZIPs are sent there automatically.
+When a test fails, click **Support ZIP**. JavaRock collects the launcher and bridge logs, the active packet census run, and up to three completed runs without adding Microsoft sign-in caches, `.env` files, raw packet journals, or the binary packet ledger. Testers can enter the project support-inbox access code under **Diagnostics > Support upload settings**. The URL is already filled in, the code is protected for the current Windows user, and every send keeps a local copy under `.runtime/support-bundles/`.
 
 ## Current Support
 
@@ -57,7 +57,7 @@ Clone the repository and run `START-JAVAROCK.bat`. For manual setup, tests, and 
 
 ## Account Data
 
-Microsoft login data is stored locally under `.auth-profiles/` and is excluded from Git. The published source and release package do not contain an account, access token, Realm id, Realm name, or packet capture.
+Microsoft login data is stored locally under `.auth-profiles/` and is excluded from Git. The published source and release package do not contain an account, Microsoft access token, support-inbox access code, Realm id, Realm name, or packet capture.
 
 See [SECURITY.md](SECURITY.md) before posting logs or diagnostics.
 

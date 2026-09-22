@@ -24,7 +24,7 @@ The refresh stops after about two minutes instead of loading forever. On a new a
 
 ## Java Cannot Connect
 
-Confirm that the GUI says the bridge is running and connect to `localhost:25565`. Stop stale JavaRock processes with the GUI's **Stop** button before retrying. A firewall prompt should be allowed only for the local/private network you intend to use.
+Confirm that the GUI says the bridge is running and connect to `localhost:25565`. If the launch button says **Stop Bridge**, click it before retrying. A firewall prompt should be allowed only for the local/private network you intend to use.
 
 JavaRock stops a Realm endpoint lookup after 45 seconds. A timeout or repeated `503` response is a Realms service or network failure, not a reason to leave Minecraft on Joining World for five minutes. Refresh the Realm list and start the bridge again. The GUI passes the selected Realm id directly, so accounts with similarly named Realms do not silently join the first name match.
 
@@ -32,7 +32,7 @@ JavaRock stops a Realm endpoint lookup after 45 seconds. A timeout or repeated `
 
 These can be protocol translation bugs. Reproduce the problem once, then click **Support ZIP** in the launcher. The ZIP includes the active logs, the current packet census run, and up to three completed census runs. Microsoft sign-in caches, `.env` files, launcher preferences, raw packet journals, and the binary packet ledger are left out.
 
-Use **Diagnostics > Set upload destination** to enter a private HTTPS endpoint that accepts `PUT` uploads, or choose a shared/synced folder path. JavaRock keeps a local copy under `.runtime/support-bundles/` even when it sends the ZIP successfully. Packet census data can still describe player and world activity, so only send it somewhere you trust.
+Testers can use **Diagnostics > Support upload settings** with the access code supplied by the project maintainer. JavaRock retries a failed send three times and keeps the ZIP under `.runtime/support-bundles/` whether sending succeeds or fails. Uploaded bundles remain private and expire after 30 days. Packet census data can still describe player and world activity, so review the confirmation before sending it.
 
 ## ViaProxy Setup Failed
 

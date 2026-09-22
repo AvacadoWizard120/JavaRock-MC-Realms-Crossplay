@@ -2150,6 +2150,9 @@ function bridgeCraftingDrainRequestIds (params = {}) {
 }
 
 function buildSpawnSupportSubchunkRequest (startGameData = {}, partialChunkOrigin = {}) {
+  if (!startGameData || typeof startGameData !== 'object') return null
+  if (!partialChunkOrigin || typeof partialChunkOrigin !== 'object') return null
+
   const position = firstNonNull(startGameData.player_position, startGameData.playerPosition)
   if (!position || typeof position !== 'object') return null
 
@@ -4328,8 +4331,9 @@ class ViaBedrockRelayPlayer extends Player {
 
     const startGameData = this.upstream?.startGameData
     const partialOrigin = this.latestSyntheticSubchunkOrigin
+    if (!partialOrigin) return false
     const supportRequest = buildSpawnSupportSubchunkRequest(startGameData, partialOrigin)
-    if (!supportRequest || !partialOrigin) return false
+    if (!supportRequest) return false
 
     const partialDistance = Math.max(
       Math.abs(Number(partialOrigin.x) - supportRequest.origin.x),

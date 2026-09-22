@@ -22,7 +22,7 @@ function write (file, value) {
 
 try {
   write(path.join(fixture, 'package.json'), '{"version":"9.9.9"}\n')
-  write(path.join(runtime, 'bridge-windows-gui-bridge.out.log'), 'profilesFolder: C:\\Users\\Private Person\\JavaRock\n"username":"PrivateName"\nRefreshing Realm list for PrivateName...\nSelected Realm: PrivateRealm (12345)\n')
+  write(path.join(runtime, 'bridge-windows-gui-bridge.out.log'), 'profilesFolder: C:\\Users\\Private Person\\JavaRock\n"username":"PrivateName"\nRefreshing Realm list for PrivateName...\nSelected Realm: PrivateRealm (12345)\nRealm 12345 join endpoint request timed out.\n')
   write(path.join(runtime, 'bridge-status.json'), JSON.stringify({
     state: 'joining',
     realm: { id: '12345', name: 'PrivateRealm', owner: 'PrivateOwner' },
@@ -70,6 +70,7 @@ try {
   const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'))
   assert.strictEqual(result.success, true)
   assert.strictEqual(result.uploaded, false)
+  assert.strictEqual(result.uploadFailed, false)
   assert(fs.existsSync(result.bundlePath))
 
   const expand = spawnSync('powershell.exe', [
@@ -114,6 +115,8 @@ try {
   assert(!redactedLog.includes('Private Person'))
   assert(!redactedLog.includes('PrivateName'))
   assert(!redactedLog.includes('PrivateRealm'))
+  assert(!redactedLog.includes('12345'))
+  assert(redactedLog.includes('Realm [redacted] join endpoint request timed out.'))
   assert(redactedLog.includes('[redacted]'))
 
   const redactedStatus = JSON.parse(fs.readFileSync(path.join(extracted, 'runtime', '.runtime', 'bridge-status.json'), 'utf8'))
@@ -133,6 +136,10 @@ try {
   const systemInfo = JSON.parse(fs.readFileSync(path.join(extracted, 'system-info.json'), 'utf8'))
   const localJava = spawnSync('java.exe', ['-version'], { encoding: 'utf8', windowsHide: true })
   if (localJava.status === 0) assert(!String(systemInfo.java).startsWith('unavailable:'), 'java -version stderr should still be captured')
+
+  const supportSource = fs.readFileSync(script, 'utf8')
+  assert.match(supportSource, /attempt \$attempt of 3/)
+  assert.match(supportSource, /uploadFailed = \$uploadFailed/)
 
   console.log('JavaRock support bundle smoke check passed.')
 } finally {

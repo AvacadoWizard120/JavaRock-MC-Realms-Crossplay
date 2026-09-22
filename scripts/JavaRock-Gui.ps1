@@ -32,6 +32,7 @@ trap {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
+Add-Type -AssemblyName System.Security
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 if (-not ('JavaRockNativeWindow' -as [type])) {
@@ -70,6 +71,7 @@ $PackageInfo = Get-Content -LiteralPath (Join-Path $ProjectRoot 'package.json') 
 $CurrentVersion = [string]$PackageInfo.version
 $UpdaterScript = Join-Path $PSScriptRoot 'Update-JavaRock.ps1'
 $SupportBundleScript = Join-Path $PSScriptRoot 'New-JavaRockSupportBundle.ps1'
+$DefaultSupportUploadDestination = 'https://javarock-support-inbox.support-inbox.workers.dev/v1/bundles'
 $DefaultUpstreamBedrockVersion = ''
 Push-Location $ProjectRoot
 try {
@@ -142,10 +144,45 @@ function Write-JsonFile {
     [IO.File]::WriteAllText($Path, "$json`r`n", [Text.UTF8Encoding]::new($false))
 }
 
+function Protect-LocalSecret {
+    param([string]$Value)
+
+    if (-not $Value) { return '' }
+    try {
+        $plain = [Text.Encoding]::UTF8.GetBytes($Value)
+        $protected = [Security.Cryptography.ProtectedData]::Protect(
+            $plain,
+            $null,
+            [Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [Convert]::ToBase64String($protected)
+    } catch {
+        return ''
+    }
+}
+
+function Unprotect-LocalSecret {
+    param([string]$Value)
+
+    if (-not $Value) { return '' }
+    try {
+        $protected = [Convert]::FromBase64String($Value)
+        $plain = [Security.Cryptography.ProtectedData]::Unprotect(
+            $protected,
+            $null,
+            [Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [Text.Encoding]::UTF8.GetString($plain)
+    } catch {
+        return ''
+    }
+}
+
 function Save-Preferences {
     Write-JsonFile -Path $PreferencesFile -Value ([ordered]@{
         darkMode = [bool]$script:DarkMode
         supportUploadDestination = [string]$script:SupportUploadDestination
+        supportUploadTokenProtected = (Protect-LocalSecret $script:SupportUploadToken)
     })
 }
 
@@ -409,10 +446,16 @@ $script:LogOffsets = @{}
 $script:LogBox = $null
 $script:DarkMode = $false
 $script:SupportUploadDestination = ''
+$script:SupportUploadToken = ''
 
 $preferences = Read-JsonFile -Path $PreferencesFile
 $script:DarkMode = [bool](Get-ObjectValue $preferences 'darkMode' $false)
-$script:SupportUploadDestination = [string](Get-ObjectValue $preferences 'supportUploadDestination' '')
+$savedSupportDestination = if ($null -eq $preferences) { $null } else { $preferences.PSObject.Properties['supportUploadDestination'] }
+$script:SupportUploadDestination = if ($null -eq $savedSupportDestination) { $DefaultSupportUploadDestination } else { [string]$savedSupportDestination.Value }
+$script:SupportUploadToken = Unprotect-LocalSecret ([string](Get-ObjectValue $preferences 'supportUploadTokenProtected' ''))
+if ($script:SupportUploadDestination -match '(?i)\.trycloudflare\.com(?:/|$)') {
+    $script:SupportUploadDestination = $DefaultSupportUploadDestination
+}
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "JavaRock $CurrentVersion"
@@ -437,7 +480,7 @@ $darkMenuItem.Checked = $script:DarkMode
 [void]$viewMenu.DropDownItems.Add($darkMenuItem)
 $diagnosticsMenu = New-Object System.Windows.Forms.ToolStripMenuItem('Diagnostics')
 $createSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Create support ZIP...')
-$configureSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Set upload destination...')
+$configureSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Support upload settings...')
 [void]$diagnosticsMenu.DropDownItems.Add($createSupportMenuItem)
 [void]$diagnosticsMenu.DropDownItems.Add($configureSupportMenuItem)
 $helpMenu = New-Object System.Windows.Forms.ToolStripMenuItem('Help')
@@ -607,44 +650,38 @@ $launchGroup.Controls.Add($runChecks)
 $startButton = New-Object System.Windows.Forms.Button
 $startButton.Text = 'Start Bridge'
 $startButton.Location = New-Object Drawing.Point(12, 145)
-$startButton.Size = New-Object Drawing.Size(115, 32)
+$startButton.Size = New-Object Drawing.Size(132, 32)
 $launchGroup.Controls.Add($startButton)
-
-$stopButton = New-Object System.Windows.Forms.Button
-$stopButton.Text = 'Stop'
-$stopButton.Location = New-Object Drawing.Point(137, 145)
-$stopButton.Size = New-Object Drawing.Size(82, 32)
-$launchGroup.Controls.Add($stopButton)
 
 $logsButton = New-Object System.Windows.Forms.Button
 $logsButton.Text = 'Open Logs'
-$logsButton.Location = New-Object Drawing.Point(229, 145)
+$logsButton.Location = New-Object Drawing.Point(154, 145)
 $logsButton.Size = New-Object Drawing.Size(100, 32)
 $launchGroup.Controls.Add($logsButton)
 
 $supportButton = New-Object System.Windows.Forms.Button
 $supportButton.Text = 'Support ZIP'
-$supportButton.Location = New-Object Drawing.Point(339, 145)
+$supportButton.Location = New-Object Drawing.Point(264, 145)
 $supportButton.Size = New-Object Drawing.Size(110, 32)
 $launchGroup.Controls.Add($supportButton)
 
 $joinCaption = New-Object System.Windows.Forms.Label
 $joinCaption.Text = 'Join'
-$joinCaption.Location = New-Object Drawing.Point(468, 151)
+$joinCaption.Location = New-Object Drawing.Point(395, 151)
 $joinCaption.AutoSize = $true
 $launchGroup.Controls.Add($joinCaption)
 
 $joinStatus = New-Object System.Windows.Forms.Label
 $joinStatus.Text = 'localhost:25565'
-$joinStatus.Location = New-Object Drawing.Point(505, 151)
+$joinStatus.Location = New-Object Drawing.Point(432, 151)
 $joinStatus.Size = New-Object Drawing.Size(145, 22)
 $launchGroup.Controls.Add($joinStatus)
 
 $pidStatus = New-Object System.Windows.Forms.Label
 $pidStatus.Text = 'Bridge: -   ViaProxy: -'
 $pidStatus.Anchor = 'Top,Left,Right'
-$pidStatus.Location = New-Object Drawing.Point(655, 151)
-$pidStatus.Size = New-Object Drawing.Size(300, 22)
+$pidStatus.Location = New-Object Drawing.Point(585, 151)
+$pidStatus.Size = New-Object Drawing.Size(370, 22)
 $launchGroup.Controls.Add($pidStatus)
 
 $logGroup = New-Object System.Windows.Forms.GroupBox
@@ -787,7 +824,7 @@ function Set-DarkTheme {
     $logBox.BackColor = $logField
     $logBox.ForeColor = $fieldText
     foreach ($control in @($topStatus, $accountStatus, $pidStatus)) { $control.ForeColor = $mutedForeground }
-    foreach ($button in @($loginButton, $logoutButton, $refreshButton, $startButton, $stopButton, $logsButton, $supportButton)) {
+    foreach ($button in @($loginButton, $logoutButton, $refreshButton, $startButton, $logsButton, $supportButton)) {
         $button.FlatStyle = if ($Enabled) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
         $button.UseVisualStyleBackColor = -not $Enabled
         $button.BackColor = $panel
@@ -826,7 +863,7 @@ function Sync-AccountControls {
     $logoutMenuItem.Enabled = $hasProfile
     $refreshButton.Enabled = $hasProfile
     $refreshMenuItem.Enabled = $hasProfile
-    $startButton.Enabled = $hasProfile
+    Update-PrimaryActionButton
     if ($hasProfile) {
         $cache = if (Test-ProfileAuthCache $profile) { 'auth cache ready' } else { 'login needed' }
         $accountStatus.Text = "$(Get-ProfileLabel $profile) | $cache"
@@ -990,6 +1027,7 @@ function Start-BridgeOrRecorder {
         Add-Log 'gui' "Started $(if ($recorder) { 'Bedrock packet recorder' } else { 'ViaBedrock relay' }) with $(Get-ProfileLabel $profile)."
         Add-Log 'gui' "powershell.exe $(Join-NativeArguments $arguments)"
         Update-TopStatus 'starting'
+        Update-PrimaryActionButton
     } catch {
         Add-Log 'gui' "Launch failed: $($_.Exception.Message)"
         [void][Windows.Forms.MessageBox]::Show(
@@ -1017,6 +1055,7 @@ function Stop-BridgeOrRecorder {
     try {
         $script:StopProcess = Start-RedirectedProcess -FilePath 'powershell.exe' -Arguments $arguments -StdoutPath $StopStdoutLog -StderrPath $StopStderrLog
         Update-TopStatus 'stopping'
+        Update-PrimaryActionButton
     } catch {
         Add-Log 'stop' "Stop failed: $($_.Exception.Message)"
     }
@@ -1026,8 +1065,8 @@ function Update-ModeControls {
     $recorder = $modeCombo.Text -eq 'Bedrock packet recorder'
     $targetVersion.Enabled = -not $recorder
     $runChecks.Enabled = -not $recorder
-    $startButton.Text = if ($recorder) { 'Start Recorder' } else { 'Start Bridge' }
     if ($recorder) { $joinStatus.Text = '127.0.0.1:19133' } else { $joinStatus.Text = 'localhost:25565' }
+    Update-PrimaryActionButton
     Update-TopStatus
 }
 
@@ -1038,6 +1077,22 @@ function Test-BridgeActivity {
     $viaProxy = Get-ObjectValue $status 'viaProxy' $null
     $viaPid = Get-ObjectValue $viaProxy 'pid' $null
     return (Test-ProcessAlive $bridgePid) -or (Test-ProcessAlive $viaPid)
+}
+
+function Update-PrimaryActionButton {
+    $recorder = $modeCombo.Text -eq 'Bedrock packet recorder'
+    $stopping = $null -ne $script:StopProcess -and -not $script:StopProcess.HasExited
+    $running = Test-BridgeActivity
+    if ($stopping) {
+        $startButton.Text = 'Stopping...'
+        $startButton.Enabled = $false
+    } elseif ($running) {
+        $startButton.Text = if ($recorder) { 'Stop Recorder' } else { 'Stop Bridge' }
+        $startButton.Enabled = $true
+    } else {
+        $startButton.Text = if ($recorder) { 'Start Recorder' } else { 'Start Bridge' }
+        $startButton.Enabled = $null -ne (Get-CurrentProfile)
+    }
 }
 
 function Start-UpdateInstall {
@@ -1195,22 +1250,100 @@ function Complete-UpdateCheck {
 }
 
 function Set-SupportUploadDestination {
-    $prompt = @'
-Optional: enter an HTTPS upload endpoint or a shared/synced folder.
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = 'JavaRock Support Inbox'
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = [Windows.Forms.FormBorderStyle]::FixedDialog
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ClientSize = New-Object Drawing.Size(570, 215)
+    $dialog.Font = $form.Font
 
-HTTP endpoints must accept the ZIP as a PUT request. A bearer token can be supplied through JAVAROCK_SUPPORT_UPLOAD_TOKEN.
+    $description = New-Object System.Windows.Forms.Label
+    $description.Text = 'Enter the private inbox URL and access code supplied by the project maintainer.'
+    $description.Location = New-Object Drawing.Point(16, 15)
+    $description.Size = New-Object Drawing.Size(535, 36)
+    $dialog.Controls.Add($description)
 
-Leave this blank to keep support ZIPs on this computer.
-'@
-    $value = [Microsoft.VisualBasic.Interaction]::InputBox(
-        $prompt,
-        'JavaRock support destination',
-        $script:SupportUploadDestination
-    ).Trim()
-    $script:SupportUploadDestination = $value
+    $destinationLabel = New-Object System.Windows.Forms.Label
+    $destinationLabel.Text = 'Inbox URL'
+    $destinationLabel.Location = New-Object Drawing.Point(16, 58)
+    $destinationLabel.AutoSize = $true
+    $dialog.Controls.Add($destinationLabel)
+
+    $destinationField = New-Object System.Windows.Forms.TextBox
+    $destinationField.Location = New-Object Drawing.Point(16, 78)
+    $destinationField.Size = New-Object Drawing.Size(535, 25)
+    $destinationField.Text = $script:SupportUploadDestination
+    $dialog.Controls.Add($destinationField)
+
+    $codeLabel = New-Object System.Windows.Forms.Label
+    $codeLabel.Text = 'Access code'
+    $codeLabel.Location = New-Object Drawing.Point(16, 114)
+    $codeLabel.AutoSize = $true
+    $dialog.Controls.Add($codeLabel)
+
+    $codeField = New-Object System.Windows.Forms.TextBox
+    $codeField.Location = New-Object Drawing.Point(16, 134)
+    $codeField.Size = New-Object Drawing.Size(415, 25)
+    $codeField.UseSystemPasswordChar = $true
+    $codeField.Text = $script:SupportUploadToken
+    $dialog.Controls.Add($codeField)
+
+    $showCode = New-Object System.Windows.Forms.CheckBox
+    $showCode.Text = 'Show code'
+    $showCode.Location = New-Object Drawing.Point(441, 136)
+    $showCode.AutoSize = $true
+    $showCode.Add_CheckedChanged({ $codeField.UseSystemPasswordChar = -not $showCode.Checked })
+    $dialog.Controls.Add($showCode)
+
+    $saveButton = New-Object System.Windows.Forms.Button
+    $saveButton.Text = 'Save'
+    $saveButton.Location = New-Object Drawing.Point(375, 174)
+    $saveButton.Size = New-Object Drawing.Size(85, 29)
+    $saveButton.DialogResult = [Windows.Forms.DialogResult]::OK
+    $dialog.Controls.Add($saveButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = 'Cancel'
+    $cancelButton.Location = New-Object Drawing.Point(466, 174)
+    $cancelButton.Size = New-Object Drawing.Size(85, 29)
+    $cancelButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
+    $dialog.Controls.Add($cancelButton)
+    $dialog.AcceptButton = $saveButton
+    $dialog.CancelButton = $cancelButton
+
+    if ($script:DarkMode) {
+        $dialog.BackColor = [Drawing.Color]::FromArgb(32, 35, 40)
+        $description.ForeColor = [Drawing.Color]::FromArgb(230, 232, 235)
+        $destinationLabel.ForeColor = $description.ForeColor
+        $codeLabel.ForeColor = $description.ForeColor
+        $showCode.ForeColor = $description.ForeColor
+        foreach ($field in @($destinationField, $codeField)) {
+            $field.BackColor = [Drawing.Color]::FromArgb(51, 55, 61)
+            $field.ForeColor = [Drawing.Color]::FromArgb(198, 203, 211)
+            [void][JavaRockNativeWindow]::SetWindowTheme($field.Handle, 'DarkMode_Explorer', $null)
+        }
+        foreach ($button in @($saveButton, $cancelButton)) {
+            $button.FlatStyle = [Windows.Forms.FlatStyle]::Flat
+            $button.BackColor = [Drawing.Color]::FromArgb(43, 47, 53)
+            $button.ForeColor = $description.ForeColor
+            $button.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(76, 82, 91)
+        }
+        [JavaRockNativeWindow]::SetImmersiveDarkMode($dialog.Handle, $true)
+    }
+
+    $result = $dialog.ShowDialog($form)
+    if ($result -ne [Windows.Forms.DialogResult]::OK) {
+        $dialog.Dispose()
+        return
+    }
+    $script:SupportUploadDestination = $destinationField.Text.Trim()
+    $script:SupportUploadToken = $codeField.Text.Trim()
+    $dialog.Dispose()
     Save-Preferences
-    if ($value) {
-        Add-Log 'gui' 'Support ZIP destination saved. Authentication tokens are never stored in the launcher preferences.'
+    if ($script:SupportUploadDestination) {
+        Add-Log 'gui' 'Support inbox settings saved. The access code is protected for this Windows user.'
     } else {
         Add-Log 'gui' 'Automatic support ZIP sending is disabled; ZIPs will stay in the local support-bundles folder.'
     }
@@ -1250,15 +1383,21 @@ function Start-SupportBundle {
         '-RuntimeDirectory', $RuntimeDir,
         '-ResultFile', $SupportResultFile
     )
-    if ($script:SupportUploadDestination) {
+    $supportEnvironment = @{}
+    $httpDestination = $script:SupportUploadDestination -match '^https?://'
+    $uploadConfigured = $script:SupportUploadDestination -and (-not $httpDestination -or $script:SupportUploadToken)
+    if ($uploadConfigured) {
         $arguments += @('-UploadDestination', $script:SupportUploadDestination)
+        if ($script:SupportUploadToken) { $supportEnvironment['JAVAROCK_SUPPORT_UPLOAD_TOKEN'] = $script:SupportUploadToken }
+    } elseif ($httpDestination) {
+        Add-Log 'support' 'No support access code is saved. This ZIP will stay on this computer; open Diagnostics > Support upload settings to connect the inbox.'
     }
 
     try {
         $supportButton.Enabled = $false
         $supportButton.Text = 'Collecting...'
         $createSupportMenuItem.Enabled = $false
-        $script:SupportProcess = Start-RedirectedProcess -FilePath 'powershell.exe' -Arguments $arguments -StdoutPath $SupportStdoutLog -StderrPath $SupportStderrLog
+        $script:SupportProcess = Start-RedirectedProcess -FilePath 'powershell.exe' -Arguments $arguments -StdoutPath $SupportStdoutLog -StderrPath $SupportStderrLog -Environment $supportEnvironment
         Add-Log 'support' 'Collecting logs and packet census files in the background...'
     } catch {
         $supportButton.Enabled = $true
@@ -1294,12 +1433,16 @@ function Complete-SupportBundle {
 
     $success = [bool](Get-ObjectValue $result 'success' $false)
     $uploaded = [bool](Get-ObjectValue $result 'uploaded' $false)
+    $uploadFailed = [bool](Get-ObjectValue $result 'uploadFailed' $false)
+    $uploadMessage = [string](Get-ObjectValue $result 'uploadMessage' '')
     $bundlePath = [string](Get-ObjectValue $result 'bundlePath' '')
     $message = [string](Get-ObjectValue $result 'message' 'Support bundle finished.')
     if ($success) {
         Add-Log 'support' "$message $bundlePath"
         $detail = if ($uploaded) {
             "The support ZIP was created and sent to the configured destination.`r`n`r`nA local copy is at:`r`n$bundlePath"
+        } elseif ($uploadFailed) {
+            "The support ZIP was created, but it could not be sent after three attempts.`r`n`r`n$uploadMessage`r`n`r`nThe ZIP is still available at:`r`n$bundlePath"
         } else {
             "The support ZIP is ready:`r`n`r`n$bundlePath`r`n`r`nSet an upload destination under Diagnostics to send future bundles automatically."
         }
@@ -1307,7 +1450,7 @@ function Complete-SupportBundle {
             $detail,
             'JavaRock support ZIP ready',
             [Windows.Forms.MessageBoxButtons]::OK,
-            [Windows.Forms.MessageBoxIcon]::Information
+            $(if ($uploadFailed) { [Windows.Forms.MessageBoxIcon]::Warning } else { [Windows.Forms.MessageBoxIcon]::Information })
         )
         if (-not $uploaded -and $bundlePath) {
             Start-Process -FilePath 'explorer.exe' -ArgumentList (Quote-NativeArgument (Split-Path -Parent $bundlePath))
@@ -1329,8 +1472,10 @@ $logoutButton.Add_Click({ Remove-AccountProfile })
 $logoutMenuItem.Add_Click({ Remove-AccountProfile })
 $refreshButton.Add_Click({ Refresh-Realms })
 $refreshMenuItem.Add_Click({ Refresh-Realms })
-$startButton.Add_Click({ Start-BridgeOrRecorder })
-$stopButton.Add_Click({ Stop-BridgeOrRecorder })
+$startButton.Add_Click({
+    if (Test-BridgeActivity) { Stop-BridgeOrRecorder } else { Start-BridgeOrRecorder }
+    Update-PrimaryActionButton
+})
 $logsButton.Add_Click({ Start-Process -FilePath 'explorer.exe' -ArgumentList (Quote-NativeArgument $RuntimeDir) })
 $supportButton.Add_Click({ Start-SupportBundle })
 $createSupportMenuItem.Add_Click({ Start-SupportBundle })
@@ -1428,6 +1573,7 @@ $timer.Add_Tick({
     $bridgeText = if ($bridgePid) { "$bridgePid $(if (Test-ProcessAlive $bridgePid) { 'running' } else { 'stopped' })" } else { '-' }
     $viaText = if ($viaPid) { "$viaPid $(if (Test-ProcessAlive $viaPid) { 'running' } else { 'stopped' })" } else { '-' }
     $pidStatus.Text = "Bridge: $bridgeText   ViaProxy: $viaText"
+    Update-PrimaryActionButton
     if ($null -ne $script:RealmProcess -and -not $script:RealmProcess.HasExited -and $null -ne $script:RealmRefreshStartedAt) {
         $elapsedSeconds = [Math]::Floor(([DateTime]::UtcNow - $script:RealmRefreshStartedAt).TotalSeconds)
         $state = "refreshing realms ($elapsedSeconds s)"

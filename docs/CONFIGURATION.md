@@ -26,6 +26,12 @@ Realm names are matched exactly first. A partial name is accepted only when it i
 | Minecraft Java client | `localhost:25565` |
 | Local Bedrock recorder client | `127.0.0.1:19133` |
 
+## Support Inbox
+
+The project support-inbox URL is included in the launcher, but uploads require an access code from the project maintainer. Open **Diagnostics > Support upload settings**, enter the code, and save it once. Windows encrypts the saved code for the current user.
+
+Support ZIPs remain under `.runtime/support-bundles/` after sending. The private inbox deletes uploaded bundles after 30 days.
+
 ## Optional `.env`
 
 Copy `.env.example` to `.env` only when changing advanced defaults. Never commit `.env`.

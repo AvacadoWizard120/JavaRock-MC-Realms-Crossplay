@@ -116,6 +116,23 @@ function makeOutboundRelay (downstreamMode = 'viabedrock') {
   assert(request.requests.some(entry => entry.x === 0 && entry.y === 5 && entry.z === 0))
 }
 
+assert.strictEqual(buildSpawnSupportSubchunkRequest(null, { x: 5, y: 0, z: 42 }), null)
+assert.strictEqual(buildSpawnSupportSubchunkRequest({
+  player_position: { x: 86.03, y: 65.62, z: 673.27 }
+}, null), null)
+
+{
+  const { relay } = makeOutboundRelay()
+  relay.upstream = {
+    startGameData: { player_position: { x: 86.03, y: 65.62, z: 673.27 } }
+  }
+  relay.latestSyntheticSubchunkOrigin = null
+  assert.strictEqual(
+    relay.delayLocalPlayerSpawnUntilSupportTerrain('play_status', { status: 'player_spawn' }, 'missing-origin-smoke'),
+    false
+  )
+}
+
 {
   const { relay, sentPackets, shimRequests } = makeOutboundRelay()
   const realmRequests = []
