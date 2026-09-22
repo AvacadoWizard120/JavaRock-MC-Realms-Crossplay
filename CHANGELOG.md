@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.91 - 2026-09-21
+
+- Fixed Realm signaling messages that arrive across more than one WebSocket frame.
+- A failed Realm connection now kicks the Java client promptly instead of leaving it on Joining World for several minutes.
+- Added a Support ZIP button for logs, the SQLite packet ledger, and recent packet census runs. Microsoft sign-in caches and raw packet journals stay out of the ZIP.
+- Support ZIPs can be sent automatically to a configured HTTPS endpoint or shared folder.
+- Dark mode now applies to the log scrollbar and other native text controls.
+
 ## 0.3.90 - 2026-09-21
 
 - Fixed Java connections being reset immediately after ViaProxy accepted the player login.

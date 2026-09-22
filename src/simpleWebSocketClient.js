@@ -109,10 +109,46 @@ class SimpleWebSocketClient extends EventEmitter {
     super()
     this.socket = socket
     this.buffer = Buffer.alloc(0)
+    this.fragmentOpcode = null
+    this.fragmentChunks = []
+    this.fragmentLength = 0
+    this.closeEmitted = false
 
     socket.on('data', chunk => this.handleData(chunk))
-    socket.on('close', hadError => this.emit('close', hadError))
+    socket.on('close', hadError => this.emitClose(hadError))
     socket.on('error', error => this.emit('error', error))
+  }
+
+  emitClose (hadError) {
+    if (this.closeEmitted) return
+    this.closeEmitted = true
+    this.emit('close', hadError)
+  }
+
+  emitMessage (opcode, payload) {
+    if (opcode === 0x1) this.emit('message', payload.toString('utf8'))
+    else this.emit('message', payload)
+  }
+
+  protocolError (message) {
+    const error = new Error(`WebSocket protocol error: ${message}`)
+    error.code = 'WEBSOCKET_PROTOCOL_ERROR'
+    if (this.listenerCount('error') > 0) this.emit('error', error)
+    this.terminate()
+  }
+
+  appendFragment (payload) {
+    this.fragmentChunks.push(payload)
+    this.fragmentLength += payload.length
+  }
+
+  finishFragment () {
+    const opcode = this.fragmentOpcode
+    const payload = Buffer.concat(this.fragmentChunks, this.fragmentLength)
+    this.fragmentOpcode = null
+    this.fragmentChunks = []
+    this.fragmentLength = 0
+    this.emitMessage(opcode, payload)
   }
 
   handleData (chunk) {
@@ -123,15 +159,38 @@ class SimpleWebSocketClient extends EventEmitter {
       if (!decoded) return
 
       this.buffer = decoded.rest
-      const { opcode, payload } = decoded.frame
+      const { fin, opcode, payload } = decoded.frame
 
-      if (opcode === 0x1) this.emit('message', payload.toString('utf8'))
-      else if (opcode === 0x2) this.emit('message', payload)
-      else if (opcode === 0x8) {
+      if ((opcode & 0x08) !== 0 && !fin) {
+        this.protocolError('control frames cannot be fragmented')
+        return
+      }
+
+      if (opcode === 0x0) {
+        if (this.fragmentOpcode == null) {
+          this.protocolError('received a continuation frame without an open message')
+          return
+        }
+        this.appendFragment(payload)
+        if (fin) this.finishFragment()
+      } else if (opcode === 0x1 || opcode === 0x2) {
+        if (this.fragmentOpcode != null) {
+          this.protocolError('received a new data frame before the fragmented message finished')
+          return
+        }
+        if (fin) this.emitMessage(opcode, payload)
+        else {
+          this.fragmentOpcode = opcode
+          this.appendFragment(payload)
+        }
+      } else if (opcode === 0x8) {
         this.socket.end()
-        this.emit('close', false)
+        this.emitClose(false)
       } else if (opcode === 0x9) {
         this.socket.write(encodeFrame(payload, 0x0a))
+      } else if (opcode !== 0x0a) {
+        this.protocolError(`unsupported opcode 0x${opcode.toString(16)}`)
+        return
       }
     }
   }

@@ -31,7 +31,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($zip)
 try {
     $names = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($required in @('START-JAVAROCK.bat', 'README-FIRST.txt', 'javarock-release-manifest.json', 'scripts/Start-JavaRock.ps1', 'scripts/JavaRock-Gui.ps1', 'scripts/Update-JavaRock.ps1', 'scripts/javarock-update-http.cjs', 'src/index.js')) {
+    foreach ($required in @('START-JAVAROCK.bat', 'README-FIRST.txt', 'javarock-release-manifest.json', 'scripts/Start-JavaRock.ps1', 'scripts/JavaRock-Gui.ps1', 'scripts/New-JavaRockSupportBundle.ps1', 'scripts/Update-JavaRock.ps1', 'scripts/javarock-update-http.cjs', 'src/index.js')) {
         if ($names -notcontains $required) { throw "Release ZIP is missing $required." }
     }
     $forbiddenArchivePath = 'bridge-gui|bridgeGui|(?:^|/)(?:node_modules|packet-census|packet-logs|logs|\.auth|\.auth-profiles|\.runtime|\.runtime-codex|\.runtime-desktop)(?:/|$)|(?:^|/)(?:accounts|launcher_accounts|profiles|saves)\.json$|(?:^|/)[0-9a-f]{6}_(?:msal|live|sisu|xbl|bed|mca|mcs|pfb)-cache\.json$'

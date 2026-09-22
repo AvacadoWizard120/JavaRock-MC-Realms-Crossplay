@@ -135,6 +135,7 @@ class NetherNetJsonRpcDataChannelSession extends EventEmitter {
 
 function parseSignalPayload (payload) {
   const text = Buffer.isBuffer(payload) ? payload.toString('utf8') : String(payload)
+  if (!text.trim()) return null
   return JSON.parse(text)
 }
 
@@ -688,6 +689,10 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
 
   function handleMessage (payload) {
     const message = parseSignalPayload(payload)
+    if (message == null) {
+      log('[nethernet-jsonrpc] Ignoring an empty WebSocket data message.')
+      return
+    }
     messages.push(message)
     session?.emit('signal', message)
 

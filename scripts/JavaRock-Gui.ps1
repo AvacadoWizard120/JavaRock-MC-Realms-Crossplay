@@ -69,6 +69,7 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $PackageInfo = Get-Content -LiteralPath (Join-Path $ProjectRoot 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $CurrentVersion = [string]$PackageInfo.version
 $UpdaterScript = Join-Path $PSScriptRoot 'Update-JavaRock.ps1'
+$SupportBundleScript = Join-Path $PSScriptRoot 'New-JavaRockSupportBundle.ps1'
 $DefaultUpstreamBedrockVersion = ''
 Push-Location $ProjectRoot
 try {
@@ -114,6 +115,9 @@ $StopStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-stop.err.log'
 $UpdateStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-update.out.log'
 $UpdateStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-update.err.log'
 $UpdateResultFile = Join-Path $RuntimeDir 'bridge-windows-gui-update-result.json'
+$SupportStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-support.out.log'
+$SupportStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-support.err.log'
+$SupportResultFile = Join-Path $RuntimeDir 'bridge-windows-gui-support-result.json'
 $PreferencesFile = Join-Path $RuntimeDir 'bridge-windows-gui-preferences.json'
 
 function Read-JsonFile {
@@ -136,6 +140,13 @@ function Write-JsonFile {
     [IO.Directory]::CreateDirectory((Split-Path -Parent $Path)) | Out-Null
     $json = $Value | ConvertTo-Json -Depth 8
     [IO.File]::WriteAllText($Path, "$json`r`n", [Text.UTF8Encoding]::new($false))
+}
+
+function Save-Preferences {
+    Write-JsonFile -Path $PreferencesFile -Value ([ordered]@{
+        darkMode = [bool]$script:DarkMode
+        supportUploadDestination = [string]$script:SupportUploadDestination
+    })
 }
 
 function Get-ObjectValue {
@@ -390,15 +401,18 @@ $script:RealmRefreshStartedAt = $null
 $script:RealmRefreshTimeoutMs = 130000
 $script:StopProcess = $null
 $script:UpdateProcess = $null
+$script:SupportProcess = $null
 $script:UpdateCheckManual = $false
 $script:UpdatePromptedVersion = ''
 $script:InstallingUpdate = $false
 $script:LogOffsets = @{}
 $script:LogBox = $null
 $script:DarkMode = $false
+$script:SupportUploadDestination = ''
 
 $preferences = Read-JsonFile -Path $PreferencesFile
 $script:DarkMode = [bool](Get-ObjectValue $preferences 'darkMode' $false)
+$script:SupportUploadDestination = [string](Get-ObjectValue $preferences 'supportUploadDestination' '')
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "JavaRock $CurrentVersion"
@@ -421,6 +435,11 @@ $darkMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Dark mode')
 $darkMenuItem.CheckOnClick = $true
 $darkMenuItem.Checked = $script:DarkMode
 [void]$viewMenu.DropDownItems.Add($darkMenuItem)
+$diagnosticsMenu = New-Object System.Windows.Forms.ToolStripMenuItem('Diagnostics')
+$createSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Create support ZIP...')
+$configureSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Set upload destination...')
+[void]$diagnosticsMenu.DropDownItems.Add($createSupportMenuItem)
+[void]$diagnosticsMenu.DropDownItems.Add($configureSupportMenuItem)
 $helpMenu = New-Object System.Windows.Forms.ToolStripMenuItem('Help')
 $checkUpdatesMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Check for updates...')
 $versionMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem("JavaRock $CurrentVersion")
@@ -430,6 +449,7 @@ $versionMenuItem.Enabled = $false
 [void]$helpMenu.DropDownItems.Add($versionMenuItem)
 [void]$menu.Items.Add($accountMenu)
 [void]$menu.Items.Add($viewMenu)
+[void]$menu.Items.Add($diagnosticsMenu)
 [void]$menu.Items.Add($helpMenu)
 $form.MainMenuStrip = $menu
 $form.Controls.Add($menu)
@@ -602,23 +622,29 @@ $logsButton.Location = New-Object Drawing.Point(229, 145)
 $logsButton.Size = New-Object Drawing.Size(100, 32)
 $launchGroup.Controls.Add($logsButton)
 
+$supportButton = New-Object System.Windows.Forms.Button
+$supportButton.Text = 'Support ZIP'
+$supportButton.Location = New-Object Drawing.Point(339, 145)
+$supportButton.Size = New-Object Drawing.Size(110, 32)
+$launchGroup.Controls.Add($supportButton)
+
 $joinCaption = New-Object System.Windows.Forms.Label
 $joinCaption.Text = 'Join'
-$joinCaption.Location = New-Object Drawing.Point(355, 151)
+$joinCaption.Location = New-Object Drawing.Point(468, 151)
 $joinCaption.AutoSize = $true
 $launchGroup.Controls.Add($joinCaption)
 
 $joinStatus = New-Object System.Windows.Forms.Label
 $joinStatus.Text = 'localhost:25565'
-$joinStatus.Location = New-Object Drawing.Point(392, 151)
+$joinStatus.Location = New-Object Drawing.Point(505, 151)
 $joinStatus.Size = New-Object Drawing.Size(145, 22)
 $launchGroup.Controls.Add($joinStatus)
 
 $pidStatus = New-Object System.Windows.Forms.Label
 $pidStatus.Text = 'Bridge: -   ViaProxy: -'
 $pidStatus.Anchor = 'Top,Left,Right'
-$pidStatus.Location = New-Object Drawing.Point(545, 151)
-$pidStatus.Size = New-Object Drawing.Size(410, 22)
+$pidStatus.Location = New-Object Drawing.Point(655, 151)
+$pidStatus.Size = New-Object Drawing.Size(300, 22)
 $launchGroup.Controls.Add($pidStatus)
 
 $logGroup = New-Object System.Windows.Forms.GroupBox
@@ -725,12 +751,13 @@ function Set-DarkTheme {
     [JavaRockNativeWindow]::SetImmersiveDarkMode($form.Handle, $Enabled)
     $menu.BackColor = $panel
     $menu.ForeColor = $foreground
-    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $helpMenu, $checkUpdatesMenuItem, $versionMenuItem)) {
+    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $versionMenuItem)) {
         $menuItem.BackColor = $panel
         $menuItem.ForeColor = $foreground
     }
     $accountMenu.DropDown.BackColor = $panel
     $viewMenu.DropDown.BackColor = $panel
+    $diagnosticsMenu.DropDown.BackColor = $panel
     $helpMenu.DropDown.BackColor = $panel
     foreach ($group in @($accountGroup, $launchGroup, $logGroup)) {
         $group.BackColor = $background
@@ -752,10 +779,15 @@ function Set-DarkTheme {
         [void][JavaRockNativeWindow]::SetWindowTheme($control.Handle, $nativeTheme, $null)
         $control.Invalidate()
     }
+    $nativeFieldTheme = if ($Enabled) { 'DarkMode_Explorer' } else { $null }
+    foreach ($control in @($manualRealm, $targetVersion, $upstreamVersion, $logBox)) {
+        [void][JavaRockNativeWindow]::SetWindowTheme($control.Handle, $nativeFieldTheme, $null)
+        $control.Invalidate()
+    }
     $logBox.BackColor = $logField
     $logBox.ForeColor = $fieldText
     foreach ($control in @($topStatus, $accountStatus, $pidStatus)) { $control.ForeColor = $mutedForeground }
-    foreach ($button in @($loginButton, $logoutButton, $refreshButton, $startButton, $stopButton, $logsButton)) {
+    foreach ($button in @($loginButton, $logoutButton, $refreshButton, $startButton, $stopButton, $logsButton, $supportButton)) {
         $button.FlatStyle = if ($Enabled) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
         $button.UseVisualStyleBackColor = -not $Enabled
         $button.BackColor = $panel
@@ -766,7 +798,7 @@ function Set-DarkTheme {
     }
     $form.Invalidate($true)
     if (-not $SmokeTest -and -not $WindowSmokeTest) {
-        Write-JsonFile -Path $PreferencesFile -Value ([ordered]@{ darkMode = $Enabled })
+        Save-Preferences
     }
 }
 
@@ -1162,6 +1194,135 @@ function Complete-UpdateCheck {
     Show-UpdateCheckResult -Result $result -Manual $manual
 }
 
+function Set-SupportUploadDestination {
+    $prompt = @'
+Optional: enter an HTTPS upload endpoint or a shared/synced folder.
+
+HTTP endpoints must accept the ZIP as a PUT request. A bearer token can be supplied through JAVAROCK_SUPPORT_UPLOAD_TOKEN.
+
+Leave this blank to keep support ZIPs on this computer.
+'@
+    $value = [Microsoft.VisualBasic.Interaction]::InputBox(
+        $prompt,
+        'JavaRock support destination',
+        $script:SupportUploadDestination
+    ).Trim()
+    $script:SupportUploadDestination = $value
+    Save-Preferences
+    if ($value) {
+        Add-Log 'gui' 'Support ZIP destination saved. Authentication tokens are never stored in the launcher preferences.'
+    } else {
+        Add-Log 'gui' 'Automatic support ZIP sending is disabled; ZIPs will stay in the local support-bundles folder.'
+    }
+}
+
+function Start-SupportBundle {
+    if ($null -ne $script:SupportProcess -and -not $script:SupportProcess.HasExited) {
+        Add-Log 'support' 'A support ZIP is already being created.'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $SupportBundleScript -PathType Leaf)) {
+        [void][Windows.Forms.MessageBox]::Show(
+            'The support bundle tool is missing. Install the latest JavaRock release and try again.',
+            'Support tool missing',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Error
+        )
+        return
+    }
+
+    $answer = [Windows.Forms.MessageBox]::Show(
+        "This creates a ZIP containing JavaRock logs, the packet ledger, and the three most recent packet census runs.`r`n`r`nMicrosoft sign-in caches, .env files, and raw packet journals are excluded. Packet census data can still describe player and world activity.`r`n`r`nCreate the support ZIP?",
+        'Create JavaRock support ZIP',
+        [Windows.Forms.MessageBoxButtons]::YesNo,
+        [Windows.Forms.MessageBoxIcon]::Information,
+        [Windows.Forms.MessageBoxDefaultButton]::Button1
+    )
+    if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+
+    if (Test-Path -LiteralPath $SupportResultFile -PathType Leaf) { Remove-Item -LiteralPath $SupportResultFile -Force }
+    Reset-LogCursor 'support-out'
+    Reset-LogCursor 'support-err'
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', $SupportBundleScript,
+        '-ProjectRoot', $ProjectRoot,
+        '-RuntimeDirectory', $RuntimeDir,
+        '-ResultFile', $SupportResultFile
+    )
+    if ($script:SupportUploadDestination) {
+        $arguments += @('-UploadDestination', $script:SupportUploadDestination)
+    }
+
+    try {
+        $supportButton.Enabled = $false
+        $supportButton.Text = 'Collecting...'
+        $createSupportMenuItem.Enabled = $false
+        $script:SupportProcess = Start-RedirectedProcess -FilePath 'powershell.exe' -Arguments $arguments -StdoutPath $SupportStdoutLog -StderrPath $SupportStderrLog
+        Add-Log 'support' 'Collecting logs and packet census files in the background...'
+    } catch {
+        $supportButton.Enabled = $true
+        $supportButton.Text = 'Support ZIP'
+        $createSupportMenuItem.Enabled = $true
+        [void][Windows.Forms.MessageBox]::Show(
+            $_.Exception.Message,
+            'Support ZIP failed',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Error
+        )
+    }
+}
+
+function Complete-SupportBundle {
+    if ($null -eq $script:SupportProcess -or -not $script:SupportProcess.HasExited) { return }
+    $exitCode = $script:SupportProcess.ExitCode
+    $script:SupportProcess.Dispose()
+    $script:SupportProcess = $null
+    $supportButton.Enabled = $true
+    $supportButton.Text = 'Support ZIP'
+    $createSupportMenuItem.Enabled = $true
+
+    $result = Read-JsonFile -Path $SupportResultFile
+    if ($null -eq $result) {
+        $result = [pscustomobject]@{
+            success = $false
+            uploaded = $false
+            bundlePath = ''
+            message = "Support bundle process ended with exit code $exitCode and returned no result."
+        }
+    }
+
+    $success = [bool](Get-ObjectValue $result 'success' $false)
+    $uploaded = [bool](Get-ObjectValue $result 'uploaded' $false)
+    $bundlePath = [string](Get-ObjectValue $result 'bundlePath' '')
+    $message = [string](Get-ObjectValue $result 'message' 'Support bundle finished.')
+    if ($success) {
+        Add-Log 'support' "$message $bundlePath"
+        $detail = if ($uploaded) {
+            "The support ZIP was created and sent to the configured destination.`r`n`r`nA local copy is at:`r`n$bundlePath"
+        } else {
+            "The support ZIP is ready:`r`n`r`n$bundlePath`r`n`r`nSet an upload destination under Diagnostics to send future bundles automatically."
+        }
+        [void][Windows.Forms.MessageBox]::Show(
+            $detail,
+            'JavaRock support ZIP ready',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Information
+        )
+        if (-not $uploaded -and $bundlePath) {
+            Start-Process -FilePath 'explorer.exe' -ArgumentList (Quote-NativeArgument (Split-Path -Parent $bundlePath))
+        }
+    } else {
+        Add-Log 'support' "Support ZIP failed: $message"
+        [void][Windows.Forms.MessageBox]::Show(
+            $message,
+            'Support ZIP failed',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Error
+        )
+    }
+}
+
 $loginButton.Add_Click({ Add-AccountProfile })
 $loginMenuItem.Add_Click({ Add-AccountProfile })
 $logoutButton.Add_Click({ Remove-AccountProfile })
@@ -1171,6 +1332,9 @@ $refreshMenuItem.Add_Click({ Refresh-Realms })
 $startButton.Add_Click({ Start-BridgeOrRecorder })
 $stopButton.Add_Click({ Stop-BridgeOrRecorder })
 $logsButton.Add_Click({ Start-Process -FilePath 'explorer.exe' -ArgumentList (Quote-NativeArgument $RuntimeDir) })
+$supportButton.Add_Click({ Start-SupportBundle })
+$createSupportMenuItem.Add_Click({ Start-SupportBundle })
+$configureSupportMenuItem.Add_Click({ Set-SupportUploadDestination })
 $checkUpdatesMenuItem.Add_Click({ Start-UpdateCheck -Manual $true })
 $modeCombo.Add_SelectedIndexChanged({ Update-ModeControls })
 $realmCombo.Add_SelectedIndexChanged({
@@ -1206,7 +1370,9 @@ $script:LogSources = @(
     [pscustomobject]@{ Path = $RealmStdoutLog; Key = 'realm-out'; Source = 'realms' },
     [pscustomobject]@{ Path = $RealmStderrLog; Key = 'realm-err'; Source = 'realms' },
     [pscustomobject]@{ Path = $StopStdoutLog; Key = 'stop-out'; Source = 'stop' },
-    [pscustomobject]@{ Path = $StopStderrLog; Key = 'stop-err'; Source = 'stop' }
+    [pscustomobject]@{ Path = $StopStderrLog; Key = 'stop-err'; Source = 'stop' },
+    [pscustomobject]@{ Path = $SupportStdoutLog; Key = 'support-out'; Source = 'support' },
+    [pscustomobject]@{ Path = $SupportStderrLog; Key = 'support-err'; Source = 'support' }
 )
 $timer.Add_Tick({
     foreach ($entry in $script:LogSources) {
@@ -1249,6 +1415,7 @@ $timer.Add_Tick({
         $script:StopProcess = $null
     }
     Complete-UpdateCheck
+    Complete-SupportBundle
 
     $status = Read-JsonFile -Path $StatusFile
     $state = [string](Get-ObjectValue $status 'state' 'stopped')

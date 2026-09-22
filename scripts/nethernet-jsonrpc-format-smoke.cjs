@@ -1,6 +1,7 @@
 'use strict'
 
 const assert = require('assert')
+const { EventEmitter } = require('events')
 const {
   addTurnCredentials,
   candidateType,
@@ -15,6 +16,7 @@ const {
   messageToNethernetSignals,
   normalizeReceiveMessageParams,
   parseSignalMessageString,
+  parseSignalPayload,
   parseTurnCredentialsMessage,
   randomUint64DecimalString,
   sanitizeSignalFrame,
@@ -22,11 +24,35 @@ const {
   summarizeSdpOffer
 } = require('../src/nethernetJsonRpcSignal')
 const {
+  SimpleWebSocketClient,
   encodeFrame,
   expectedAcceptKey,
   parseHandshakeResponse,
   tryDecodeFrame
 } = require('../src/simpleWebSocketClient')
+
+function encodeServerFrame (payload, opcode = 0x1, fin = true) {
+  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload), 'utf8')
+  assert(body.length < 126, 'Smoke-test server frame helper only supports short payloads.')
+  return Buffer.concat([
+    Buffer.from([(fin ? 0x80 : 0) | opcode, body.length]),
+    body
+  ])
+}
+
+function makeFakeSocket () {
+  const socket = new EventEmitter()
+  socket.destroyed = false
+  socket.writes = []
+  socket.write = (buffer, callback) => {
+    socket.writes.push(Buffer.from(buffer))
+    callback?.()
+    return true
+  }
+  socket.end = () => { socket.destroyed = true }
+  socket.destroy = () => { socket.destroyed = true }
+  return socket
+}
 
 function main () {
   const nethernetPackage = require('nethernet/package.json')
@@ -46,6 +72,9 @@ function main () {
     method: 'Method',
     id: 'id-1'
   })
+
+  assert.strictEqual(parseSignalPayload('   '), null)
+  assert.deepStrictEqual(parseSignalPayload('{"jsonrpc":"2.0"}'), { jsonrpc: '2.0' })
 
   assert.strictEqual(
     makeWebRtcInnerMessage('123', 'CONNECTREQUEST 42 v=0\r\nsdp'),
@@ -170,6 +199,17 @@ function main () {
   assert.strictEqual(decoded.frame.opcode, 1)
   assert.strictEqual(decoded.frame.payload.toString('utf8'), 'hello')
   assert.strictEqual(decoded.rest.length, 0)
+
+  const fragmentedSocket = makeFakeSocket()
+  const fragmentedClient = new SimpleWebSocketClient(fragmentedSocket)
+  const fragmentedMessages = []
+  fragmentedClient.on('message', message => fragmentedMessages.push(message))
+  fragmentedSocket.emit('data', encodeServerFrame('{"jsonrpc":', 0x1, false))
+  assert.deepStrictEqual(fragmentedMessages, [])
+  fragmentedSocket.emit('data', encodeServerFrame('', 0x9, true))
+  assert.strictEqual(fragmentedSocket.writes.length, 1)
+  fragmentedSocket.emit('data', encodeServerFrame('"2.0"}', 0x0, true))
+  assert.deepStrictEqual(fragmentedMessages, ['{"jsonrpc":"2.0"}'])
 
   const key = 'dGhlIHNhbXBsZSBub25jZQ=='
   assert.strictEqual(expectedAcceptKey(key), 's3pPLMBiTxaQ9kYGzzhZRbK+xOo=')
