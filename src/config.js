@@ -13,6 +13,13 @@ const CURRENT_REALM_BEDROCK_VERSION = currentRealmBedrockVersion()
 
 const STABLE_VIABEDROCK_VERSION = '1.26.45'
 
+function normalizeLocalViaBedrockVersion (value) {
+  const requested = String(value || '').trim().replace(/^Bedrock\s+/i, '')
+  return requested === STABLE_VIABEDROCK_VERSION
+    ? requested
+    : STABLE_VIABEDROCK_VERSION
+}
+
 function boolEnv (name, fallback = false) {
   const raw = process.env[name]
   if (raw == null || raw === '') return fallback
@@ -92,11 +99,13 @@ function loadConfig (argv = process.argv.slice(2)) {
   const viaProxyJar = firstDefined(args['viaproxy-jar'], args.viaProxyJar, process.env.VIAPROXY_JAR)
   const viaProxyRunDir = path.resolve(firstDefined(args['viaproxy-run-dir'], args.viaProxyRunDir, process.env.VIAPROXY_RUN_DIR, 'viaproxy-run'))
   const viaProxyTargetVersion = firstDefined(args['viaproxy-target-version'], args.viaProxyTargetVersion, process.env.VIAPROXY_TARGET_VERSION)
-  const viaProxyBedrockTargetVersion = firstDefined(args['viaproxy-bedrock-target-version'], args.viaProxyBedrockTargetVersion, process.env.VIAPROXY_BEDROCK_TARGET_VERSION, `Bedrock ${STABLE_VIABEDROCK_VERSION}`)
+  const requestedViaProxyBedrockTargetVersion = firstDefined(args['viaproxy-bedrock-target-version'], args.viaProxyBedrockTargetVersion, process.env.VIAPROXY_BEDROCK_TARGET_VERSION)
   const version = firstDefined(args.version, args['bedrock-version'], process.env.BEDROCK_VERSION)
   const bedrockRelayHost = firstDefined(args['bedrock-relay-host'], args.bedrockRelayHost, process.env.BEDROCK_RELAY_HOST, '127.0.0.1')
   const bedrockRelayPort = Number.parseInt(firstDefined(args['bedrock-relay-port'], args.bedrockRelayPort, process.env.BEDROCK_RELAY_PORT, '19133'), 10)
-  const bedrockRelayVersion = firstDefined(args['bedrock-relay-version'], args.bedrockRelayVersion, process.env.BEDROCK_RELAY_VERSION, STABLE_VIABEDROCK_VERSION)
+  const requestedBedrockRelayVersion = firstDefined(args['bedrock-relay-version'], args.bedrockRelayVersion, process.env.BEDROCK_RELAY_VERSION)
+  const bedrockRelayVersion = normalizeLocalViaBedrockVersion(requestedBedrockRelayVersion || requestedViaProxyBedrockTargetVersion)
+  const viaProxyBedrockTargetVersion = `Bedrock ${bedrockRelayVersion}`
   const bedrockRelayUpstreamVersion = firstDefined(args['bedrock-relay-upstream-version'], args.bedrockRelayUpstreamVersion, process.env.BEDROCK_RELAY_UPSTREAM_VERSION, version, CURRENT_REALM_BEDROCK_VERSION)
 
   const profilesFolder = path.resolve(firstDefined(args['profiles-folder'], process.env.PROFILES_FOLDER, '.auth'))
@@ -190,5 +199,6 @@ function loadConfig (argv = process.argv.slice(2)) {
 module.exports = {
   STABLE_VIABEDROCK_VERSION,
   loadConfig,
+  normalizeLocalViaBedrockVersion,
   parseArgs
 }

@@ -43,6 +43,9 @@ function isSensitiveField (key, parentPath) {
 
 function protectText (value) {
   return String(value)
+    .replace(/^(\s*\[\d+\]\s+)[^|\r\n]+(\s+\|\s+id=)[^|\r\n]+(\s+\|\s+owner=)(?:"[^"]*"|'[^']*'|.*?)(?=\s+state=|$)/gim, '$1[redacted]$2[redacted]$3[redacted]')
+    .replace(/^(\[realms\]\s+Selected:\s+)[^|\r\n]+(\s+\|\s+id=)[^\r\n]+$/gim, '$1[redacted]$2[redacted]')
+    .replace(/^(\[realm-json\]\s*\{[^\r\n]*)$/gim, line => line.replace(/("(?:id|name|owner)"\s*:\s*)(?:"[^"]*"|-?\d+)/gi, '$1"[redacted]"'))
     .replace(/[A-Z]:\\Users\\[^\\\r\n"']+/gi, '[user-home]')
     .replace(/(\b(?:access[_-]?token|refresh[_-]?token|authorization|credential|multiplayerToken|password|secret)\b\s*[:=]\s*)(?:Bearer\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[redacted]')
     .replace(/XBL3\.0\s+x=[^;\s]+;[^\s"']+/gi, 'XBL3.0 [redacted]')

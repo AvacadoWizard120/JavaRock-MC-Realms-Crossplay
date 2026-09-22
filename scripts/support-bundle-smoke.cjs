@@ -22,7 +22,7 @@ function write (file, value) {
 
 try {
   write(path.join(fixture, 'package.json'), '{"version":"9.9.9"}\n')
-  write(path.join(runtime, 'bridge-windows-gui-bridge.out.log'), 'profilesFolder: C:\\Users\\Private Person\\JavaRock\n"username":"PrivateName"\nRefreshing Realm list for PrivateName...\nSelected Realm: PrivateRealm (12345)\nRealm 12345 join endpoint request timed out.\n')
+  write(path.join(runtime, 'bridge-windows-gui-bridge.out.log'), 'profilesFolder: C:\\Users\\Private Person\\JavaRock\n"username":"PrivateName"\nRefreshing Realm list for PrivateName...\nSelected Realm: PrivateRealm (12345)\nRealm 12345 join endpoint request timed out.\n  [0] PrivateRealm | id=12345 | owner="PrivateOwner" state=OPEN\n[realm-json] {"index":0,"id":"12345","name":"PrivateRealm","owner":"PrivateOwner","state":"OPEN"}\n[realms] Selected: PrivateRealm | id=12345\n')
   write(path.join(runtime, 'bridge-status.json'), JSON.stringify({
     state: 'joining',
     realm: { id: '12345', name: 'PrivateRealm', owner: 'PrivateOwner' },
@@ -116,7 +116,9 @@ try {
   assert(!redactedLog.includes('PrivateName'))
   assert(!redactedLog.includes('PrivateRealm'))
   assert(!redactedLog.includes('12345'))
+  assert(!redactedLog.includes('PrivateOwner'))
   assert(redactedLog.includes('Realm [redacted] join endpoint request timed out.'))
+  assert(redactedLog.includes('[realm-json] {"index":0,"id":"[redacted]","name":"[redacted]","owner":"[redacted]","state":"OPEN"}'))
   assert(redactedLog.includes('[redacted]'))
 
   const redactedStatus = JSON.parse(fs.readFileSync(path.join(extracted, 'runtime', '.runtime', 'bridge-status.json'), 'utf8'))

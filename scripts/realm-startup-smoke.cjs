@@ -95,11 +95,16 @@ try {
 
   const root = path.resolve(__dirname, '..')
   const bridgeLauncher = fs.readFileSync(path.join(root, 'run-bridge-via-bedrock-relay-latest.ps1'), 'utf8')
+  const checkedLauncher = fs.readFileSync(path.join(root, 'run-checked-bridge-latest.ps1'), 'utf8')
   const recorderLauncher = fs.readFileSync(path.join(root, 'run-bedrock-packet-recorder-latest.ps1'), 'utf8')
   assert.doesNotMatch(bridgeLauncher, /REALM_JOIN_MAX_ATTEMPTS\) \{ \$env:REALM_JOIN_MAX_ATTEMPTS = "0"/)
   assert.doesNotMatch(recorderLauncher, /REALM_JOIN_MAX_ATTEMPTS\) \{ \$env:REALM_JOIN_MAX_ATTEMPTS = "0"/)
   assert.match(bridgeLauncher, /currentRealmBedrockVersion/)
   assert.match(recorderLauncher, /currentRealmBedrockVersion/)
+  assert.match(bridgeLauncher, /BEDROCK_RELAY_VERSION = \$StableViaBedrockVersion/)
+  assert.match(bridgeLauncher, /StableViaBedrockVersion = '1\.26\.45'/)
+  assert.doesNotMatch(bridgeLauncher, /BEDROCK_RELAY_VERSION = "1\.26\.30"/)
+  assert.match(checkedLauncher, /ViaProxyBedrockTargetVersion = "Bedrock 1\.26\.45"/)
 
   console.log(`Realm startup smoke check passed (Realm ${CURRENT_VERSION}, ViaBedrock ${STABLE_VIABEDROCK_VERSION}).`)
 } finally {

@@ -2,7 +2,7 @@ param(
   [string]$RealmName = "",
   [string]$RealmId = "",
   [int]$RealmIndex = -1,
-  [string]$ViaProxyBedrockTargetVersion = "Bedrock 1.26.30",
+  [string]$ViaProxyBedrockTargetVersion = "Bedrock 1.26.45",
   [string]$UpstreamBedrockVersion = "",
   [switch]$CheckOnly,
   [switch]$SkipChecks

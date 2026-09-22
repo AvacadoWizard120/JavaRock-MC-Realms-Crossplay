@@ -85,6 +85,11 @@ try {
   const runtimeIndex = fs.readFileSync(path.join(destination, 'src', 'index.js'), 'utf8')
   assert.doesNotMatch(runtimeIndex, /bridgeGui|bridge-gui|gui-port|localhost:8765/i)
 
+  const runtimeLauncher = fs.readFileSync(path.join(destination, 'run-bridge-via-bedrock-relay-latest.ps1'), 'utf8')
+  assert.match(runtimeLauncher, /StableViaBedrockVersion = '1\.26\.45'/)
+  assert.match(runtimeLauncher, /BEDROCK_RELAY_VERSION = \$StableViaBedrockVersion/)
+  assert.doesNotMatch(runtimeLauncher, /BEDROCK_RELAY_VERSION = "1\.26\.30"/)
+
   const help = spawnSync(process.execPath, [path.join(destination, 'src', 'index.js'), '--help'], {
     cwd: destination,
     encoding: 'utf8',
