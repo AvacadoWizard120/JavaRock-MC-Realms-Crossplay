@@ -10,7 +10,7 @@ npm run setup
 npm run check
 ```
 
-Use Node.js 20+ and JDK 17+. `npm run setup` downloads ViaProxy 3.4.12 and compiles the included ViaBedrock compatibility sources. JavaRock pins this version because ViaProxy 3.4.13 changes the ViaBedrock packet and generated-enum APIs used by the patch. The Windows GUI is implemented in PowerShell with Windows Forms and has no Python dependency.
+Use Node.js 20+ and JDK 17+. `npm run setup` downloads ViaProxy 3.4.13 and compiles the included ViaBedrock compatibility sources. This release supports Java Edition 26.3 and uses Bedrock 1.26.45 for the local ViaBedrock connection. The Windows GUI is implemented in PowerShell with Windows Forms and has no Python dependency.
 
 ## Useful Checks
 

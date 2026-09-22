@@ -199,7 +199,7 @@ function assertItemFrameMetadata () {
     'writeItemFrameInteraction(wrapper, entityId, itemFrame, location, entityTracker, inventoryContainer)',
     'ItemUseInventoryTransaction_ActionType.Place',
     'ItemUseInventoryTransaction_TriggerType.PlayerInput',
-    'PlayerAuthInputPacket_InputData.MissedSwing',
+    'PlayerAuthInputPacketPayload_InputData.MissedSwing',
     'PlayerActionType.StartDestroyBlock',
     'PlayerActionType.AbortDestroyBlock',
     'getBlockState(itemFrame.position())',
@@ -255,20 +255,21 @@ function assertModernLevelSoundCodec () {
   const handler = source.slice(start, end)
 
   for (const marker of [
-    'wrapper.read(BedrockTypes.STRING)',
-    'resolveLegacyLevelSoundEvent(soundIdentifier)',
-    'getBedrockToJavaSounds().get(soundIdentifier)',
+    'final String soundEvent = wrapper.read(BedrockTypes.STRING)',
+    'switch (soundEvent)',
+    'case "record.null"',
+    'case "note"',
     'wrapper.read(BedrockTypes.OPTIONAL_POSITION_3F)'
   ]) {
-    if (!handler.includes(marker)) throw new Error(`patched level sound translator is missing 1.26.30 marker: ${marker}`)
+    if (!handler.includes(marker)) throw new Error(`patched level sound translator is missing 1.26.45 marker: ${marker}`)
   }
   if (handler.includes('wrapper.read(BedrockTypes.UNSIGNED_VAR_INT)')) {
-    throw new Error('patched level sound translator still decodes the 1.26.30 string identifier as a numeric enum')
+    throw new Error('patched level sound translator still decodes the 1.26.45 string identifier as a numeric enum')
   }
 
   const worldEffectClass = bundledPatchedClassPath('net/raphimc/viabedrock/protocol/packet/WorldEffectPackets.class')
   const bytecode = run('javap', ['-c', '-p', worldEffectClass]).stdout
-  for (const marker of ['resolveLegacyLevelSoundEvent', 'normalizeSoundIdentifier', 'stripMinecraftNamespace']) {
+  for (const marker of ['tryFindSound', 'getBedrockLevelSoundEvents']) {
     if (!bytecode.includes(marker)) throw new Error(`patched WorldEffectPackets.class is missing modern sound helper: ${marker}`)
   }
 }
@@ -588,7 +589,7 @@ function assertMouseActionStateMachine () {
     'native_item_stack_response',
     'private void sendNativeCraftItemStackRequest(',
     'ItemStackRequestActionType.CraftRecipe',
-    'ItemStackRequestActionType.CraftResults_DEPRECATEDASKTYLAING',
+    'ItemStackRequestActionType.CraftResults',
     'ContainerEnumName.CreatedOutputContainer',
     'public boolean bridgePlaceRecipeFromBook(',
     'private void sendBatchedItemStackRequestMoves('
@@ -879,7 +880,7 @@ function assertCraftingTableBridge () {
 package net.raphimc.viabedrock.api.model.container;
 
 import net.raphimc.viabedrock.api.model.container.player.InventoryContainer;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerType;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
 
 public final class BridgeWorkbenchTagSmoke {
     private static void check(boolean value, String message) {

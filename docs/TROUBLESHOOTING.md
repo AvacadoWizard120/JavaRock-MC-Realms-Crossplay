@@ -32,7 +32,9 @@ JavaRock stops a Realm endpoint lookup after 45 seconds. A timeout or repeated `
 
 These can be protocol translation bugs. Reproduce the problem once, then click **Support ZIP** in the launcher. The ZIP includes the active logs, the current packet census run, and up to three completed census runs. Microsoft sign-in caches, `.env` files, launcher preferences, raw packet journals, and the binary packet ledger are left out.
 
-Testers can use **Diagnostics > Support upload settings** with the access code supplied by the project maintainer. JavaRock retries a failed send three times and keeps the ZIP under `.runtime/support-bundles/` whether sending succeeds or fails. Uploaded bundles remain private and expire after 30 days. Packet census data can still describe player and world activity, so review the confirmation before sending it.
+Testers can use **Diagnostics > Support upload settings** with the access code supplied by the project maintainer. JavaRock verifies its signed release files before sharing, encrypts the ZIP before it leaves the computer, and retries a failed send three times. The readable ZIP remains under `.runtime/support-bundles/` whether sending succeeds or fails. Uploaded bundles remain encrypted and expire after 30 days. Packet census data can still describe player and world activity, so review the confirmation before sending it.
+
+If JavaRock says remote sharing is disabled by an integrity failure, extract a fresh copy of the latest official release. Do not copy changed scripts into the new folder.
 
 ## ViaProxy Setup Failed
 

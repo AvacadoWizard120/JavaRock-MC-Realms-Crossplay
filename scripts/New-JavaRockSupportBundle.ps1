@@ -128,6 +128,8 @@ $uploaded = $false
 $uploadFailed = $false
 $uploadMessage = ''
 $remoteLocation = ''
+$encryptedUploadPath = ''
+$integrityVerified = $false
 
 try {
     $stageFull = [IO.Path]::GetFullPath($script:StageDirectory)
@@ -232,17 +234,42 @@ try {
 
     if (-not $NoUpload -and $UploadDestination) {
         try {
+            $integrityVerifier = Join-Path $PSScriptRoot 'verify-release-integrity.cjs'
+            if (-not (Test-Path -LiteralPath $integrityVerifier -PathType Leaf)) {
+                throw 'Remote sharing is disabled because the JavaRock integrity verifier is missing. Reinstall the latest official release.'
+            }
+            $verifyOutput = @(& node.exe $integrityVerifier --root $ProjectRoot 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                $detail = (@($verifyOutput | ForEach-Object { $_.ToString() }) -join ' ').Trim()
+                throw "Remote sharing is disabled because this JavaRock installation failed its signed integrity check. $detail"
+            }
+            $integrityVerified = $true
+            Write-Host '[JavaRock] Signed JavaRock files passed the integrity check.'
+
+            $envelopeTool = Join-Path $PSScriptRoot 'support-envelope.cjs'
+            if (-not (Test-Path -LiteralPath $envelopeTool -PathType Leaf)) {
+                throw 'Remote sharing is disabled because the support encryption tool is missing. Reinstall the latest official release.'
+            }
+            $encryptedUploadPath = "$bundlePath.jrsupport"
+            if (Test-Path -LiteralPath $encryptedUploadPath -PathType Leaf) { Remove-Item -LiteralPath $encryptedUploadPath -Force }
+            Write-Host '[JavaRock] Encrypting the support ZIP for the private inbox...'
+            & node.exe $envelopeTool encrypt $bundlePath $encryptedUploadPath | Out-Null
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $encryptedUploadPath -PathType Leaf)) {
+                throw 'The support ZIP could not be encrypted. Nothing was uploaded.'
+            }
+            $uploadName = [IO.Path]::GetFileName($encryptedUploadPath)
+
             if ($UploadDestination -match '^https?://') {
                 $headers = @{
-                    'X-JavaRock-Filename' = $bundleName
+                    'X-JavaRock-Filename' = $uploadName
                     'X-JavaRock-Version' = $version
                 }
                 if ($UploadToken) { $headers.Authorization = "Bearer $UploadToken" }
                 $lastUploadError = $null
                 foreach ($attempt in 1..3) {
                     try {
-                        Write-Host "[JavaRock] Uploading support ZIP (attempt $attempt of 3)..."
-                        $response = Invoke-WebRequest -Uri $UploadDestination -Method Put -InFile $bundlePath -ContentType 'application/zip' -Headers $headers -UseBasicParsing -TimeoutSec 60
+                        Write-Host "[JavaRock] Uploading encrypted support bundle (attempt $attempt of 3)..."
+                        $response = Invoke-WebRequest -Uri $UploadDestination -Method Put -InFile $encryptedUploadPath -ContentType 'application/vnd.javarock.support+encrypted' -Headers $headers -UseBasicParsing -TimeoutSec 60
                         if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) {
                             throw "The upload endpoint returned HTTP $($response.StatusCode)."
                         }
@@ -262,8 +289,8 @@ try {
                 Write-Host '[JavaRock] Copying support ZIP to the configured shared folder...'
                 $remoteDirectory = [IO.Path]::GetFullPath($UploadDestination)
                 [IO.Directory]::CreateDirectory($remoteDirectory) | Out-Null
-                $remotePath = Join-Path $remoteDirectory $bundleName
-                Copy-Item -LiteralPath $bundlePath -Destination $remotePath -Force
+                $remotePath = Join-Path $remoteDirectory $uploadName
+                Copy-Item -LiteralPath $encryptedUploadPath -Destination $remotePath -Force
                 $uploaded = $true
                 $remoteLocation = $remotePath
             }
@@ -282,6 +309,8 @@ try {
         uploadFailed = $uploadFailed
         uploadMessage = $uploadMessage
         remoteLocation = $remoteLocation
+        integrityVerified = $integrityVerified
+        uploadEncrypted = $uploaded
         includedFiles = $script:IncludedFiles.Count
         message = if ($uploaded) { 'Support ZIP created and sent.' } elseif ($uploadFailed) { 'Support ZIP created, but it could not be sent.' } else { 'Support ZIP created.' }
     }
@@ -292,6 +321,8 @@ try {
         success = $false
         bundlePath = if (Test-Path -LiteralPath $bundlePath -PathType Leaf) { $bundlePath } else { '' }
         uploaded = $false
+        integrityVerified = $integrityVerified
+        uploadEncrypted = $false
         remoteLocation = ''
         message = $message
     }
@@ -303,5 +334,8 @@ try {
         if ($stageFull.StartsWith($outputFull, [StringComparison]::OrdinalIgnoreCase)) {
             Remove-Item -LiteralPath $stageFull -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+    if ($encryptedUploadPath -and (Test-Path -LiteralPath $encryptedUploadPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $encryptedUploadPath -Force -ErrorAction SilentlyContinue
     }
 }

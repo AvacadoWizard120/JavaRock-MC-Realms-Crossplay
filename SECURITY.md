@@ -49,6 +49,14 @@ Deleting the file in a later commit is not enough because the value remains in G
 
 Microsoft device-code login should always be completed by the person who owns the local clone. Never distribute a pre-authenticated cache.
 
+## Support Upload Security
+
+Official Windows packages contain a signed file manifest. JavaRock checks that signature and every protected file before it shares diagnostics. A failed check leaves the local Support ZIP in place but blocks the upload.
+
+Uploaded support bundles use AES-256-GCM with a new key for each bundle. That key is wrapped with the project support public key. The matching private key is kept off the repository and is not available to testers, GitHub, or the inbox service. The upload access code permits sending a bundle; it cannot decrypt one.
+
+This check detects changed or missing packaged files. It is not a substitute for Windows malware protection against an attacker who already controls the user's account or operating system.
+
 ## Reporting a Vulnerability
 
 Do not open a public issue containing tokens, account details, Realm identifiers, packet captures, or unredacted logs. Contact the repository owner privately and include only the minimum information needed to reproduce the problem.

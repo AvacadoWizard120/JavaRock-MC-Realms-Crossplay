@@ -21,7 +21,7 @@ if (-not $relativeStage -or $relativeStage.StartsWith('..')) {
     throw 'Refusing to build outside the selected output directory.'
 }
 
-& node (Join-Path $PSScriptRoot 'build-runtime-package.cjs') --dest $stage
+& node (Join-Path $PSScriptRoot 'build-runtime-package.cjs') --dest $stage --require-signature
 if ($LASTEXITCODE -ne 0) { throw 'Runtime staging failed.' }
 
 if (Test-Path -LiteralPath $zip -PathType Leaf) { Remove-Item -LiteralPath $zip -Force }
@@ -31,7 +31,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($zip)
 try {
     $names = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-    foreach ($required in @('START-JAVAROCK.bat', 'README-FIRST.txt', 'javarock-release-manifest.json', 'scripts/Start-JavaRock.ps1', 'scripts/JavaRock-Gui.ps1', 'scripts/New-JavaRockSupportBundle.ps1', 'scripts/redact-support-file.cjs', 'scripts/Update-JavaRock.ps1', 'scripts/javarock-update-http.cjs', 'src/index.js')) {
+    foreach ($required in @('START-JAVAROCK.bat', 'README-FIRST.txt', 'javarock-release-manifest.json', 'scripts/Start-JavaRock.ps1', 'scripts/JavaRock-Gui.ps1', 'scripts/New-JavaRockSupportBundle.ps1', 'scripts/redact-support-file.cjs', 'scripts/support-envelope.cjs', 'scripts/Update-JavaRock.ps1', 'scripts/verify-release-integrity.cjs', 'scripts/javarock-update-http.cjs', 'src/index.js')) {
         if ($names -notcontains $required) { throw "Release ZIP is missing $required." }
     }
     $forbiddenArchivePath = 'bridge-gui|bridgeGui|(?:^|/)(?:node_modules|packet-census|packet-logs|logs|\.auth|\.auth-profiles|\.runtime|\.runtime-codex|\.runtime-desktop)(?:/|$)|(?:^|/)(?:accounts|launcher_accounts|profiles|saves)\.json$|(?:^|/)[0-9a-f]{6}_(?:msal|live|sisu|xbl|bed|mca|mcs|pfb)-cache\.json$'

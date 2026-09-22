@@ -50,7 +50,14 @@ assert.deepStrictEqual(subchunkSummary.entries[0], {
   dy: -3,
   dz: 2,
   result: 'success',
+  payloadPresent: true,
   payloadBytes: 37,
+  heightmap_type: undefined,
+  heightmapPresent: false,
+  heightmapBytes: undefined,
+  render_heightmap_type: undefined,
+  renderHeightmapPresent: false,
+  renderHeightmapBytes: undefined,
   blob_id: undefined
 })
 

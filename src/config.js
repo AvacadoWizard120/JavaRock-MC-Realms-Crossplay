@@ -11,7 +11,7 @@ const {
 installBedrockProtocolSchemaCompat()
 const CURRENT_REALM_BEDROCK_VERSION = currentRealmBedrockVersion()
 
-const STABLE_VIABEDROCK_VERSION = '1.26.30'
+const STABLE_VIABEDROCK_VERSION = '1.26.45'
 
 function boolEnv (name, fallback = false) {
   const raw = process.env[name]

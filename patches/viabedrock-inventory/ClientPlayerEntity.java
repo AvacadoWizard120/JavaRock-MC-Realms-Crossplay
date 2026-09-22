@@ -27,9 +27,11 @@ import com.viaversion.viaversion.util.Pair;
 import net.raphimc.viabedrock.ViaBedrock;
 import net.raphimc.viabedrock.api.util.EnumUtil;
 import net.raphimc.viabedrock.api.util.PacketFactory;
+import net.raphimc.viabedrock.experimental.ExperimentalPacketFactory;
 import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.ServerboundBedrockPackets;
 import net.raphimc.viabedrock.protocol.data.enums.Direction;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.AbilitiesIndex;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.*;
 import net.raphimc.viabedrock.protocol.data.enums.java.*;
 import net.raphimc.viabedrock.protocol.data.enums.java.generated.GameMode;
@@ -69,13 +71,17 @@ public class ClientPlayerEntity extends PlayerEntity {
     private Position3f prevPosition;
     private boolean prevOnGround;
     private final NavigableMap<Long, Position3f> movementPositionHistory = new TreeMap<>();
-    private final Set<PlayerAuthInputPacket_InputData> authInputData = EnumSet.noneOf(PlayerAuthInputPacket_InputData.class);
+    private final Set<PlayerAuthInputPacketPayload_InputData> authInputData = EnumSet.noneOf(PlayerAuthInputPacketPayload_InputData.class);
     private final List<AuthInputBlockAction> authInputBlockActions = new ArrayList<>();
     private Set<InputFlag> inputFlags = EnumSet.noneOf(InputFlag.class);
     private Set<InputFlag> prevInputFlags = EnumSet.noneOf(InputFlag.class);
     private boolean horizontalCollision;
     private boolean sneaking;
     private boolean sprinting;
+    private boolean gliding;
+
+    // Riding
+    private boolean requestedDismount = false;
 
     // Misc data
     private GameType gameType;
@@ -104,6 +110,16 @@ public class ClientPlayerEntity extends PlayerEntity {
         this.prevPosition = this.position;
         this.prevOnGround = this.onGround;
         this.prevInputFlags = this.inputFlags;
+
+        if (ViaBedrock.getConfig().shouldEnableExperimentalFeatures()) {
+            // TODO: Experimental
+
+            if (this.mountRuntimeId != -1 && this.sneaking && !this.requestedDismount) {
+                // Dismount entity
+                ExperimentalPacketFactory.sendBedrockDismount(this.user, this.mountRuntimeId);
+                this.requestedDismount = true;
+            }
+        }
     }
 
     public void sendPlayerPositionPacketToClient(final Set<Relative> relatives) {
@@ -217,7 +233,7 @@ public class ClientPlayerEntity extends PlayerEntity {
             if (!this.initiallySpawned) {
                 ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Received teleport confirm for teleport id " + teleportId + " but player is not spawned yet");
             }
-            this.authInputData.add(PlayerAuthInputPacket_InputData.HandledTeleport);
+            this.authInputData.add(PlayerAuthInputPacketPayload_InputData.HandledTeleport);
         }
     }
 
@@ -252,15 +268,15 @@ public class ClientPlayerEntity extends PlayerEntity {
         return this.prevOnGround;
     }
 
-    public Set<PlayerAuthInputPacket_InputData> authInputData() {
+    public Set<PlayerAuthInputPacketPayload_InputData> authInputData() {
         return this.authInputData;
     }
 
-    public void addAuthInputData(final PlayerAuthInputPacket_InputData data) {
+    public void addAuthInputData(final PlayerAuthInputPacketPayload_InputData data) {
         this.authInputData.add(data);
     }
 
-    public void addAuthInputData(final PlayerAuthInputPacket_InputData... data) {
+    public void addAuthInputData(final PlayerAuthInputPacketPayload_InputData... data) {
         this.authInputData.addAll(Arrays.asList(data));
     }
 
@@ -269,7 +285,7 @@ public class ClientPlayerEntity extends PlayerEntity {
     }
 
     public void addAuthInputBlockAction(final AuthInputBlockAction blockAction) {
-        this.authInputData.add(PlayerAuthInputPacket_InputData.PerformBlockActions);
+        this.authInputData.add(PlayerAuthInputPacketPayload_InputData.PerformBlockActions);
         this.authInputBlockActions.add(blockAction);
     }
 
@@ -393,6 +409,14 @@ public class ClientPlayerEntity extends PlayerEntity {
         this.updateAttributes(new EntityAttribute[]{newMovementAttribute.withValue(newMovementAttribute.computeCurrentValue())});
     }
 
+    public boolean isGliding() {
+        return this.gliding;
+    }
+
+    public void setGliding(final boolean gliding) {
+        this.gliding = gliding;
+    }
+
     public GameType gameType() {
         return this.gameType;
     }
@@ -450,6 +474,10 @@ public class ClientPlayerEntity extends PlayerEntity {
 
     public void setBlockBreakingInfo(final BlockBreakingInfo blockBreakingInfo) {
         this.blockBreakingInfo = blockBreakingInfo;
+    }
+
+    public void setRequestedDismount(final boolean requestedDismount) {
+        this.requestedDismount = requestedDismount;
     }
 
     @Override

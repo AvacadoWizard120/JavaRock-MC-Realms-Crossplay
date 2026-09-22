@@ -232,7 +232,7 @@ function Test-ViaProxyReady {
 
     try {
         $installedRelease = Get-Content -LiteralPath $releaseMetadata -Raw | ConvertFrom-Json
-        if ($installedRelease.tag -ne 'v3.4.12' -or $installedRelease.asset -ne 'ViaProxy-3.4.12.jar') {
+        if ($installedRelease.tag -ne 'v3.4.13' -or $installedRelease.asset -ne 'ViaProxy-3.4.13.jar') {
             return $false
         }
     } catch {

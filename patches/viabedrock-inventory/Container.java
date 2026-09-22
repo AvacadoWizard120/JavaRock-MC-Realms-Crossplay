@@ -25,8 +25,8 @@ import net.raphimc.viabedrock.experimental.model.inventory.InventoryTransactionD
 import net.raphimc.viabedrock.experimental.rewriter.InventoryTransactionRewriter;
 import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.ServerboundBedrockPackets;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ComplexInventoryTransaction_Type;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerType;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ComplexInventoryTransaction_Type;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySourceType;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySource_InventorySourceFlags;
 import net.raphimc.viabedrock.protocol.data.enums.java.generated.ContainerInput;
@@ -678,7 +678,7 @@ public abstract class Container {
 
     private InventoryActionData bridgeContainerAction(Container container, int sourceContainerId, int slot, BedrockItem from, BedrockItem to) {
         return new InventoryActionData(
-                new InventorySource(InventorySourceType.ContainerInventory, sourceContainerId, InventorySource_InventorySourceFlags.NoFlag),
+                new InventorySource(InventorySourceType.Container_Inventory, sourceContainerId, InventorySource_InventorySourceFlags.No_Flag),
                 slot,
                 safeCopy(from),
                 safeCopy(to));
@@ -686,7 +686,7 @@ public abstract class Container {
 
     private InventoryActionData bridgeCursorAction(int cursorSlot, BedrockItem from, BedrockItem to) {
         return new InventoryActionData(
-                new InventorySource(InventorySourceType.GlobalInventory, 0, InventorySource_InventorySourceFlags.NoFlag),
+                new InventorySource(InventorySourceType.Global_Inventory, 0, InventorySource_InventorySourceFlags.No_Flag),
                 cursorSlot,
                 safeCopy(from),
                 safeCopy(to));

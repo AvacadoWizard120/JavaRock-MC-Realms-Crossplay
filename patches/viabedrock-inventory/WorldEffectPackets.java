@@ -33,7 +33,6 @@ import net.raphimc.viabedrock.api.model.BlockState;
 import net.raphimc.viabedrock.api.model.entity.Entity;
 import net.raphimc.viabedrock.api.resourcepack.definition.SoundDefinitions;
 import net.raphimc.viabedrock.api.resourcepack.definition.TextDefinitions;
-import net.raphimc.viabedrock.api.util.EnumUtil;
 import net.raphimc.viabedrock.api.util.MathUtil;
 import net.raphimc.viabedrock.api.util.PacketFactory;
 import net.raphimc.viabedrock.api.util.TextUtil;
@@ -42,10 +41,9 @@ import net.raphimc.viabedrock.protocol.ClientboundBedrockPackets;
 import net.raphimc.viabedrock.protocol.data.BedrockMappingData;
 import net.raphimc.viabedrock.protocol.data.enums.Dimension;
 import net.raphimc.viabedrock.protocol.data.enums.Direction;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.LevelEvent;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.NoteBlockInstrument;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ParticleType;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.SharedTypes_Legacy_LevelSoundEvent;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.LevelEvent;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.NoteBlockInstrument;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ParticleType;
 import net.raphimc.viabedrock.protocol.data.enums.java.GameEventType;
 import net.raphimc.viabedrock.protocol.data.enums.java.PositionSourceType;
 import net.raphimc.viabedrock.protocol.data.enums.java.generated.SoundSource;
@@ -54,6 +52,7 @@ import net.raphimc.viabedrock.protocol.model.BedrockItem;
 import net.raphimc.viabedrock.protocol.model.Position3f;
 import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
 import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
+import net.raphimc.viabedrock.protocol.storage.BreakingTracker;
 import net.raphimc.viabedrock.protocol.storage.ChunkTracker;
 import net.raphimc.viabedrock.protocol.storage.EntityTracker;
 import net.raphimc.viabedrock.protocol.storage.ResourcePackStorage;
@@ -70,11 +69,55 @@ public class WorldEffectPackets {
     private static final boolean LEVEL_SOUND_DEBUG_LOG = false;
 
     public static void register(final BedrockProtocol protocol) {
+        protocol.registerClientbound(ClientboundBedrockPackets.UPDATE_SOUND_DATA, null, wrapper -> {
+            wrapper.read(BedrockTypes.UNSIGNED_LONG_LE); // server sound handle
+
+            if (wrapper.read(Types.BOOLEAN)) { // Stop Sound
+                wrapper.read(BedrockTypes.UNSIGNED_VAR_INT);
+            }
+
+            if (wrapper.read(Types.BOOLEAN)) { // Set Volume
+                wrapper.read(BedrockTypes.UNSIGNED_VAR_INT);
+
+                final float volume = wrapper.read(BedrockTypes.FLOAT_LE); // volume
+            }
+
+            if (wrapper.read(Types.BOOLEAN)) { // Set Pitch
+                wrapper.read(BedrockTypes.UNSIGNED_VAR_INT);
+
+                final float pitch = wrapper.read(BedrockTypes.FLOAT_LE); // pitch
+            }
+
+            if  (wrapper.read(Types.BOOLEAN)) { // Set Fade
+                wrapper.read(BedrockTypes.UNSIGNED_VAR_INT);
+
+                final float targetVolume = wrapper.read(BedrockTypes.FLOAT_LE); // targetVolume
+                final float duration = wrapper.read(BedrockTypes.FLOAT_LE); // duration
+            }
+
+            if (wrapper.read(Types.BOOLEAN)) { // Set SeekTo
+                wrapper.read(BedrockTypes.UNSIGNED_VAR_INT);
+
+                final float seconds = wrapper.read(BedrockTypes.FLOAT_LE); // seconds
+            }
+
+            if (wrapper.read(Types.BOOLEAN)) { // Set Pause
+                wrapper.read(BedrockTypes.UNSIGNED_VAR_INT);
+            }
+
+            if (wrapper.read(Types.BOOLEAN)) { // Set Resume
+                wrapper.read(BedrockTypes.UNSIGNED_VAR_INT);
+            }
+
+            wrapper.cancel();
+            // TODO: Server handle based sound manager
+        });
         protocol.registerClientbound(ClientboundBedrockPackets.PLAY_SOUND, ClientboundPackets26_1.SOUND, wrapper -> {
             final String name = wrapper.read(BedrockTypes.STRING); // sound name
             final BlockPosition position = wrapper.read(BedrockTypes.BLOCK_POSITION); // position
             final float volume = wrapper.read(BedrockTypes.FLOAT_LE); // volume
             final float pitch = wrapper.read(BedrockTypes.FLOAT_LE); // pitch
+            wrapper.read(BedrockTypes.VAR_INT); // Loop Count TODO: Loop handler
             wrapper.read(BedrockTypes.OPTIONAL_UNSIGNED_LONG_LE); // server sound handle
 
             final BedrockMappingData.JavaSound javaSound = BedrockProtocol.MAPPINGS.getBedrockToJavaSounds().get(name);
@@ -143,8 +186,13 @@ public class WorldEffectPackets {
             });
         });
         protocol.registerClientbound(ClientboundBedrockPackets.LEVEL_SOUND_EVENT, ClientboundPackets26_1.SOUND, wrapper -> {
-            final String soundIdentifier = stripMinecraftNamespace(wrapper.read(BedrockTypes.STRING)); // sound event identifier (1.26.30+)
-            final SharedTypes_Legacy_LevelSoundEvent soundEvent = resolveLegacyLevelSoundEvent(soundIdentifier);
+
+            final String soundEvent = wrapper.read(BedrockTypes.STRING);
+            if (soundEvent == null ||  soundEvent.isEmpty()) {
+                ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Unknown SoundEvent");
+                wrapper.cancel();
+                return;
+            }
             final Position3f position = wrapper.read(BedrockTypes.POSITION_3F); // position
             final int data = wrapper.read(BedrockTypes.VAR_INT); // data
             final String entityIdentifier = wrapper.read(BedrockTypes.STRING); // entity identifier
@@ -155,49 +203,37 @@ public class WorldEffectPackets {
 
             final boolean globalSound = isGlobal || Float.isNaN(position.x()) || Float.isNaN(position.y()) || Float.isNaN(position.z());
             SoundDefinitions.ConfiguredSound configuredSound;
-            if (soundEvent == null) {
-                final BedrockMappingData.JavaSound directJavaSound = BedrockProtocol.MAPPINGS.getBedrockToJavaSounds().get(soundIdentifier);
-                if (directJavaSound == null) {
-                    if (LEVEL_SOUND_DEBUG_LOG) {
-                        ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Unknown Bedrock level sound identifier: " + soundIdentifier);
-                    }
-                    wrapper.cancel();
+            switch (soundEvent) {
+                case "record.null" -> {
+                    wrapper.setPacketType(ClientboundPackets26_1.STOP_SOUND);
+                    wrapper.write(Types.BYTE, (byte) 1); // flags
+                    wrapper.write(Types.VAR_INT, SoundSource.RECORDS.ordinal()); // category id
                     return;
                 }
-                configuredSound = new SoundDefinitions.ConfiguredSound(soundIdentifier, 1F, 1F, 1F, 1F);
-            } else {
-                switch (soundEvent) {
-                    case RecordNull -> {
-                        wrapper.setPacketType(ClientboundPackets26_1.STOP_SOUND);
-                        wrapper.write(Types.BYTE, (byte) 1); // flags
-                        wrapper.write(Types.VAR_INT, SoundSource.RECORDS.ordinal()); // category id
+                case "note" -> {
+                    final NoteBlockInstrument noteBlockInstrument = NoteBlockInstrument.getByValue(data >> 8, NoteBlockInstrument.Harp);
+                    final String noteBlockSound = BedrockProtocol.MAPPINGS.getBedrockNoteBlockInstrumentSounds().get(noteBlockInstrument);
+                    final int key = data & 0xFF;
+                    final float pitch = (float) Math.pow(2D, (double) (key - 12) / 12);
+                    configuredSound = new SoundDefinitions.ConfiguredSound(noteBlockSound, 1F, 1F, pitch, pitch);
+                }
+                default -> {
+                    configuredSound = tryFindSound(wrapper.user(), soundEvent, data, entityIdentifier, isBabyMob);
+                    if (configuredSound == null) { // Fallback for some special handled sounds
+                        /*switch (soundEvent) {
+                            case AmbientBaby, MobWarningBaby, HurtBaby, DeathBaby, StepBaby -> {
+                                final SharedTypes_Legacy_LevelSoundEvent soundEventAdult = EnumUtil.getEnumConstantOrNull(SharedTypes_Legacy_LevelSoundEvent.class, soundEvent.name().replace("Baby", ""));
+                                configuredSound = tryFindSound(wrapper.user(), soundEventAdult, data, entityIdentifier, true);
+                            }
+                            case AmbientInWater, AmbientInAir -> configuredSound = tryFindSound(wrapper.user(), SharedTypes_Legacy_LevelSoundEvent.Ambient, data, entityIdentifier, isBabyMob);
+                        }*/
+                    }
+                    if (configuredSound == null) {
+                        if (LEVEL_SOUND_DEBUG_LOG) {
+                            ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing level sound event mapping for " + soundEvent + " with entity identifier '" + entityIdentifier + "' and data " + data);
+                        }
+                        wrapper.cancel();
                         return;
-                    }
-                    case Note -> {
-                        final NoteBlockInstrument noteBlockInstrument = NoteBlockInstrument.getByValue(data >> 8, NoteBlockInstrument.Harp);
-                        final String noteBlockSound = BedrockProtocol.MAPPINGS.getBedrockNoteBlockInstrumentSounds().get(noteBlockInstrument);
-                        final int key = data & 0xFF;
-                        final float pitch = (float) Math.pow(2D, (double) (key - 12) / 12);
-                        configuredSound = new SoundDefinitions.ConfiguredSound(noteBlockSound, 1F, 1F, pitch, pitch);
-                    }
-                    default -> {
-                        configuredSound = tryFindSound(wrapper.user(), soundEvent, data, entityIdentifier, isBabyMob);
-                        if (configuredSound == null) { // Fallback for some special handled sounds
-                            switch (soundEvent) {
-                                case AmbientBaby, MobWarningBaby, HurtBaby, DeathBaby, StepBaby -> {
-                                    final SharedTypes_Legacy_LevelSoundEvent soundEventAdult = EnumUtil.getEnumConstantOrNull(SharedTypes_Legacy_LevelSoundEvent.class, soundEvent.name().replace("Baby", ""));
-                                    configuredSound = tryFindSound(wrapper.user(), soundEventAdult, data, entityIdentifier, true);
-                                }
-                                case AmbientInWater, AmbientInAir -> configuredSound = tryFindSound(wrapper.user(), SharedTypes_Legacy_LevelSoundEvent.Ambient, data, entityIdentifier, isBabyMob);
-                            }
-                        }
-                        if (configuredSound == null) {
-                            if (LEVEL_SOUND_DEBUG_LOG) {
-                                ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing level sound event mapping for " + soundEvent + " with entity identifier '" + entityIdentifier + "' and data " + data);
-                            }
-                            wrapper.cancel();
-                            return;
-                        }
                     }
                 }
             }
@@ -327,8 +363,15 @@ public class WorldEffectPackets {
                     ViaBedrock.getPlatform().getLogger().log(Level.SEVERE, "Server sped up the game. This is not supported by ViaBedrock.");
                     wrapper.cancel();
                 }
-                case StartBlockCracking, StopBlockCracking, UpdateBlockCracking -> {
-                    wrapper.cancel(); // TODO: Implement block break progress translation
+                case StartBlockCracking, UpdateBlockCracking -> {
+                    wrapper.cancel();
+                    wrapper.user().get(BreakingTracker.class).updateCrackingInfo(new Position3f(
+                            MathUtil.floor(position.x()), MathUtil.floor(position.y()), MathUtil.floor(position.z())
+                    ), data, levelEvent == LevelEvent.UpdateBlockCracking);
+                }
+                case StopBlockCracking -> {
+                    wrapper.cancel();
+                    wrapper.user().get(BreakingTracker.class).stopCracking(new Position3f(MathUtil.floor(position.x()), MathUtil.floor(position.y()), MathUtil.floor(position.z())));
                 }
                 default -> {
                     BedrockMappingData.LevelEventMapping levelEventMapping = BedrockProtocol.MAPPINGS.getBedrockToJavaLevelEvents().get(levelEvent);
@@ -678,65 +721,8 @@ public class WorldEffectPackets {
         paired.send(BedrockProtocol.class);
     }
 
-    private static SharedTypes_Legacy_LevelSoundEvent resolveLegacyLevelSoundEvent(final String soundIdentifier) {
-        final String normalizedIdentifier = normalizeSoundIdentifier(soundIdentifier);
-        final int separator = soundIdentifier.indexOf('.');
-        final String normalizedWithoutCategory = separator >= 0
-                ? normalizeSoundIdentifier(soundIdentifier.substring(separator + 1))
-                : normalizedIdentifier;
-
-        for (SharedTypes_Legacy_LevelSoundEvent soundEvent : SharedTypes_Legacy_LevelSoundEvent.values()) {
-            final String normalizedEvent = normalizeSoundIdentifier(soundEvent.name());
-            if (normalizedEvent.equals(normalizedIdentifier) || normalizedEvent.equals(normalizedWithoutCategory)) {
-                return soundEvent;
-            }
-        }
-
-        final Map<?, Map<String, SoundDefinitions.ConfiguredSound>> levelSoundEvents = BedrockProtocol.MAPPINGS.getBedrockLevelSoundEvents();
-        for (Map.Entry<?, Map<String, SoundDefinitions.ConfiguredSound>> entry : levelSoundEvents.entrySet()) {
-            final Map<String, SoundDefinitions.ConfiguredSound> configuredSounds = entry.getValue();
-            if (configuredSounds == null) {
-                continue;
-            }
-            for (SoundDefinitions.ConfiguredSound configuredSound : configuredSounds.values()) {
-                if (configuredSound != null && soundIdentifier.equals(configuredSound.sound())) {
-                    return entry.getKey() instanceof SharedTypes_Legacy_LevelSoundEvent event
-                            ? event
-                            : SharedTypes_Legacy_LevelSoundEvent.getByName(String.valueOf(entry.getKey()));
-                }
-            }
-        }
-        return null;
-    }
-
-    private static String stripMinecraftNamespace(final String identifier) {
-        return identifier != null && identifier.startsWith("minecraft:") ? identifier.substring("minecraft:".length()) : identifier;
-    }
-
-    private static String normalizeSoundIdentifier(final String identifier) {
-        if (identifier == null || identifier.isEmpty()) {
-            return "";
-        }
-        final StringBuilder normalized = new StringBuilder(identifier.length());
-        for (int i = 0; i < identifier.length(); i++) {
-            final char value = identifier.charAt(i);
-            if (Character.isLetterOrDigit(value)) {
-                normalized.append(Character.toLowerCase(value));
-            }
-        }
-        return normalized.toString();
-    }
-
-    private static SoundDefinitions.ConfiguredSound tryFindSound(final UserConnection user, final SharedTypes_Legacy_LevelSoundEvent soundEvent, final int data, final String entityIdentifier, final boolean isBabyMob) {
-        if (soundEvent == null) {
-            return null;
-        }
-
-        final Map<?, Map<String, SoundDefinitions.ConfiguredSound>> levelSoundEvents = BedrockProtocol.MAPPINGS.getBedrockLevelSoundEvents();
-        Map<String, SoundDefinitions.ConfiguredSound> soundEvents = levelSoundEvents.get(soundEvent);
-        if (soundEvents == null) {
-            soundEvents = levelSoundEvents.get(soundEvent.name());
-        }
+    private static SoundDefinitions.ConfiguredSound tryFindSound(final UserConnection user, final String soundEvent, final int data, final String entityIdentifier, final boolean isBabyMob) {
+        final Map<String, SoundDefinitions.ConfiguredSound> soundEvents = BedrockProtocol.MAPPINGS.getBedrockLevelSoundEvents().get(soundEvent);
         if (soundEvents == null) {
             return null;
         }
@@ -755,13 +741,13 @@ public class WorldEffectPackets {
                     configuredSound = soundEvents.get(blockSound);
                 } else {
                     if (LEVEL_SOUND_DEBUG_LOG) {
-                        ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing " + soundEvent.name() + " sound for " + blockState.namespacedIdentifier());
+                        ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing " + soundEvent + " sound for " + blockState.namespacedIdentifier());
                     }
                     configuredSound = soundEvents.get("stone");
                 }
             } else {
                 if (LEVEL_SOUND_DEBUG_LOG) {
-                    ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing block state (" + soundEvent.name() + " level sound event): " + data);
+                    ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing block state (" + soundEvent + " level sound event): " + data);
                 }
                 configuredSound = soundEvents.get("stone");
             }

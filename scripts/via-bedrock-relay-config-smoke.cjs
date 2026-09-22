@@ -10,12 +10,12 @@ function main () {
   delete process.env.BEDROCK_VERSION
 
   const config = loadConfig(['bridge-dev'])
-  assert.strictEqual(config.javaLan.viaProxyBedrockTargetVersion, 'Bedrock 1.26.30')
-  assert.strictEqual(config.bedrockRelay.version, '1.26.30')
-  assert.strictEqual(config.bedrockRelay.viaProxyTargetVersion, 'Bedrock 1.26.30')
-  assert.strictEqual(normalizeViaProxyTargetVersion('Bedrock 1.26.20'), 'Bedrock 1.26.30')
-  assert.strictEqual(normalizeViaProxyTargetVersion('Bedrock 1.26.10'), 'Bedrock 1.26.30')
-  assert.strictEqual(normalizeViaProxyTargetVersion('Bedrock 1.26.30'), 'Bedrock 1.26.30')
+  assert.strictEqual(config.javaLan.viaProxyBedrockTargetVersion, 'Bedrock 1.26.45')
+  assert.strictEqual(config.bedrockRelay.version, '1.26.45')
+  assert.strictEqual(config.bedrockRelay.viaProxyTargetVersion, 'Bedrock 1.26.45')
+  assert.strictEqual(normalizeViaProxyTargetVersion('Bedrock 1.26.20'), 'Bedrock 1.26.45')
+  assert.strictEqual(normalizeViaProxyTargetVersion('Bedrock 1.26.30'), 'Bedrock 1.26.45')
+  assert.strictEqual(normalizeViaProxyTargetVersion('Bedrock 1.26.45'), 'Bedrock 1.26.45')
 
   const command = buildViaProxyCommand(config, {
     ...config,
@@ -31,7 +31,7 @@ function main () {
   })
 
   assert(command.args.includes('--target-version'))
-  assert.strictEqual(command.targetVersion, 'Bedrock 1.26.30')
+  assert.strictEqual(command.targetVersion, 'Bedrock 1.26.45')
   assert(!command.args.includes('Bedrock 1.26.20'))
   assert(!command.args.includes('Bedrock 1.26.10'))
 

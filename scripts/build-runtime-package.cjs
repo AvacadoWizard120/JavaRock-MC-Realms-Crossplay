@@ -1,8 +1,13 @@
 'use strict'
 
+const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 const { spawnSync } = require('child_process')
+const {
+  RELEASE_SIGNING_KEY_ID,
+  manifestSigningPayload
+} = require('./verify-release-integrity.cjs')
 
 const projectRoot = path.resolve(__dirname, '..')
 const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'))
@@ -29,8 +34,10 @@ const scriptFiles = [
   'javarock-update-http.cjs',
   'New-JavaRockSupportBundle.ps1',
   'redact-support-file.cjs',
+  'support-envelope.cjs',
   'Start-JavaRock.ps1',
-  'Update-JavaRock.ps1'
+  'Update-JavaRock.ps1',
+  'verify-release-integrity.cjs'
 ]
 
 function parseArgs (argv = process.argv.slice(2)) {
@@ -45,6 +52,8 @@ function parseArgs (argv = process.argv.slice(2)) {
       args.destination = path.resolve(value)
     } else if (token === '--help' || token === '-h') {
       args.help = true
+    } else if (token === '--require-signature') {
+      args.requireSignature = true
     } else {
       throw new Error(`Unknown argument: ${token}`)
     }
@@ -109,7 +118,8 @@ function writeRuntimePackageJson (destination) {
       setup: 'node scripts/install-viaproxy.cjs',
       'bedrock:packet-recorder': 'node src/index.js bedrock-packet-recorder'
     },
-    dependencies: packageJson.dependencies
+    dependencies: packageJson.dependencies,
+    overrides: packageJson.overrides
   }
   fs.writeFileSync(path.join(destination, 'package.json'), `${JSON.stringify(runtimePackage, null, 2)}\n`)
 }
@@ -139,16 +149,43 @@ function listFiles (directory) {
   return files.sort()
 }
 
-function writeReleaseManifest (destination) {
+function writeReleaseManifest (destination, requireSignature = false) {
   const manifestName = 'javarock-release-manifest.json'
   const files = listFiles(destination)
   files.push(manifestName)
-  fs.writeFileSync(path.join(destination, manifestName), `${JSON.stringify({
-    format: 1,
+  files.sort()
+  const integrity = files
+    .filter(file => file !== manifestName)
+    .map(file => {
+      const absolute = path.join(destination, ...file.split('/'))
+      const contents = fs.readFileSync(absolute)
+      return {
+        path: file,
+        bytes: contents.length,
+        sha256: crypto.createHash('sha256').update(contents).digest('hex')
+      }
+    })
+  const manifest = {
+    format: 2,
     product: 'JavaRock',
     version: packageJson.version,
-    files: files.sort()
-  }, null, 2)}\n`)
+    files,
+    integrity,
+    signature: null
+  }
+  const defaultSigningKey = path.join(projectRoot, 'infra', 'support-inbox', 'support-release-signing-private.pem')
+  const signingKey = process.env.JAVAROCK_RELEASE_SIGNING_KEY || defaultSigningKey
+  if (fs.existsSync(signingKey)) {
+    manifest.signature = {
+      algorithm: 'Ed25519',
+      key_id: RELEASE_SIGNING_KEY_ID,
+      value: crypto.sign(null, manifestSigningPayload(manifest), fs.readFileSync(signingKey)).toString('base64')
+    }
+  }
+  if (requireSignature && !manifest.signature) {
+    throw new Error('Official runtime builds require the private JavaRock release-signing key')
+  }
+  fs.writeFileSync(path.join(destination, manifestName), `${JSON.stringify(manifest, null, 2)}\n`)
 }
 
 function assertTrimmed (destination) {
@@ -172,7 +209,7 @@ function assertTrimmed (destination) {
 function main () {
   const args = parseArgs()
   if (args.help) {
-    console.log('Usage: node scripts/build-runtime-package.cjs [--dest <path-under-dist-or-.tmp>]')
+    console.log('Usage: node scripts/build-runtime-package.cjs [--dest <path-under-dist-or-.tmp>] [--require-signature]')
     return
   }
 
@@ -183,7 +220,7 @@ function main () {
   copyFilteredDirectory('patches/viabedrock-inventory', args.destination, new Set(['.java']))
   copyFilteredDirectory('LICENSES', args.destination, new Set(['.txt']))
   writeRuntimePackageJson(args.destination)
-  writeReleaseManifest(args.destination)
+  writeReleaseManifest(args.destination, args.requireSignature)
   assertTrimmed(args.destination)
   auditRuntime(args.destination)
 

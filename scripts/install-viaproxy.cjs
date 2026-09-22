@@ -11,7 +11,7 @@ const {
 } = require('../src/viaProxyInventoryPatch')
 
 const DEFAULT_REPO = 'ViaVersion/ViaProxy'
-const DEFAULT_RELEASE_TAG = 'v3.4.12'
+const DEFAULT_RELEASE_TAG = 'v3.4.13'
 
 function readOptionValue (argv, index, option) {
   const value = argv[index + 1]

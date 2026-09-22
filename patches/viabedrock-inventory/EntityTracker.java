@@ -317,7 +317,11 @@ public class EntityTracker extends StoredObject {
     }
 
     public Entity getEntityByRid(final long runtimeId) {
-        return this.entities.get(this.runtimeIdToUniqueId.get(runtimeId));
+        final Long uniqueId = this.runtimeIdToUniqueId.get(runtimeId);
+        if (uniqueId == null) {
+            return null;
+        }
+        return this.entities.get(uniqueId.longValue());
     }
 
     public Entity getEntityByUid(final long uniqueId) {
@@ -325,7 +329,7 @@ public class EntityTracker extends StoredObject {
     }
 
     public Entity getEntityByJid(final int javaId) {
-        return this.entities.get(this.javaIdToUniqueId.get(javaId));
+        return this.entities.get((long) this.javaIdToUniqueId.get(javaId));
     }
 
     public ItemFrameInteraction getItemFrameByJid(final int javaId) {

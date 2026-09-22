@@ -33,7 +33,9 @@ try {
     'scripts/JavaRock-Gui.ps1',
     'scripts/New-JavaRockSupportBundle.ps1',
     'scripts/redact-support-file.cjs',
+    'scripts/support-envelope.cjs',
     'scripts/Update-JavaRock.ps1',
+    'scripts/verify-release-integrity.cjs',
     'scripts/javarock-update-http.cjs',
     'javarock-release-manifest.json',
     'src/index.js',
@@ -62,14 +64,22 @@ try {
   ])
   assert(!JSON.stringify(runtimePackage).includes('bridge:gui'))
   assert(!JSON.stringify(runtimePackage).match(/python|tkinter/i))
+  assert.deepStrictEqual(runtimePackage.overrides, {
+    'cmake-js': '^8.0.0',
+    uuid: '^11.1.1'
+  })
 
   const releaseManifest = JSON.parse(fs.readFileSync(path.join(destination, 'javarock-release-manifest.json'), 'utf8'))
-  assert.strictEqual(releaseManifest.format, 1)
+  assert.strictEqual(releaseManifest.format, 2)
   assert.strictEqual(releaseManifest.product, 'JavaRock')
   assert.strictEqual(releaseManifest.version, runtimePackage.version)
   assert(releaseManifest.files.includes('javarock-release-manifest.json'))
   assert(releaseManifest.files.includes('scripts/Update-JavaRock.ps1'))
   assert(releaseManifest.files.includes('scripts/New-JavaRockSupportBundle.ps1'))
+  assert(releaseManifest.files.includes('scripts/support-envelope.cjs'))
+  assert(releaseManifest.files.includes('scripts/verify-release-integrity.cjs'))
+  assert.strictEqual(releaseManifest.integrity.length, releaseManifest.files.length - 1)
+  assert(releaseManifest.integrity.every(entry => /^[0-9a-f]{64}$/.test(entry.sha256)))
   assert(!releaseManifest.files.some(file => /(?:^|\/)\.auth-profiles(?:\/|$)/i.test(file)))
 
   const runtimeIndex = fs.readFileSync(path.join(destination, 'src', 'index.js'), 'utf8')

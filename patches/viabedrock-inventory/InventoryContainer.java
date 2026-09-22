@@ -35,11 +35,11 @@ import net.raphimc.viabedrock.experimental.model.inventory.InventoryTransactionD
 import net.raphimc.viabedrock.experimental.rewriter.InventoryTransactionRewriter;
 import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.ServerboundBedrockPackets;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ComplexInventoryTransaction_Type;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ComplexInventoryTransaction_Type;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnumName;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerID;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerType;
-import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InteractPacket_Action;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InteractPacketPayload_Action;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySourceType;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySource_InventorySourceFlags;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ItemStackRequestActionType;
@@ -1769,7 +1769,7 @@ public class InventoryContainer extends Container {
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, recipe.networkId);
         wrapper.write(Types.BYTE, (byte) craftCount);
 
-        wrapper.write(Types.BYTE, (byte) ItemStackRequestActionType.CraftResults_DEPRECATEDASKTYLAING.getValue());
+        wrapper.write(Types.BYTE, (byte) ItemStackRequestActionType.CraftResults.getValue());
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
         BedrockItem result = recipe.output.copy();
         result.setNetId(null);
@@ -2451,7 +2451,7 @@ public class InventoryContainer extends Container {
 
     private InventoryActionData rawContainerAction(Container container, int sourceContainerId, int bedrockSlot, BedrockItem from, BedrockItem to) {
         return new InventoryActionData(
-                new InventorySource(InventorySourceType.ContainerInventory, sourceContainerId, InventorySource_InventorySourceFlags.NoFlag),
+                new InventorySource(InventorySourceType.Container_Inventory, sourceContainerId, InventorySource_InventorySourceFlags.No_Flag),
                 bedrockSlot,
                 safeCopy(from),
                 safeCopy(to));
@@ -2459,7 +2459,7 @@ public class InventoryContainer extends Container {
 
     private InventoryActionData cursorAction(int cursorSlot, BedrockItem from, BedrockItem to) {
         return new InventoryActionData(
-                new InventorySource(InventorySourceType.GlobalInventory, 0, InventorySource_InventorySourceFlags.NoFlag),
+                new InventorySource(InventorySourceType.Global_Inventory, 0, InventorySource_InventorySourceFlags.No_Flag),
                 cursorSlot,
                 safeCopy(from),
                 safeCopy(to));
@@ -3049,7 +3049,7 @@ public class InventoryContainer extends Container {
     private void onSelectedHotbarSlotChanged(BedrockItem oldItem, BedrockItem newItem, PacketWrapper wrapper) {
         if (oldItem.isDifferent(newItem)) {
             PacketWrapper interactUpdate = PacketWrapper.create(ServerboundBedrockPackets.INTERACT, this.user);
-            interactUpdate.write(Types.UNSIGNED_BYTE, Short.valueOf((short) InteractPacket_Action.InteractUpdate.getValue()));
+            interactUpdate.write(Types.UNSIGNED_BYTE, Short.valueOf((short) InteractPacketPayload_Action.InteractUpdate.getValue()));
             interactUpdate.write(BedrockTypes.UNSIGNED_VAR_LONG, Long.valueOf(0L));
             interactUpdate.write(BedrockTypes.OPTIONAL_POSITION_3F, null);
             interactUpdate.sendToServer(BedrockProtocol.class);

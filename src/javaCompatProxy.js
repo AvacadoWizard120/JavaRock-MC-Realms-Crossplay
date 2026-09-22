@@ -78,9 +78,9 @@ function normalizeViaProxyTargetVersion (targetVersion) {
   // that this bridge normalizes toward. Passing the upstream Realm version here
   // makes ViaProxy fall back to auto detection, which can fail against our local
   // relay before the bridge ever gets a downstream session.
-  if (/^bedrock\s+1\.26\.(?:10|20)$/i.test(value)) {
-    console.warn(`[java-compat] ViaProxy target "${value}" is not supported by the current ViaProxy jar. Using "Bedrock 1.26.30" for the ViaBedrock front door.`)
-    return 'Bedrock 1.26.30'
+  if (/^bedrock\s+/i.test(value) && !/^bedrock\s+1\.26\.45$/i.test(value)) {
+    console.warn(`[java-compat] ViaProxy target "${value}" is not supported by the current ViaProxy jar. Using "Bedrock 1.26.45" for the ViaBedrock front door.`)
+    return 'Bedrock 1.26.45'
   }
 
   return value || '1.21.11'
@@ -250,7 +250,7 @@ function startJavaCompatProxy (config, backendConfig, options = {}) {
 function printJavaCompatProxyInfo (config) {
   const relayHost = config.bedrockRelay?.host || '127.0.0.1'
   const relayPort = config.bedrockRelay?.port || 19133
-  const targetVersion = config.bedrockRelay?.viaProxyTargetVersion || config.javaLan.viaProxyBedrockTargetVersion || 'Bedrock 1.26.30'
+  const targetVersion = config.bedrockRelay?.viaProxyTargetVersion || config.javaLan.viaProxyBedrockTargetVersion || 'Bedrock 1.26.45'
   const backendConfig = {
     ...config,
     javaLan: {

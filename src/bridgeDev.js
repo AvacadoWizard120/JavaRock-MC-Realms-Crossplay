@@ -74,13 +74,13 @@ async function runViaBedrockRelay (config, runtimeStatus) {
       ...config.javaLan,
       host: relay.viaProxyHost,
       port: relay.port,
-      playVersion: config.bedrockRelay?.viaProxyTargetVersion || config.javaLan.viaProxyBedrockTargetVersion || 'Bedrock 1.26.30'
+      playVersion: config.bedrockRelay?.viaProxyTargetVersion || config.javaLan.viaProxyBedrockTargetVersion || 'Bedrock 1.26.45'
     }
   }, {
     announceLan: true,
     lanMotd: statusText,
     targetAddress: `${relay.viaProxyHost}:${relay.port}`,
-    targetVersion: config.bedrockRelay?.viaProxyTargetVersion || config.javaLan.viaProxyBedrockTargetVersion || 'Bedrock 1.26.30',
+    targetVersion: config.bedrockRelay?.viaProxyTargetVersion || config.javaLan.viaProxyBedrockTargetVersion || 'Bedrock 1.26.45',
     targetLabel: 'local Bedrock NetherNet relay',
     enableViaBedrockExperimentalFeatures: true
   })
