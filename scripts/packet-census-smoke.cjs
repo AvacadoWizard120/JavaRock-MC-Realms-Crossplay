@@ -54,6 +54,22 @@ assert.deepStrictEqual(subchunkSummary.entries[0], {
   blob_id: undefined
 })
 
+const partialLevelChunkSummary = summarizePacketForCensus('level_chunk', {
+  x: 10,
+  z: 1,
+  dimension: 0,
+  sub_chunk_count: 0,
+  highest_subchunk_count: 24,
+  cache_enabled: false,
+  blobs: [],
+  payload: Buffer.alloc(34)
+})
+assert.strictEqual(partialLevelChunkSummary.sub_chunk_count, 0)
+assert.strictEqual(partialLevelChunkSummary.highest_subchunk_count, 24)
+assert.strictEqual(partialLevelChunkSummary.cache_enabled, false)
+assert.strictEqual(partialLevelChunkSummary.blobCount, 0)
+assert.strictEqual(partialLevelChunkSummary.payloadBytes, 34)
+
 const syncedBlockSummary = summarizePacketForCensus('update_block_synced', {
   position: { x: 85, y: 65, z: 669 },
   block_runtime_id: 1529044762,

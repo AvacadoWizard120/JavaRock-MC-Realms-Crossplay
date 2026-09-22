@@ -669,6 +669,38 @@ function normalizeClientboundForLocalViaBedrock (name, params = {}, options = {}
   let out = normalizeClientboundEntityNoiseForLocalViaBedrock(name, params)
   out = normalizeClientboundEntityItemFieldsForLocalViaBedrock(name, out, options)
 
+  if (name === 'level_chunk') {
+    const localVersion = options.localBedrockVersion || options.version || '1.26.30'
+    const highestSubchunkCount = firstNonNull(out.highest_subchunk_count, out.highestSubchunkCount)
+    const numericHighestSubchunkCount = Number(highestSubchunkCount)
+
+    // Bedrock 1.26.40 replaced the negative request-subchunks marker with an
+    // optional highest_subchunk_count. ViaBedrock still consumes the 1.26.30
+    // form, so preserve the request instead of presenting an empty full chunk.
+    if (!protocolVersionAtLeast(localVersion, '1.26.40') &&
+      highestSubchunkCount != null &&
+      Number.isFinite(numericHighestSubchunkCount)) {
+      const cacheEnabled = Boolean(firstNonNull(out.cache_enabled, out.cacheEnabled, false))
+      const blobHashes = Array.isArray(out.blobs)
+        ? out.blobs
+        : (Array.isArray(out.blobs?.hashes) ? out.blobs.hashes : [])
+      const legacyLevelChunk = { ...out }
+      delete legacyLevelChunk.highestSubchunkCount
+      delete legacyLevelChunk.subChunkCount
+      delete legacyLevelChunk.cacheEnabled
+      const hasFiniteSubchunkLimit = numericHighestSubchunkCount >= 0
+      return {
+        ...legacyLevelChunk,
+        sub_chunk_count: hasFiniteSubchunkLimit ? -2 : -1,
+        highest_subchunk_count: hasFiniteSubchunkLimit
+          ? Math.min(0xffff, Math.trunc(numericHighestSubchunkCount))
+          : undefined,
+        cache_enabled: cacheEnabled,
+        blobs: cacheEnabled ? { hashes: blobHashes } : undefined
+      }
+    }
+  }
+
   if (name === 'dimension_data' && Array.isArray(out.definitions)) {
     return {
       ...out,
@@ -4530,7 +4562,10 @@ class ViaBedrockRelayPlayer extends Player {
 
   rememberSyntheticSubchunkOriginFromLevelChunk (params = {}) {
     const subChunkCount = Number(firstNonNull(params.sub_chunk_count, params.subChunkCount))
-    if (!Number.isFinite(subChunkCount) || subChunkCount >= 0) return false
+    const highestSubchunkCount = firstNonNull(params.highest_subchunk_count, params.highestSubchunkCount)
+    const hasModernRequestMarker = highestSubchunkCount != null && Number.isFinite(Number(highestSubchunkCount))
+    const hasLegacyRequestMarker = Number.isFinite(subChunkCount) && subChunkCount < 0
+    if (!hasLegacyRequestMarker && !hasModernRequestMarker) return false
     const x = Number(firstNonNull(params.x, params.chunk_x, params.chunkX))
     const z = Number(firstNonNull(params.z, params.chunk_z, params.chunkZ))
     if (!Number.isFinite(x) || !Number.isFinite(z)) return false
