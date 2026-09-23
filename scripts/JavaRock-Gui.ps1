@@ -402,6 +402,29 @@ function Reset-LogCursor {
     $script:LogOffsets[$Key] = [int64]0
 }
 
+function Move-LogCursorToEnd {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Key
+    )
+
+    try {
+        $length = if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [int64](Get-Item -LiteralPath $Path).Length
+        } else {
+            [int64]0
+        }
+        $script:LogOffsets[$Key] = $length
+    } catch {
+        # The next timer tick can retry without disrupting the Stop action.
+    }
+}
+
+function Move-BridgeLogCursorsToEnd {
+    Move-LogCursorToEnd -Path $StdoutLog -Key 'bridge-out'
+    Move-LogCursorToEnd -Path $StderrLog -Key 'bridge-err'
+}
+
 function Read-NewLogText {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -434,6 +457,15 @@ function Read-NewLogText {
     }
 }
 
+function ConvertTo-DisplayLogText {
+    param([AllowEmptyString()][string]$Text)
+
+    if ($null -eq $Text) { return '' }
+    $clean = [regex]::Replace($Text, '\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)', '')
+    $clean = [regex]::Replace($clean, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+    return [regex]::Replace($clean, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '')
+}
+
 function Add-Log {
     param(
         [string]$Source,
@@ -441,7 +473,7 @@ function Add-Log {
     )
 
     if (-not $Text -or $null -eq $script:LogBox) { return }
-    $normalized = $Text.TrimEnd("`r", "`n")
+    $normalized = (ConvertTo-DisplayLogText -Text $Text).TrimEnd("`r", "`n")
     if (-not $normalized) { return }
     $timestamp = Get-Date -Format 'HH:mm:ss'
     $script:LogBox.AppendText("[$timestamp] [$Source] $normalized`r`n")
@@ -503,6 +535,7 @@ $script:RealmProcess = $null
 $script:RealmRefreshStartedAt = $null
 $script:RealmRefreshTimeoutMs = 130000
 $script:StopProcess = $null
+$script:SuppressBridgeLogs = $false
 $script:UpdateProcess = $null
 $script:SupportProcess = $null
 $script:UpdateCheckManual = $false
@@ -1123,6 +1156,7 @@ function Start-BridgeOrRecorder {
         PROFILES_FOLDER = $profile.ProfilesFolder
         BRIDGE_USERNAME = $profile.Username
     }
+    $script:SuppressBridgeLogs = $false
     Reset-LogCursor 'bridge-out'
     Reset-LogCursor 'bridge-err'
     try {
@@ -1147,6 +1181,8 @@ function Stop-BridgeOrRecorder {
         Add-Log 'gui' 'A stop request is already running.'
         return
     }
+    $script:SuppressBridgeLogs = $true
+    Move-BridgeLogCursorsToEnd
     Add-Log 'gui' 'Stopping active bridge processes...'
     Reset-LogCursor 'stop-out'
     Reset-LogCursor 'stop-err'
@@ -1160,6 +1196,7 @@ function Stop-BridgeOrRecorder {
         Update-TopStatus 'stopping'
         Update-PrimaryActionButton
     } catch {
+        $script:SuppressBridgeLogs = $false
         Add-Log 'stop' "Stop failed: $($_.Exception.Message)"
     }
 }
@@ -1648,6 +1685,10 @@ $script:LogSources = @(
 )
 $timer.Add_Tick({
     foreach ($entry in $script:LogSources) {
+        if ($script:SuppressBridgeLogs -and ($entry.Key -eq 'bridge-out' -or $entry.Key -eq 'bridge-err')) {
+            Move-LogCursorToEnd -Path $entry.Path -Key $entry.Key
+            continue
+        }
         $text = Read-NewLogText -Path $entry.Path -Key $entry.Key
         if ($text) { Add-Log $entry.Source $text }
     }
@@ -1682,6 +1723,8 @@ $timer.Add_Tick({
         $script:BridgeProcess = $null
     }
     if ($null -ne $script:StopProcess -and $script:StopProcess.HasExited) {
+        Move-BridgeLogCursorsToEnd
+        $script:SuppressBridgeLogs = $false
         Add-Log 'stop' "Stop request finished with exit code $($script:StopProcess.ExitCode)."
         $script:StopProcess.Dispose()
         $script:StopProcess = $null
@@ -1773,6 +1816,26 @@ if ($SmokeTest) {
     $realmParserSmoke = @(Parse-Realms '[realm-json] {"index":2,"id":"13","name":"Survival | Friends","owner":"owner","state":"OPEN","expired":false}')
     if ($realmParserSmoke.Count -ne 1 -or $realmParserSmoke[0].Id -ne '13' -or $realmParserSmoke[0].Name -ne 'Survival | Friends') {
         throw 'Structured Realm list parsing failed.'
+    }
+    $logNoiseSmoke = "$([char]27)]0;window title$([char]7)$([char]27)[31merror$([char]27)[0m$([char]7)$([char]0)`tkept`r`n"
+    if ((ConvertTo-DisplayLogText -Text $logNoiseSmoke) -ne "error`tkept`r`n") {
+        throw 'Console ANSI/control sanitization failed.'
+    }
+    $cursorSmokePath = Join-Path ([IO.Path]::GetTempPath()) "javarock-log-cursor-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        [IO.File]::WriteAllText($cursorSmokePath, ('x' * 65536), [Text.UTF8Encoding]::new($false))
+        Reset-LogCursor 'cursor-smoke'
+        Move-LogCursorToEnd -Path $cursorSmokePath -Key 'cursor-smoke'
+        if ((Read-NewLogText -Path $cursorSmokePath -Key 'cursor-smoke') -ne '') {
+            throw 'Fast-forwarded log cursor replayed stale output.'
+        }
+        [IO.File]::AppendAllText($cursorSmokePath, 'tail', [Text.UTF8Encoding]::new($false))
+        if ((Read-NewLogText -Path $cursorSmokePath -Key 'cursor-smoke') -ne 'tail') {
+            throw 'Fast-forwarded log cursor did not preserve new output.'
+        }
+    } finally {
+        Remove-Item -LiteralPath $cursorSmokePath -Force -ErrorAction SilentlyContinue
+        [void]$script:LogOffsets.Remove('cursor-smoke')
     }
     Write-Host '[JavaRock] Native Windows GUI smoke check passed.'
     $timer.Dispose()

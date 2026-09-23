@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.97 - 2026-09-22
+
+- Added Bedrock 1.26.50 compatibility aliases for new stair corners and fence/pane connections so those blocks no longer become air or flood the launcher log.
+- New poplar shelves, doors, signs, wood blocks, straw beds, colored stairs/slabs, and plants now use functional 1.26.45 fallbacks; poplar shelves retain shelf storage behavior.
+- Door updates now send both halves together on the next tick instead of repeatedly rebuilding nearby chunks.
+- Repeated missing-state and waterlogging warnings are deduplicated, and the launcher strips terminal control codes from the visible log.
+- Stopping the bridge now skips unread log backlog immediately, so old output cannot keep hammering the launcher after both bridge processes have exited.
+
 ## 0.3.96 - 2026-09-22
 
 - Fixed Java 26.2 and 26.3 being rejected before Realm login because ViaProxy used Bedrock 1.26.45 while the local relay still started as 1.26.30.

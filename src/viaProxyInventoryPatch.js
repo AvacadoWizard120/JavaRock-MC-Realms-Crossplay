@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.96-viaproxy-3.4.13'
+const PATCH_ID = 'v0.3.97-viaproxy-3.4.13'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/packet/UnhandledPackets.class',
   'net/raphimc/viabedrock/protocol/packet/UnhandledPackets$1.class',
@@ -36,6 +36,7 @@ const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$BlockLightData.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$SubChunkPosition.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$BiomeAggregator.class',
+  'net/raphimc/viabedrock/protocol/storage/BedrockBlockStateCompatibility.class',
   'net/raphimc/viabedrock/protocol/storage/BridgeBlockRendering.class',
   'net/raphimc/viabedrock/protocol/storage/BridgeBlockRenderingData.class',
   'net/raphimc/viabedrock/api/model/container/Container.class',
@@ -56,6 +57,7 @@ const CLASS_RELATIVE_PATH = CLASS_RELATIVE_PATHS[0]
 const PATCH_SOURCE_RELATIVE_PATHS = [
   'BridgeBlockRenderingData.java',
   'BridgeBlockRendering.java',
+  'BedrockBlockStateCompatibility.java',
   'ChunkTracker.java',
   'ClientPlayerEntity.java',
   'ClientPlayerPackets.java',

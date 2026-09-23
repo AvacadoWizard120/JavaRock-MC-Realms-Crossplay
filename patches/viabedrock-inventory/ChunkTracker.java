@@ -34,6 +34,7 @@ import com.viaversion.viaversion.api.type.types.chunk.ChunkType26_1;
 import com.viaversion.viaversion.libs.fastutil.ints.Int2IntMap;
 import com.viaversion.viaversion.libs.fastutil.ints.Int2IntOpenHashMap;
 import com.viaversion.viaversion.libs.fastutil.ints.IntArrayList;
+import com.viaversion.viaversion.libs.fastutil.ints.IntOpenHashSet;
 import com.viaversion.viaversion.libs.fastutil.ints.IntObjectImmutablePair;
 import com.viaversion.viaversion.libs.fastutil.ints.IntObjectPair;
 import com.viaversion.viaversion.libs.fastutil.ints.IntSet;
@@ -54,6 +55,7 @@ import net.raphimc.viabedrock.api.chunk.section.BedrockChunkSection;
 import net.raphimc.viabedrock.api.chunk.section.BedrockChunkSectionImpl;
 import net.raphimc.viabedrock.api.model.BedrockBlockState;
 import net.raphimc.viabedrock.api.model.BlockState;
+import net.raphimc.viabedrock.api.util.PacketFactory;
 import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.ServerboundBedrockPackets;
 import net.raphimc.viabedrock.protocol.data.ProtocolConstants;
@@ -99,11 +101,16 @@ public class ChunkTracker extends StoredObject {
     private final Int2IntMap blockEmissionCache = new Int2IntOpenHashMap();
     private final Int2IntMap blockOpacityCache = new Int2IntOpenHashMap();
     private final Int2IntMap derivedStateCache = new Int2IntOpenHashMap();
+    private final IntSet warnedMissingBlockStates = new IntOpenHashSet();
+    private final IntSet warnedMissingWaterloggedBlockStates = new IntOpenHashSet();
+    private final Set<String> warnedMissingPersistentBlockStates = new HashSet<>();
+    private final LongSet warnedBlockEntityBeforeChunk = new LongOpenHashSet();
 
     private final Set<SubChunkPosition> subChunkRequests = new HashSet<>();
     private final Set<SubChunkPosition> pendingSubChunks = new HashSet<>();
     private final Set<SubChunkPosition> loadedSubChunks = new HashSet<>();
     private final Set<BlockPosition> spawnedItemFrames = new HashSet<>();
+    private final Set<BlockPosition> pendingDoorUpdates = new HashSet<>();
 
     private int centerX = 0;
     private int centerZ = 0;
@@ -112,6 +119,7 @@ public class ChunkTracker extends StoredObject {
     public ChunkTracker(final UserConnection user, final Dimension dimension) {
         super(user);
         this.dimension = dimension;
+        BedrockBlockStateCompatibility.install(user.get(BlockStateRewriter.class));
         this.blockEmissionCache.defaultReturnValue(-1);
         this.blockOpacityCache.defaultReturnValue(-1);
         this.derivedStateCache.defaultReturnValue(-1);
@@ -235,7 +243,7 @@ public class ChunkTracker extends StoredObject {
         final int blockState0 = blockPalettes.get(0).idAt(sectionX, sectionY, sectionZ);
         int remappedBlockState = blockStateRewriter.javaId(blockState0);
         if (remappedBlockState == -1) {
-            ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing block state: " + blockState0);
+            this.warnMissingBlockState(blockState0);
             remappedBlockState = ProtocolConstants.JAVA_AIR_ID;
         }
 
@@ -247,7 +255,7 @@ public class ChunkTracker extends StoredObject {
                     if (waterloggedBlockState != -1) {
                         remappedBlockState = waterloggedBlockState;
                     } else {
-                        ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing waterlogged block state: " + blockState0);
+                        this.warnMissingWaterloggedBlockState(blockState0);
                     }
                 } else {
                     ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Invalid layer 2 block state. L1: " + blockState0 + ", L2: " + blockState1);
@@ -265,8 +273,18 @@ public class ChunkTracker extends StoredObject {
     }
 
     public void addBlockEntity(final BedrockBlockEntity bedrockBlockEntity) {
-        final BedrockChunk chunk = this.getChunk(bedrockBlockEntity.position().x() >> 4, bedrockBlockEntity.position().z() >> 4);
-        if (chunk == null) return;
+        final int chunkX = bedrockBlockEntity.position().x() >> 4;
+        final int chunkZ = bedrockBlockEntity.position().z() >> 4;
+        final BedrockChunk chunk = this.getChunk(chunkX, chunkZ);
+        if (chunk == null) {
+            final long chunkKey = ChunkPosition.chunkKey(chunkX, chunkZ);
+            if (this.warnedBlockEntityBeforeChunk.add(chunkKey)) {
+                ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
+                        "Block entity arrived before its chunk and was ignored: chunk=" + chunkX + "," + chunkZ
+                                + " position=" + bedrockBlockEntity.position());
+            }
+            return;
+        }
 
         final BedrockBlockEntity previous = chunk.getBlockEntityAt(bedrockBlockEntity.position());
         chunk.removeBlockEntityAt(bedrockBlockEntity.position());
@@ -404,9 +422,11 @@ public class ChunkTracker extends StoredObject {
         }
         final DataPalette palette = section.palettes(PaletteType.BLOCKS).get(layer);
         final int prevBlockState = palette.idAt(sectionX, sectionY, sectionZ);
+        final BlockState previousJavaBlockState = this.javaBlockState(blockStateRewriter.javaId(prevBlockState));
+        final BlockState nextJavaBlockState = this.javaBlockState(blockStateRewriter.javaId(blockState));
         final boolean doorStateChanged = layer == 0 && (
-                BridgeBlockRendering.isDoor(this.javaBlockState(blockStateRewriter.javaId(prevBlockState)))
-                        || BridgeBlockRendering.isDoor(this.javaBlockState(blockStateRewriter.javaId(blockState)))
+                BridgeBlockRendering.isDoor(previousJavaBlockState)
+                        || BridgeBlockRendering.isDoor(nextJavaBlockState)
         );
         final String prevTag = blockStateRewriter.tag(prevBlockState);
         palette.setIdAt(sectionX, sectionY, sectionZ, blockState);
@@ -422,8 +442,12 @@ public class ChunkTracker extends StoredObject {
         if (prevBlockState != blockState) {
             final int chunkX = blockPosition.x() >> 4;
             final int chunkZ = blockPosition.z() >> 4;
-            this.invalidateBlockLightAround(chunkX, chunkZ);
-            this.markLoadedChunksDirtyAround(chunkX, chunkZ, true);
+            if (doorStateChanged) {
+                this.queueDoorUpdate(blockPosition, previousJavaBlockState, nextJavaBlockState);
+            } else {
+                this.invalidateBlockLightAround(chunkX, chunkZ);
+                this.markLoadedChunksDirtyAround(chunkX, chunkZ, true);
+            }
 
             if (CustomBlockTags.ITEM_FRAME.equals(tag)) {
                 final BedrockBlockEntity bedrockBlockEntity = this.getBlockEntity(blockPosition);
@@ -453,8 +477,8 @@ public class ChunkTracker extends StoredObject {
         }
 
         // A Bedrock door updates its two halves independently. Sending either raw
-        // half immediately exposes a transient mixed state to Java; the dirty
-        // chunk refresh below emits both derived halves together on the next tick.
+        // half immediately exposes a transient mixed state to Java. The queued
+        // paired update emits both derived halves together on the next tick.
         if (doorStateChanged) return null;
 
         return new IntObjectImmutablePair<>(remappedBlockState, null);
@@ -533,6 +557,8 @@ public class ChunkTracker extends StoredObject {
     }
 
     public void tick() {
+        this.flushPendingDoorUpdates();
+
         final long[] dirtyChunks = this.dirtyChunks.toLongArray();
         this.dirtyChunks.clear();
         for (long dirtyChunk : dirtyChunks) {
@@ -596,7 +622,7 @@ public class ChunkTracker extends StoredObject {
                     if (javaBlockState != -1) {
                         return javaBlockState;
                     } else {
-                        ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing block state: " + bedrockBlockState);
+                        this.warnMissingBlockState(bedrockBlockState);
                         return ProtocolConstants.JAVA_AIR_ID;
                     }
                 });
@@ -648,7 +674,7 @@ public class ChunkTracker extends StoredObject {
                                         if (waterloggedBlockState != -1) {
                                             remappedBlockPalette.setIdAt(x, y, z, waterloggedBlockState);
                                         } else {
-                                            ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing waterlogged block state: " + blockState0);
+                                            this.warnMissingWaterloggedBlockState(blockState0);
                                         }
                                     } else {
                                         ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Invalid layer 2 block state. L1: " + blockState0 + ", L2: " + blockState1);
@@ -937,6 +963,45 @@ public class ChunkTracker extends StoredObject {
         final Map<String, String> properties = BridgeBlockRendering.doorProperties(state, lower, upper);
         if (properties.isEmpty()) return javaBlockState;
         return this.javaBlockStateId(state.withProperties(properties), javaBlockState);
+    }
+
+    private void queueDoorUpdate(final BlockPosition position, final BlockState previousState, final BlockState nextState) {
+        final BlockState doorState = BridgeBlockRendering.isDoor(nextState) ? nextState : previousState;
+        final BlockPosition lowerPosition = doorState != null && doorState.hasProperty("half", "upper")
+                ? new BlockPosition(position.x(), position.y() - 1, position.z())
+                : position;
+        this.pendingDoorUpdates.add(lowerPosition);
+    }
+
+    private void flushPendingDoorUpdates() {
+        if (this.pendingDoorUpdates.isEmpty()) return;
+
+        final Set<BlockPosition> doorUpdates = new HashSet<>(this.pendingDoorUpdates);
+        this.pendingDoorUpdates.clear();
+        for (BlockPosition lowerPosition : doorUpdates) {
+            if (this.sendPairedDoorUpdate(lowerPosition)) continue;
+
+            final int chunkX = lowerPosition.x() >> 4;
+            final int chunkZ = lowerPosition.z() >> 4;
+            this.invalidateBlockLightAround(chunkX, chunkZ);
+            this.markLoadedChunksDirtyAround(chunkX, chunkZ, true);
+        }
+    }
+
+    private boolean sendPairedDoorUpdate(final BlockPosition lowerPosition) {
+        final BlockPosition upperPosition = new BlockPosition(lowerPosition.x(), lowerPosition.y() + 1, lowerPosition.z());
+        final BlockState lowerState = this.javaBlockState(this.getRawJavaBlockState(lowerPosition));
+        final BlockState upperState = this.javaBlockState(this.getRawJavaBlockState(upperPosition));
+        final Map<String, String> properties = BridgeBlockRendering.doorProperties(lowerState, lowerState, upperState);
+        if (properties.isEmpty()) return false;
+
+        final int lowerJavaBlockState = this.javaBlockStateId(lowerState.withProperties(properties), -1);
+        final int upperJavaBlockState = this.javaBlockStateId(upperState.withProperties(properties), -1);
+        if (lowerJavaBlockState == -1 || upperJavaBlockState == -1) return false;
+
+        PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition, lowerJavaBlockState);
+        PacketFactory.sendJavaBlockUpdate(this.user(), upperPosition, upperJavaBlockState);
+        return true;
     }
 
     private void syncItemFramesAfterChunkSend(final long chunkKey, final Set<BlockPosition> currentFrames) {
@@ -1339,12 +1404,31 @@ public class ChunkTracker extends StoredObject {
                         if (bedrockBlockState != -1) {
                             return bedrockBlockState;
                         } else {
-                            ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing block state: " + bedrockBlockStateTag);
+                            this.warnMissingBlockState(bedrockBlockStateTag);
                             return blockStateRewriter.bedrockId(BedrockBlockState.INFO_UPDATE);
                         }
                     });
                 }
             }
+        }
+    }
+
+    private void warnMissingBlockState(final int bedrockBlockState) {
+        if (this.warnedMissingBlockStates.add(bedrockBlockState)) {
+            ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing block state: " + bedrockBlockState);
+        }
+    }
+
+    private void warnMissingBlockState(final Object bedrockBlockState) {
+        final String blockStateKey = String.valueOf(bedrockBlockState);
+        if (this.warnedMissingPersistentBlockStates.add(blockStateKey)) {
+            ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing block state: " + blockStateKey);
+        }
+    }
+
+    private void warnMissingWaterloggedBlockState(final int bedrockBlockState) {
+        if (this.warnedMissingWaterloggedBlockStates.add(bedrockBlockState)) {
+            ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Missing waterlogged block state: " + bedrockBlockState);
         }
     }
 
