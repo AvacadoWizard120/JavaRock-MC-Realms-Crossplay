@@ -160,8 +160,12 @@ try {
         if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) { continue }
         $runtimeLabel = Split-Path -Leaf $runtimeRoot
         foreach ($file in @(Get-ChildItem -LiteralPath $runtimeRoot -File -ErrorAction SilentlyContinue)) {
-            if ($file.Name -notmatch '(?i)(\.log$|bridge-status\.json$|(?:update|support)-result\.json$|startup.*\.err\.log$)') { continue }
+            if ($file.Name -notmatch '(?i)(\.log$|bridge-status\.json$|(?:update(?:-install)?|support)-(?:result|progress)\.json$|startup.*\.err\.log$)') { continue }
             Add-SupportFile -Source $file.FullName -RelativePath (Join-Path "runtime\$runtimeLabel" $file.Name) -RedactText
+        }
+        $updateRuntime = Join-Path $runtimeRoot 'updates'
+        foreach ($name in @('latest-update.log', 'latest-result.json', 'latest-progress.json', 'latest-restart.out.log', 'latest-restart.err.log')) {
+            Add-SupportFile -Source (Join-Path $updateRuntime $name) -RelativePath (Join-Path "runtime\$runtimeLabel\updates" $name) -RedactText
         }
     }
 
