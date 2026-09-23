@@ -89,14 +89,18 @@ public class EntityTracker extends StoredObject {
             this.clientPlayerEntity = clientPlayerEntity;
         }
 
-        final Entity prevEntity = this.entities.put(entity.uniqueId(), entity);
+        final Entity prevEntity = this.entities.get(entity.uniqueId());
         if (prevEntity != null) {
-            ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Duplicate entity unique ID: " + entity.uniqueId());
+            ViaBedrock.getPlatform().getLogger().log(Level.FINE, "Refreshing entity unique ID after downstream world reset: " + entity.uniqueId());
             this.removeEntity(prevEntity);
             final PacketWrapper removeEntities = PacketWrapper.create(ClientboundPackets26_1.REMOVE_ENTITIES, this.user());
             removeEntities.write(Types.VAR_INT_ARRAY_PRIMITIVE, new int[]{prevEntity.javaId()});
             removeEntities.send(BedrockProtocol.class);
         }
+        // Insert only after the stale entity has been removed. Inserting first
+        // and then calling removeEntity(prevEntity) removes this replacement too
+        // because both instances share the same Bedrock unique ID.
+        this.entities.put(entity.uniqueId(), entity);
         if (this.javaIdToUniqueId.put(entity.javaId(), (Long) entity.uniqueId()) != null) {
             ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Duplicate Java entity ID: " + entity.javaId());
         }

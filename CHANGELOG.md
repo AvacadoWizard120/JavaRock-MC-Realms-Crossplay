@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.106 - 2026-09-23
+
+- Respawning now rebuilds every cached mob immediately, including idle animals, and duplicate entity refreshes no longer remove their own replacement tracker entry.
+- Joining waits for ViaBedrock's real ready acknowledgement and nearby spawn terrain for longer. Large terrain requests are split into floor-first batches so the player does not begin falling while one enormous response blocks movement.
+- The updater no longer reports a successful install as failed when the restarted app still owns its output log. Its progress window stays on top, and the failure Close button now works.
+
 ## 0.3.105 - 2026-09-23
 
 - Fixed melee attacks and entity interactions being decoded as empty inventory mismatches. JavaRock now uses ViaBedrock's typed entity-transaction encoder, including the modern presence fields and item format.

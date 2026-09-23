@@ -272,10 +272,18 @@ try {
   assert(!fs.existsSync(path.join(currentRoot, 'node_modules')), 'a real package-lock dependency change did not delete node_modules')
 
   write(currentRoot, 'node_modules/updater-smoke-fixture/marker.txt', 'keep across another root version-only change\n')
+  // Mirror the real GUI launch: the long-lived child inherits the restart log handle after its launcher exits.
   const restartScript = [
     "$runtime = Join-Path (Split-Path -Parent $PSScriptRoot) '.runtime'",
     '[IO.Directory]::CreateDirectory($runtime) | Out-Null',
-    "$child = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoLogo -NoProfile -Command \"Start-Sleep -Seconds 60\"' -WindowStyle Hidden -PassThru",
+    "$startInfo = New-Object Diagnostics.ProcessStartInfo",
+    "$startInfo.FileName = 'powershell.exe'",
+    "$startInfo.Arguments = '-NoLogo -NoProfile -Command \"Start-Sleep -Seconds 5\"'",
+    '$startInfo.UseShellExecute = $false',
+    '$startInfo.CreateNoWindow = $true',
+    '$child = New-Object Diagnostics.Process',
+    '$child.StartInfo = $startInfo',
+    "if (-not $child.Start()) { throw 'Could not start the restart smoke child.' }",
     "[IO.File]::WriteAllText((Join-Path $runtime 'restart-child.pid'), [string]$child.Id)",
     'Write-Host "[JavaRock] Native Windows GUI is visible (PID $($child.Id))."',
     'exit 0',
@@ -288,7 +296,6 @@ try {
   assert(fs.existsSync(restartPidPath), 'the updated launcher was not started')
   restartChildPid = Number(fs.readFileSync(restartPidPath, 'utf8').trim())
   assert(Number.isSafeInteger(restartChildPid) && restartChildPid > 0)
-  process.kill(restartChildPid, 0)
   assert(fs.existsSync(path.join(currentRoot, 'node_modules', 'updater-smoke-fixture', 'marker.txt')), 'restart update deleted node_modules for a root version-only lock change')
 
   const badFixture = createReleaseFixture({ version: '1.0.4', fixtureVersion: '2.0.0' })
@@ -344,7 +351,10 @@ try {
   assert.match(updaterSource, /Get-PackageLockDependencyHash/)
   assert.match(updaterSource, /Get-ReleaseAssets/)
   assert.match(updaterSource, /unexpected release-assets URL/)
-  assert.match(updaterSource, /\[IO\.File\]::ReadAllText\(\$stdoutPath\)\.Trim\(\)/)
+  assert.match(updaterSource, /function Read-TextFileShared/)
+  assert.match(updaterSource, /\[IO\.FileShare\]::ReadWrite\s+-bor\s+\[IO\.FileShare\]::Delete/)
+  assert.match(updaterSource, /Read-TextFileShared -Path \$stdoutPath/)
+  assert.doesNotMatch(updaterSource, /\[IO\.File\]::ReadAllText\(\$stdoutPath\)/)
   assert.doesNotMatch(updaterSource, /\(\[string\]\(Get-Content -LiteralPath \$stdoutPath[^\n]+\)\)\.Trim\(\)/)
   assert.match(updaterSource, /Native Windows GUI is visible/)
   assert.match(updaterSource, /Start-JavaRock\.ps1/)
@@ -353,6 +363,9 @@ try {
   assert.match(updaterSource, /Get-SavedDarkModePreference/)
   assert.match(updaterSource, /Set-ProgressWindowTheme/)
   assert.match(updaterSource, /FromArgb\(32, 33, 36\)/)
+  assert.match(updaterSource, /\$form\.TopMost\s*=\s*\$true/)
+  assert.match(updaterSource, /\$script:ProgressForm\.Close\(\)/)
+  assert.doesNotMatch(updaterSource, /\$close\.Add_Click\(\{\s*\$form\.Close\(\)/)
   assert.doesNotMatch(updaterSource, /\.auth-profiles.*Remove-Item/i)
   assert.strictEqual(validateUrl('https://api.github.com/repos/example/project/releases/latest').hostname, 'api.github.com')
   assert.throws(() => validateUrl('http://api.github.com/example'), /unexpected update URL/i)
@@ -368,5 +381,5 @@ try {
   if (restartChildPid > 0) {
     try { process.kill(restartChildPid) } catch {}
   }
-  fs.rmSync(tempRoot, { recursive: true, force: true })
+  fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
 }

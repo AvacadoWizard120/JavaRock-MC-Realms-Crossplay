@@ -44,6 +44,15 @@ try {
   else process.env.NETHERNET_RELAY_TERRAIN_SPAWN_DELAY_MS = previousPrewarmDelay
 }
 
+const previousSpawnSupportTimeout = process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TIMEOUT_MS
+try {
+  delete process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TIMEOUT_MS
+  assert.strictEqual(prewarmRelay.spawnSupportTerrainTimeoutMs(), 2000)
+} finally {
+  if (previousSpawnSupportTimeout == null) delete process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TIMEOUT_MS
+  else process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TIMEOUT_MS = previousSpawnSupportTimeout
+}
+
 const chunkFlushRelay = Object.create(ViaBedrockRelayPlayer.prototype)
 const queuedChunks = []
 chunkFlushRelay.sentStartGame = false
@@ -107,6 +116,32 @@ assert.strictEqual(modernLevelChunkRelay.rememberSyntheticSubchunkOriginFromLeve
   sub_chunk_count: 0
 }), false)
 
+const stableSpawnOriginRelay = Object.create(ViaBedrockRelayPlayer.prototype)
+stableSpawnOriginRelay.upstream = {
+  startGameData: { player_position: { x: 220.2, y: 74.62, z: -22.41 } }
+}
+stableSpawnOriginRelay.latestSyntheticSubchunkOrigin = null
+assert.strictEqual(stableSpawnOriginRelay.rememberSyntheticSubchunkOriginFromLevelChunk({
+  x: 13,
+  z: -2,
+  dimension: 0,
+  sub_chunk_count: 0,
+  highest_subchunk_count: 24
+}), true)
+assert.strictEqual(stableSpawnOriginRelay.rememberSyntheticSubchunkOriginFromLevelChunk({
+  x: 31,
+  z: 17,
+  dimension: 0,
+  sub_chunk_count: 0,
+  highest_subchunk_count: 24
+}), false)
+assert.deepStrictEqual(stableSpawnOriginRelay.latestSyntheticSubchunkOrigin, {
+  x: 13,
+  y: 0,
+  z: -2,
+  dimension: 0
+})
+
 function makeOutboundRelay (downstreamMode = 'viabedrock') {
   const sentPackets = []
   const shimRequests = []
@@ -136,12 +171,14 @@ function makeOutboundRelay (downstreamMode = 'viabedrock') {
   relay.pendingLocalPlayerSpawnSupport = null
   relay.localPlayerSpawnSupportTimer = null
   relay.awaitingSpawnSupportPacketForPlayReady = false
+  relay.upstreamPlayerInitializedSent = false
   relay.downstreamKnownEntityRuntimeIds = new Set()
   relay.downstreamEntitySpawnCache = new Map()
   relay.downstreamEntityUniqueToRuntime = new Map()
   relay.droppedUnknownEntityPacketCounts = new Map()
   relay.replayedEntitySpawnCounts = new Map()
   relay.localPlayerRuntimeIdKey = null
+  relay.entityTrackerRespawnReplayTimer = null
   relay.localPlayerSpawnPrewarmDelayMs = () => 0
   relay.normalizeClientboundEntityMetadataForViaBedrock = (name, params) => params
   relay.recordBridgeToViaBedrock = () => {}
@@ -152,6 +189,20 @@ function makeOutboundRelay (downstreamMode = 'viabedrock') {
   relay.scheduleLocalInventoryScreenShim = (reason, delayMs) => shimRequests.push({ reason, delayMs })
   relay.queue = (name, params) => sentPackets.push({ name, params })
   return { relay, sentPackets, shimRequests }
+}
+
+{
+  const { relay } = makeOutboundRelay()
+  const earlyInitialization = []
+  relay.upstream = {
+    startGameData: { runtime_entity_id: 123n },
+    write: (...args) => earlyInitialization.push(['write', ...args]),
+    queue: (...args) => earlyInitialization.push(['queue', ...args]),
+    emit: (...args) => earlyInitialization.push(['emit', ...args])
+  }
+  relay.mirrorUpstreamClientStateFromPacket('play_status', { status: 'player_spawn' })
+  assert.deepStrictEqual(earlyInitialization, [])
+  assert.strictEqual(relay.upstreamPlayerInitializedSent, false)
 }
 
 {
@@ -288,6 +339,35 @@ assert.strictEqual(buildSpawnSupportSubchunkRequest({
 }
 
 {
+  const { relay } = makeOutboundRelay()
+  const upstreamPackets = []
+  const census = []
+  relay.upstream = {
+    options: { version: '1.26.45' },
+    // Exact section boundary: prioritize the floor section below the feet.
+    startGameData: { player_position: { x: 220.2, y: 80, z: -22.41 } },
+    queue: (name, params) => upstreamPackets.push({ name, params })
+  }
+  relay.recordBridgeToRealm = (name, params, phase, extra) => census.push({ name, params, phase, extra })
+  const requests = []
+  for (let index = 64; index >= 0; index--) {
+    requests.push({ x: index % 5, y: Math.floor(index / 25), z: Math.floor(index / 5) % 5 })
+  }
+  requests[17] = { x: 0, y: 4, z: 0 }
+  const original = requests.map(entry => ({ ...entry }))
+  assert.strictEqual(relay.relayServerboundToUpstream('subchunk_request', {
+    dimension: 0,
+    origin: { x: 13, y: 0, z: -2 },
+    requests
+  }, 'batch-smoke'), true)
+  assert.deepStrictEqual(requests, original)
+  assert.deepStrictEqual(upstreamPackets.map(packet => packet.params.requests.length), [32, 32, 1])
+  assert.deepStrictEqual(upstreamPackets[0].params.requests[0], { x: 0, y: 4, z: 0 })
+  assert(census.some(event => event.phase === 'rewritten' && event.extra.translation_status === 'split_large_viabedrock_subchunk_request'))
+  assert.strictEqual(census.filter(event => event.phase === 'sent').length, 3)
+}
+
+{
   const { relay, sentPackets } = makeOutboundRelay()
   relay.startRelaying = true
   relay.chunkSendCache = [{ x: 14, z: -9 }]
@@ -336,7 +416,9 @@ assert.strictEqual(buildSpawnSupportSubchunkRequest({
   const order = []
   relay.startRelaying = true
   Object.defineProperty(relay, 'status', { value: 0, writable: true, configurable: true })
-  relay.upstream = {}
+  relay.upstream = {
+    emit: name => order.push(`upstream:${name}`)
+  }
   relay.upQ = []
   relay.flushUpQueue = () => {}
   relay.recordLosslessNativePacket = () => {}
@@ -371,11 +453,20 @@ assert.strictEqual(buildSpawnSupportSubchunkRequest({
 
   assert.deepStrictEqual(order, [
     'upstream:set_local_player_as_initialized',
+    'upstream:spawn',
     'downstream:player_list'
   ])
+  assert.strictEqual(relay.upstreamPlayerInitializedSent, true)
   assert.strictEqual(relay.downstreamPlayReady, true)
   assert.strictEqual(relay.downstreamPlayReadyTimer, null)
   assert.deepStrictEqual(relay.delayedClientboundPlayPackets, [])
+
+  relay.readPacket(Buffer.from([0]))
+  assert.deepStrictEqual(order, [
+    'upstream:set_local_player_as_initialized',
+    'upstream:spawn',
+    'downstream:player_list'
+  ])
 }
 
 {
@@ -396,12 +487,26 @@ assert.strictEqual(buildSpawnSupportSubchunkRequest({
     write: () => { throw new Error('native recorder must wait for real set_local_player_as_initialized') },
     queue: () => { throw new Error('native recorder must not synthesize terrain requests') }
   }
-  assert.strictEqual(relay.ensureUpstreamPlayerInitialized('native-smoke'), false)
+  relay.mirrorUpstreamClientStateFromPacket('play_status', { status: 'player_spawn' })
+  assert.strictEqual(relay.upstreamPlayerInitializedSent, false)
   assert.strictEqual(relay.sendSyntheticChunkRadiusRequest('native-smoke'), false)
   assert.strictEqual(relay.syntheticChunkRadiusTimer, null)
   relay.latestSyntheticSubchunkOrigin = { x: 0, y: 0, z: 0, dimension: 0 }
   assert.strictEqual(relay.sendSyntheticSubchunkRequest('native-smoke'), false)
   assert.strictEqual(relay.syntheticSubchunkRequestTimer, null)
+}
+
+{
+  const { relay } = makeOutboundRelay('native-bedrock-recorder')
+  const upstreamPackets = []
+  relay.upstream = { queue: (name, params) => upstreamPackets.push({ name, params }) }
+  const params = {
+    dimension: 0,
+    origin: { x: 13, y: 4, z: -2 },
+    requests: Array.from({ length: 65 }, (_, x) => ({ x, y: 0, z: 0 }))
+  }
+  assert.strictEqual(relay.relayServerboundToUpstream('subchunk_request', params, 'native-subchunk-smoke'), true)
+  assert.deepStrictEqual(upstreamPackets, [{ name: 'subchunk_request', params }])
 }
 
 {

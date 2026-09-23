@@ -75,6 +75,37 @@ function Write-JsonFileAtomic {
     }
 }
 
+function Read-TextFileShared {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$Attempts = 20,
+        [int]$RetryDelayMilliseconds = 50
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $attemptLimit = [Math]::Max(1, $Attempts)
+    for ($attempt = 1; $attempt -le $attemptLimit; $attempt++) {
+        $stream = $null
+        $reader = $null
+        try {
+            if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { return '' }
+            [IO.FileShare]$share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $stream = [IO.FileStream]::new($fullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+            $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false), $true)
+            return $reader.ReadToEnd()
+        } catch [IO.IOException] {
+            if ($attempt -ge $attemptLimit) { throw }
+            Start-Sleep -Milliseconds ([Math]::Max(0, $RetryDelayMilliseconds))
+        } finally {
+            if ($null -ne $reader) {
+                $reader.Dispose()
+            } elseif ($null -ne $stream) {
+                $stream.Dispose()
+            }
+        }
+    }
+}
+
 function Write-UpdateLog {
     param([string]$Message)
 
@@ -236,6 +267,7 @@ function Initialize-UpdateProgressWindow {
     $form.MinimizeBox = $false
     $form.ControlBox = $false
     $form.ShowInTaskbar = $true
+    $form.TopMost = $true
     $form.Font = New-Object Drawing.Font('Segoe UI', 9)
 
     $title = New-Object Windows.Forms.Label
@@ -271,7 +303,11 @@ function Initialize-UpdateProgressWindow {
     $close.Location = New-Object Drawing.Point(435, 177)
     $close.Size = New-Object Drawing.Size(100, 30)
     $close.Visible = $false
-    $close.Add_Click({ $form.Close() })
+    $close.Add_Click({
+        if ($null -ne $script:ProgressForm -and -not $script:ProgressForm.IsDisposed) {
+            $script:ProgressForm.Close()
+        }
+    })
     $form.Controls.Add($close)
 
     $script:ProgressForm = $form
@@ -285,6 +321,7 @@ function Initialize-UpdateProgressWindow {
         if (-not $script:ProgressCloseButton.Visible) { $_.Cancel = $true }
     })
     $form.Show()
+    $form.BringToFront()
     $form.Activate()
     Set-ProgressWindowChromeTheme
     Pump-UpdateProgressWindow
@@ -523,8 +560,8 @@ function Invoke-GitHubDownload {
         $process.WaitForExit()
         $process.Refresh()
         $exitCode = [int]$process.ExitCode
-        $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [IO.File]::ReadAllText($stdoutPath).Trim() } else { '' }
-        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [IO.File]::ReadAllText($stderrPath).Trim() } else { '' }
+        $stdout = (Read-TextFileShared -Path $stdoutPath).Trim()
+        $stderr = (Read-TextFileShared -Path $stderrPath).Trim()
         $output = (@($stdout, $stderr) | Where-Object { $_ }) -join "`r`n"
         if ($output) {
             foreach ($line in @($output -split '\r?\n')) { Write-UpdateLog "download: $line" }
@@ -958,8 +995,8 @@ function Invoke-MonitoredRestart {
         $process.Dispose()
     }
 
-    $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [IO.File]::ReadAllText($stdoutPath) } else { '' }
-    $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [IO.File]::ReadAllText($stderrPath) } else { '' }
+    $stdout = Read-TextFileShared -Path $stdoutPath
+    $stderr = Read-TextFileShared -Path $stderrPath
     foreach ($line in @(("$stdout`r`n$stderr" -split '\r?\n') | Where-Object { $_ })) { Write-UpdateLog "restart: $line" }
     if ($exitCode -ne 0) {
         $detail = ($stderr.Trim() -split '\r?\n' | Select-Object -Last 1)
