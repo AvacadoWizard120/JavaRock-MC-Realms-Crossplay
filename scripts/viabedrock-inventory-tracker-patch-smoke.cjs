@@ -263,6 +263,36 @@ function assertItemFrameMetadata () {
   }
 }
 
+function assertEntityReplacementOrder () {
+  const entitySource = fs.readFileSync(path.join(patchRoot, 'EntityTracker.java'), 'utf8')
+  const methodStart = entitySource.indexOf('public <T extends Entity> T addEntity(final T entity, final boolean updateTeam)')
+  const methodEnd = entitySource.indexOf('public void removeEntity', methodStart)
+  if (methodStart < 0 || methodEnd < 0) throw new Error('could not locate EntityTracker.addEntity replacement method')
+  const sourceMethod = entitySource.slice(methodStart, methodEnd)
+  const sourceLookup = sourceMethod.indexOf('this.entities.get(entity.uniqueId())')
+  const sourceRemove = sourceMethod.indexOf('this.removeEntity(prevEntity)')
+  const sourceInsert = sourceMethod.indexOf('this.entities.put(entity.uniqueId(), entity)')
+  if (!(sourceLookup >= 0 && sourceLookup < sourceRemove && sourceRemove < sourceInsert)) {
+    throw new Error('EntityTracker.java must remove the stale entity before inserting its replacement')
+  }
+
+  const entityClass = bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/EntityTracker.class')
+  const bytecode = run('javap', ['-c', '-p', entityClass]).stdout
+  const signature = bytecode.indexOf('addEntity(T, boolean);')
+  const methodBytecodeStart = bytecode.lastIndexOf('\n  public', signature)
+  const methodBytecodeEnd = bytecode.indexOf('\n  public', signature + 1)
+  if (signature < 0 || methodBytecodeStart < 0 || methodBytecodeEnd < 0) {
+    throw new Error('could not locate compiled EntityTracker.addEntity replacement method')
+  }
+  const methodBytecode = bytecode.slice(methodBytecodeStart, methodBytecodeEnd)
+  const bytecodeLookup = methodBytecode.indexOf('Long2ObjectMap.get:')
+  const bytecodeRemove = methodBytecode.indexOf('removeEntity:')
+  const bytecodeInsert = methodBytecode.indexOf('Long2ObjectMap.put:')
+  if (!(bytecodeLookup >= 0 && bytecodeLookup < bytecodeRemove && bytecodeRemove < bytecodeInsert)) {
+    throw new Error('compiled EntityTracker must remove the stale entity before inserting its replacement')
+  }
+}
+
 function assertFallingBlockEntityData () {
   const source = fs.readFileSync(path.join(patchRoot, 'EntityPackets.java'), 'utf8')
   for (const marker of [
@@ -1339,6 +1369,7 @@ assertJavaItemPacketStageCodec()
 assertRenderingDataCurrent()
 assertRenderingBytecode()
 assertItemFrameMetadata()
+assertEntityReplacementOrder()
 assertFallingBlockEntityData()
 assertModernLevelSoundCodec()
 assertModernMobEquipmentCodec()

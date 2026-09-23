@@ -75,4 +75,34 @@ const cachedRuntimeTarget = relayPlayer.normalizeClientboundEntityMetadataForVia
 })
 assert.strictEqual(cachedRuntimeTarget.metadata[0].value, '0')
 
+const respawnReplayRelay = Object.create(ViaBedrockRelayPlayer.prototype)
+respawnReplayRelay.server = { downstreamMode: 'viabedrock' }
+respawnReplayRelay.downstreamMode = 'viabedrock'
+respawnReplayRelay.localPlayerRuntimeIdKey = '1'
+respawnReplayRelay.downstreamKnownEntityRuntimeIds = new Set(['1', '200', '201'])
+respawnReplayRelay.downstreamEntitySpawnCache = new Map([
+  ['200', {
+    name: 'add_entity',
+    params: { unique_id: 200n, runtime_id: 200n, entity_type: 'minecraft:pig' }
+  }],
+  ['201', {
+    name: 'add_entity',
+    params: { unique_id: 201n, runtime_id: 201n, entity_type: 'minecraft:cow' }
+  }]
+])
+respawnReplayRelay.replayedEntitySpawnCounts = new Map()
+respawnReplayRelay.entityTrackerResetCount = 0
+const replayedSpawns = []
+respawnReplayRelay.queue = (name, params) => replayedSpawns.push({ name, params })
+respawnReplayRelay.scheduleCachedEntitySpawnReplayAfterReset = reason => {
+  respawnReplayRelay.replayAllCachedEntitySpawnsForDownstream(`entity_tracker_reset:${reason}`)
+}
+
+respawnReplayRelay.markDownstreamEntityTrackerReset('smoke respawn')
+assert.strictEqual(respawnReplayRelay.entityTrackerResetCount, 1)
+assert.deepStrictEqual(replayedSpawns.map(packet => packet.params.entity_type), ['minecraft:pig', 'minecraft:cow'])
+assert.deepStrictEqual([...respawnReplayRelay.downstreamKnownEntityRuntimeIds].sort(), ['1', '200', '201'])
+assert.strictEqual(respawnReplayRelay.replayedEntitySpawnCounts.get('200'), 1)
+assert.strictEqual(respawnReplayRelay.replayedEntitySpawnCounts.get('201'), 1)
+
 console.log('NetherNet relay entity tracker smoke check passed.')

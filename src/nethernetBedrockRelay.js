@@ -3800,7 +3800,6 @@ class ViaBedrockRelayPlayer extends Player {
     this.startGameChunkFlushTimer = null
     this.respawnPacket = []
     this.upstreamPlayerInitializedSent = false
-    this.pendingUpstreamPlayerSpawn = false
     this.downstreamPlayReady = !this.usesViaBedrockDownstream()
     this.downstreamPlayReadyTimer = null
     this.delayedClientboundPlayPackets = []
@@ -3822,6 +3821,7 @@ class ViaBedrockRelayPlayer extends Player {
     this.downstreamEntityUniqueToRuntime = new Map()
     this.localPlayerRuntimeIdKey = undefined
     this.entityTrackerResetCount = 0
+    this.entityTrackerRespawnReplayTimer = null
     this.droppedUnknownEntityPacketCounts = new Map()
     this.replayedEntitySpawnCounts = new Map()
     this.lastPlayerInventoryContent = null
@@ -4570,7 +4570,7 @@ class ViaBedrockRelayPlayer extends Player {
   }
 
   spawnSupportTerrainTimeoutMs () {
-    return Math.max(100, numberOrDefault(process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TIMEOUT_MS, 500))
+    return Math.max(100, numberOrDefault(process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TIMEOUT_MS, 2000))
   }
 
   delayLocalPlayerSpawnUntilSupportTerrain (name, params = {}, context = 'live') {
@@ -4794,12 +4794,40 @@ class ViaBedrockRelayPlayer extends Player {
     const z = Number(firstNonNull(params.z, params.chunk_z, params.chunkZ))
     if (!Number.isFinite(x) || !Number.isFinite(z)) return false
     const dimension = Number(firstNonNull(params.dimension, params.dimension_id, params.dimensionId, 0))
-    this.latestSyntheticSubchunkOrigin = {
+    const candidate = {
       x,
       y: 0,
       z,
       dimension: Number.isFinite(dimension) ? dimension : 0
     }
+
+    // Realms sends the partial level-chunk headers in an expanding spiral. The
+    // first header is commonly the player's spawn chunk, while the final header
+    // before player_spawn can be several chunks away. Keep the closest observed
+    // origin so a later edge header cannot disable spawn-support prefetch.
+    const playerPosition = firstNonNull(
+      this.upstream?.startGameData?.player_position,
+      this.upstream?.startGameData?.playerPosition
+    )
+    const playerX = Number(playerPosition?.x)
+    const playerZ = Number(playerPosition?.z)
+    const existing = this.latestSyntheticSubchunkOrigin
+    if (existing && Number.isFinite(playerX) && Number.isFinite(playerZ) &&
+      Number(existing.dimension) === candidate.dimension) {
+      const spawnChunkX = Math.floor(playerX / 16)
+      const spawnChunkZ = Math.floor(playerZ / 16)
+      const existingDistance = Math.max(
+        Math.abs(Number(existing.x) - spawnChunkX),
+        Math.abs(Number(existing.z) - spawnChunkZ)
+      )
+      const candidateDistance = Math.max(
+        Math.abs(candidate.x - spawnChunkX),
+        Math.abs(candidate.z - spawnChunkZ)
+      )
+      if (Number.isFinite(existingDistance) && existingDistance <= candidateDistance) return false
+    }
+
+    this.latestSyntheticSubchunkOrigin = candidate
     return true
   }
 
@@ -5566,7 +5594,26 @@ class ViaBedrockRelayPlayer extends Player {
     const cachedCount = this.downstreamEntitySpawnCache.size
     this.downstreamKnownEntityRuntimeIds.clear()
     if (this.localPlayerRuntimeIdKey) this.downstreamKnownEntityRuntimeIds.add(this.localPlayerRuntimeIdKey)
-    console.warn(`[bedrock-relay] Downstream ViaBedrock entity tracker may have reset (${reason}). Will lazily re-prime ${cachedCount} cached entity spawn(s) before forwarding movement/event packets.`)
+    console.warn(`[bedrock-relay] Downstream Java world reset (${reason}). Scheduling a complete replay of ${cachedCount} cached entity spawn(s).`)
+    this.scheduleCachedEntitySpawnReplayAfterReset(reason)
+  }
+
+  scheduleCachedEntitySpawnReplayAfterReset (reason, delayMs = 75) {
+    if (this.entityTrackerRespawnReplayTimer) clearTimeout(this.entityTrackerRespawnReplayTimer)
+    this.entityTrackerRespawnReplayTimer = setTimeout(() => {
+      this.entityTrackerRespawnReplayTimer = null
+      this.replayAllCachedEntitySpawnsForDownstream(`entity_tracker_reset:${reason}`)
+    }, Math.max(0, delayMs))
+    this.entityTrackerRespawnReplayTimer.unref?.()
+  }
+
+  replayAllCachedEntitySpawnsForDownstream (context = 'entity_tracker_reset') {
+    let replayed = 0
+    for (const runtimeId of this.downstreamEntitySpawnCache.keys()) {
+      if (this.replayCachedEntitySpawnForDownstream(runtimeId, context, { quiet: true })) replayed++
+    }
+    console.log(`[bedrock-relay] Replayed ${replayed}/${this.downstreamEntitySpawnCache.size} cached entity spawn(s) after ${context}; passive and idle mobs no longer wait for a movement packet to reappear.`)
+    return replayed
   }
 
   logUnknownEntityPacketDrop (name, runtimeId, context) {
@@ -5578,7 +5625,7 @@ class ViaBedrockRelayPlayer extends Player {
     }
   }
 
-  replayCachedEntitySpawnForDownstream (runtimeId, context) {
+  replayCachedEntitySpawnForDownstream (runtimeId, context, options = {}) {
     const cached = this.downstreamEntitySpawnCache.get(runtimeId)
     if (!cached) return false
 
@@ -5587,7 +5634,7 @@ class ViaBedrockRelayPlayer extends Player {
       this.downstreamKnownEntityRuntimeIds.add(runtimeId)
       const count = (this.replayedEntitySpawnCounts.get(runtimeId) || 0) + 1
       this.replayedEntitySpawnCounts.set(runtimeId, count)
-      if (count <= 2 || process.env.DEBUG_NETHERNET_RELAY_ENTITIES === 'true') {
+      if (!options.quiet && (count <= 2 || process.env.DEBUG_NETHERNET_RELAY_ENTITIES === 'true')) {
         console.warn(`[bedrock-relay] Re-primed ViaBedrock entity runtime ${runtimeId} with cached ${cached.name} before ${context}.`)
       }
       return true
@@ -5934,34 +5981,33 @@ class ViaBedrockRelayPlayer extends Player {
     }
   }
 
-  ensureUpstreamPlayerInitialized (reason) {
+  markUpstreamPlayerInitializedFromDownstream (reason) {
     if (!this.usesViaBedrockDownstream()) return false
-    if (!this.upstream || this.upstreamPlayerInitializedSent) return
+    if (!this.upstream || this.upstreamPlayerInitializedSent) return false
 
-    const runtimeEntityId = firstNonEmpty(
-      this.upstream.entityId,
-      this.upstream.startGameData?.runtime_entity_id,
-      this.upstream.startGameData?.runtimeEntityId
-    )
-
-    if (runtimeEntityId == null) {
-      this.pendingUpstreamPlayerSpawn = true
-      console.warn(`[bedrock-relay] Realm requested player initialization during ${reason}, but start_game runtime_entity_id is not known yet. Deferring.`)
-      return
-    }
-
+    // The Realm must see ViaBedrock's real acknowledgement, not one synthesized
+    // from the earlier clientbound player_spawn. Mark the local protocol state
+    // only after that packet has been serialized successfully upstream.
+    this.upstream.status = ClientStatus.Initialized
+    this.upstreamPlayerInitializedSent = true
     try {
-      this.upstream.write('set_local_player_as_initialized', { runtime_entity_id: runtimeEntityId })
-      this.upstream.status = ClientStatus.Initialized
-      this.upstreamPlayerInitializedSent = true
-      this.pendingUpstreamPlayerSpawn = false
-      this.upstream.emit('spawn')
-      console.log(`[bedrock-relay] Sent set_local_player_as_initialized to Realm (${reason}, runtime_entity_id=${runtimeEntityId}). Realm-side player initialization is complete; block/place correctness now depends on ViaBedrock emitting item_interact/item_stack_request or valid block_action data.`)
-      return true
+      this.upstream.emit?.('spawn')
     } catch (error) {
-      console.warn(`[bedrock-relay] Failed to send set_local_player_as_initialized to Realm: ${error.stack || error.message || error}`)
-      return false
+      console.warn(`[bedrock-relay] Upstream spawn listener failed after real downstream initialization: ${error.stack || error.message || error}`)
     }
+    console.log(`[bedrock-relay] Forwarded ViaBedrock's set_local_player_as_initialized to Realm (${reason}); opening gameplay only after the real downstream acknowledgement.`)
+    return true
+  }
+
+  relayDownstreamPlayerInitialized (params = {}, context = 'live') {
+    if (!this.upstreamPlayerInitializedSent) {
+      const forwarded = this.relayServerboundToUpstream('set_local_player_as_initialized', params, context)
+      if (!forwarded) return false
+      this.status = ClientStatus.Initialized ?? 3
+      this.markUpstreamPlayerInitializedFromDownstream(context)
+    }
+    this.markDownstreamPlayReady('downstream set_local_player_as_initialized')
+    return true
   }
 
   exportCraftingDataForPatchedViaBedrock (name, params = {}) {
@@ -6013,7 +6059,6 @@ class ViaBedrockRelayPlayer extends Player {
       this.upstream.startGameData = params || {}
       this.updateUpstreamItemPalette(params)
       this.scheduleSyntheticChunkRadiusRequest('start_game')
-      if (this.pendingUpstreamPlayerSpawn) this.ensureUpstreamPlayerInitialized('deferred_after_start_game')
       return
     }
 
@@ -6022,9 +6067,91 @@ class ViaBedrockRelayPlayer extends Player {
       return
     }
 
-    if (name === 'play_status' && params.status === 'player_spawn') {
-      this.ensureUpstreamPlayerInitialized('play_status.player_spawn')
+    // player_spawn is clientbound and arrives before ViaBedrock has finished
+    // translating terrain and entered PLAY. Wait for its real serverbound
+    // set_local_player_as_initialized packet instead of acknowledging early.
+  }
+
+  viaBedrockSubchunkRequestBatchSize () {
+    return Math.max(1, Math.min(64, numberOrDefault(process.env.NETHERNET_RELAY_SUBCHUNK_REQUEST_BATCH_SIZE, 32)))
+  }
+
+  splitViaBedrockSubchunkRequest (params = {}) {
+    const requestField = ['requests', 'subchunk_requests', 'subchunkRequests', 'entries']
+      .find(field => Array.isArray(params[field]))
+    if (!requestField) return [params]
+
+    const requests = params[requestField]
+    const batchSize = this.viaBedrockSubchunkRequestBatchSize()
+    if (requests.length <= batchSize) return [params]
+
+    // Offsets are relative to the request origin. Ask for the horizontal center
+    // at the floor section beneath the player first so useful ground is returned
+    // before the edge of ViaBedrock's full 256-offset request volume.
+    const coordinate = (entry, ...names) => Number(firstNonNull(...names.map(name => entry?.[name]), 0))
+    const requestOriginY = Number(firstNonNull(params.origin?.y, params.origin?.section_y, params.origin?.sectionY, 0))
+    const playerY = Number(firstNonNull(
+      this.upstream?.startGameData?.player_position?.y,
+      this.upstream?.startGameData?.playerPosition?.y
+    ))
+    const targetYOffset = Number.isFinite(playerY) && Number.isFinite(requestOriginY)
+      ? Math.floor((playerY - 1) / 16) - requestOriginY
+      : 0
+    const prioritized = requests.map((entry, index) => ({ entry, index })).sort((left, right) => {
+      const ax = coordinate(left.entry, 'x', 'offset_x', 'offsetX')
+      const ay = coordinate(left.entry, 'y', 'offset_y', 'offsetY')
+      const az = coordinate(left.entry, 'z', 'offset_z', 'offsetZ')
+      const bx = coordinate(right.entry, 'x', 'offset_x', 'offsetX')
+      const by = coordinate(right.entry, 'y', 'offset_y', 'offsetY')
+      const bz = coordinate(right.entry, 'z', 'offset_z', 'offsetZ')
+      const aHorizontal = Math.max(Math.abs(ax), Math.abs(az))
+      const bHorizontal = Math.max(Math.abs(bx), Math.abs(bz))
+      if (aHorizontal !== bHorizontal) return aHorizontal - bHorizontal
+      const aVertical = Math.abs(ay - targetYOffset)
+      const bVertical = Math.abs(by - targetYOffset)
+      if (aVertical !== bVertical) return aVertical - bVertical
+      const aTotal = Math.abs(ax) + Math.abs(ay) + Math.abs(az)
+      const bTotal = Math.abs(bx) + Math.abs(by) + Math.abs(bz)
+      if (aTotal !== bTotal) return aTotal - bTotal
+      return left.index - right.index
+    }).map(entry => entry.entry)
+
+    const batches = []
+    for (let offset = 0; offset < prioritized.length; offset += batchSize) {
+      batches.push({
+        ...params,
+        [requestField]: prioritized.slice(offset, offset + batchSize)
+      })
     }
+    return batches
+  }
+
+  relayViaBedrockSubchunkRequestBatches (params = {}, context = 'live') {
+    const batches = this.splitViaBedrockSubchunkRequest(params)
+    if (batches.length <= 1) return null
+    const originalRequests = firstNonNull(params.requests, params.subchunk_requests, params.subchunkRequests, params.entries)
+
+    this.recordBridgeToRealm('subchunk_request', params, 'rewritten', {
+      context,
+      translation_status: 'split_large_viabedrock_subchunk_request',
+      diagnostic: {
+        original_request_count: Array.isArray(originalRequests) ? originalRequests.length : undefined,
+        batch_count: batches.length,
+        batch_size: this.viaBedrockSubchunkRequestBatchSize()
+      }
+    })
+    console.log(`[bedrock-relay] Split ViaBedrock subchunk_request into ${batches.length} center-first batch(es) of at most ${this.viaBedrockSubchunkRequestBatchSize()} offsets; this avoids monolithic Realm responses starving movement input.`)
+
+    let sentAll = true
+    for (let index = 0; index < batches.length; index++) {
+      const sent = this.relayServerboundToUpstream(
+        'subchunk_request',
+        batches[index],
+        `${context}:subchunk_batch_${index + 1}_of_${batches.length}`
+      )
+      sentAll = sent && sentAll
+    }
+    return sentAll
   }
 
   rememberServerboundTerrainRequest (name) {
@@ -6101,6 +6228,11 @@ class ViaBedrockRelayPlayer extends Player {
     }
 
     this.rememberServerboundTerrainRequest(name)
+
+    if (name === 'subchunk_request' && !String(context).includes(':subchunk_batch_')) {
+      const batched = this.relayViaBedrockSubchunkRequestBatches(params, context)
+      if (batched != null) return batched
+    }
 
     if (name === 'container_close' && this.deferCraftingContainerCloseUntilDrainAck(params, context)) {
       return true
@@ -6445,6 +6577,8 @@ class ViaBedrockRelayPlayer extends Player {
         this.relayNativeBedrockServerboundRaw(packet, des, 'upstream_queue_flush')
       } else if (des.data.name === 'client_cache_status') {
         // ViaBedrock cache policy is selected by the relay lifecycle.
+      } else if (des.data.name === 'set_local_player_as_initialized') {
+        this.relayDownstreamPlayerInitialized(des.data.params, 'upstream_queue_flush')
       } else {
         this.relayServerboundToUpstream(des.data.name, des.data.params, 'upstream_queue_flush')
       }
@@ -6520,12 +6654,10 @@ class ViaBedrockRelayPlayer extends Player {
           this.relayClientCacheStatusToUpstream(des.data.params, 'live')
           break
         case 'set_local_player_as_initialized':
-          this.status = ClientStatus.Initialized ?? 3
-          // Preserve the Realm-visible initialization ordering before releasing
-          // the queued clientbound gameplay burst.
           this.downInLog('Relaying', des.data)
-          this.relayServerboundToUpstream(des.data.name, des.data.params, 'live')
-          this.markDownstreamPlayReady('downstream set_local_player_as_initialized')
+          // Forward the real acknowledgement once, mark/emit upstream spawn,
+          // then release queued gameplay in that order.
+          this.relayDownstreamPlayerInitialized(des.data.params, 'live')
           break
         default:
           this.downInLog('Relaying', des.data)
@@ -6556,6 +6688,10 @@ class ViaBedrockRelayPlayer extends Player {
     if (this.localPlayerSpawnSupportTimer) {
       clearTimeout(this.localPlayerSpawnSupportTimer)
       this.localPlayerSpawnSupportTimer = null
+    }
+    if (this.entityTrackerRespawnReplayTimer) {
+      clearTimeout(this.entityTrackerRespawnReplayTimer)
+      this.entityTrackerRespawnReplayTimer = null
     }
     if (this.craftingContainerCloseTimer) {
       clearTimeout(this.craftingContainerCloseTimer)
