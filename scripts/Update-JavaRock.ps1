@@ -10,6 +10,7 @@ param(
     [switch]$DarkMode,
     [string]$ProgressFile = '',
     [string]$ReleaseJsonPath = '',
+    [string]$ReleaseAssetsJsonPath = '',
     [string]$ArchivePath = '',
     [string]$ChecksumPath = ''
 )
@@ -581,6 +582,62 @@ function Assert-ReleaseDownloadUrl {
     }
 }
 
+function Get-ReleaseAssets {
+    param(
+        [Parameter(Mandatory = $true)]$Release,
+        [Parameter(Mandatory = $true)][string]$ArchiveName,
+        [Parameter(Mandatory = $true)][string]$ChecksumName
+    )
+
+    $embedded = @(Get-PropertyValue $Release 'assets' @())
+    $embeddedArchive = @($embedded | Where-Object { [string](Get-PropertyValue $_ 'name' '') -ceq $ArchiveName }) | Select-Object -First 1
+    $embeddedChecksum = @($embedded | Where-Object { [string](Get-PropertyValue $_ 'name' '') -ceq $ChecksumName }) | Select-Object -First 1
+    $embeddedArchiveUrl = if ($null -ne $embeddedArchive) { [string](Get-PropertyValue $embeddedArchive 'browser_download_url' '') } else { '' }
+    $embeddedChecksumUrl = if ($null -ne $embeddedChecksum) { [string](Get-PropertyValue $embeddedChecksum 'browser_download_url' '') } else { '' }
+    $embeddedDigest = if ($null -ne $embeddedArchive) { [string](Get-PropertyValue $embeddedArchive 'digest' '') } else { '' }
+    if ($embeddedArchiveUrl -and ($embeddedChecksumUrl -or $embeddedDigest -match '^sha256:[0-9a-fA-F]{64}$')) {
+        return @($embedded)
+    }
+
+    $assetsUrl = [string](Get-PropertyValue $Release 'assets_url' '')
+    if (-not $assetsUrl) { return @($embedded) }
+
+    $expectedPrefix = "https://api.github.com/repos/$Repository/releases/"
+    if (-not $assetsUrl.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $assetsUrl.Substring($expectedPrefix.Length) -notmatch '^\d+/assets$') {
+        throw 'GitHub returned an unexpected release-assets URL.'
+    }
+
+    $dedicated = @()
+    if ($ReleaseAssetsJsonPath) {
+        $dedicated = @(Get-Content -LiteralPath $ReleaseAssetsJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json)
+    } else {
+        [IO.Directory]::CreateDirectory($RuntimeRoot) | Out-Null
+        $assetsPath = Join-Path $RuntimeRoot "release-assets-$PID-$([DateTime]::UtcNow.Ticks).json"
+        try {
+            Write-UpdateLog 'Release metadata is still propagating; reading the dedicated asset list.'
+            Invoke-GitHubDownload -Url $assetsUrl -Destination $assetsPath -MaxBytes 4MB
+            $dedicated = @(Get-Content -LiteralPath $assetsPath -Raw -Encoding UTF8 | ConvertFrom-Json)
+        } finally {
+            if (Test-Path -LiteralPath $assetsPath -PathType Leaf) {
+                Remove-Item -LiteralPath $assetsPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    # Prefer the dedicated endpoint's fresher entry for a repeated asset name,
+    # while retaining any asset that appeared only in the embedded snapshot.
+    $combined = @()
+    $seenNames = @{}
+    foreach ($asset in @($dedicated) + @($embedded)) {
+        $name = [string](Get-PropertyValue $asset 'name' '')
+        if ($name -and $seenNames.ContainsKey($name)) { continue }
+        if ($name) { $seenNames[$name] = $true }
+        $combined += $asset
+    }
+    return @($combined)
+}
+
 function Get-ReleaseInfo {
     param([Parameter(Mandatory = $true)]$CurrentPackage)
 
@@ -599,11 +656,15 @@ function Get-ReleaseInfo {
     $versionText = $latestVersion.ToString(3)
     $archiveName = "JavaRock-$versionText-windows.zip"
     $checksumName = "$archiveName.sha256"
-    $assets = @(Get-PropertyValue $release 'assets' @())
+    $state = if ($latestVersion -gt $currentVersion) { 'update-available' } else { 'current' }
+    $assets = if ($state -eq 'update-available') {
+        @(Get-ReleaseAssets -Release $release -ArchiveName $archiveName -ChecksumName $checksumName)
+    } else {
+        @()
+    }
     $archiveAsset = @($assets | Where-Object { [string](Get-PropertyValue $_ 'name' '') -ceq $archiveName }) | Select-Object -First 1
     $checksumAsset = @($assets | Where-Object { [string](Get-PropertyValue $_ 'name' '') -ceq $checksumName }) | Select-Object -First 1
 
-    $state = if ($latestVersion -gt $currentVersion) { 'update-available' } else { 'current' }
     if ($state -eq 'update-available') {
         if ($null -eq $archiveAsset) { throw "Release $tag does not contain $archiveName." }
         if ($null -eq $checksumAsset -and -not [string](Get-PropertyValue $archiveAsset 'digest' '')) {

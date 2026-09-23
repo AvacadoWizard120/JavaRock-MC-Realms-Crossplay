@@ -214,6 +214,48 @@ try {
   assert.strictEqual(check.currentVersion, '1.0.0')
   assert.strictEqual(check.latestVersion, '1.0.1')
 
+  const cachedReleasePath = path.join(tempRoot, 'release-cached-without-assets.json')
+  const releaseAssetsPath = path.join(tempRoot, 'release-assets.json')
+  const cachedRelease = JSON.parse(fs.readFileSync(sameDependencies.releasePath, 'utf8'))
+  const completeReleaseAssets = cachedRelease.assets
+  fs.writeFileSync(releaseAssetsPath, `${JSON.stringify(completeReleaseAssets, null, 2)}\n`)
+  cachedRelease.assets = []
+  cachedRelease.assets_url = 'https://api.github.com/repos/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/releases/123456/assets'
+  fs.writeFileSync(cachedReleasePath, `${JSON.stringify(cachedRelease, null, 2)}\n`)
+  const cachedResultPath = path.join(tempRoot, 'check-cached-assets.json')
+  runUpdater([
+    '-ReleaseJsonPath', cachedReleasePath,
+    '-ReleaseAssetsJsonPath', releaseAssetsPath,
+    '-ResultFile', cachedResultPath,
+    '-Quiet'
+  ])
+  const cachedResult = JSON.parse(fs.readFileSync(cachedResultPath, 'utf8'))
+  assert.strictEqual(cachedResult.state, 'update-available')
+  assert.strictEqual(cachedResult.latestVersion, '1.0.1')
+
+  for (const [fixtureName, embeddedAssets] of [
+    ['checksum-only', completeReleaseAssets.filter(asset => asset.name.endsWith('.sha256'))],
+    ['zip-without-digest', completeReleaseAssets
+      .filter(asset => asset.name.endsWith('.zip'))
+      .map(({ digest, ...asset }) => asset)]
+  ]) {
+    const partialReleasePath = path.join(tempRoot, `release-cached-${fixtureName}.json`)
+    const partialResultPath = path.join(tempRoot, `check-cached-${fixtureName}.json`)
+    fs.writeFileSync(partialReleasePath, `${JSON.stringify({
+      ...cachedRelease,
+      assets: embeddedAssets
+    }, null, 2)}\n`)
+    runUpdater([
+      '-ReleaseJsonPath', partialReleasePath,
+      '-ReleaseAssetsJsonPath', releaseAssetsPath,
+      '-ResultFile', partialResultPath,
+      '-Quiet'
+    ])
+    const partialResult = JSON.parse(fs.readFileSync(partialResultPath, 'utf8'))
+    assert.strictEqual(partialResult.state, 'update-available', fixtureName)
+    assert.strictEqual(partialResult.latestVersion, '1.0.1', fixtureName)
+  }
+
   const firstInstall = installFixture(sameDependencies, 'install-same-lock.json', 'progress-same-lock.json')
   assert.strictEqual(firstInstall.result.currentVersion, '1.0.0')
   assert.strictEqual(firstInstall.result.latestVersion, '1.0.1')
@@ -300,6 +342,8 @@ try {
   assert.match(updaterSource, /Write-JsonFileAtomic/)
   assert.match(updaterSource, /Enter-UpdateMutex/)
   assert.match(updaterSource, /Get-PackageLockDependencyHash/)
+  assert.match(updaterSource, /Get-ReleaseAssets/)
+  assert.match(updaterSource, /unexpected release-assets URL/)
   assert.match(updaterSource, /Native Windows GUI is visible/)
   assert.match(updaterSource, /Start-JavaRock\.ps1/)
   assert.match(updaterSource, /latest-result\.json/)

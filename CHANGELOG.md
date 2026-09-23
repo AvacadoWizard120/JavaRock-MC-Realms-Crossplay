@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.103 - 2026-09-23
+
+- The updater now falls back to GitHub's dedicated asset list when tag metadata is still serving its pre-upload cache, preventing a valid new release from being reported as missing its ZIP.
+
 ## 0.3.102 - 2026-09-23
 
 - Rebuilt the automatic-update handoff around a standalone progress window that follows the launcher's light or dark theme. JavaRock now stays open until that window confirms it is ready, and download, verification, installation, and restart phases remain visible.
