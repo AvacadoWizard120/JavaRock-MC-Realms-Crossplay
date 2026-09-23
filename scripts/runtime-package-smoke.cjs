@@ -34,6 +34,7 @@ try {
     'scripts/New-JavaRockSupportBundle.ps1',
     'scripts/redact-support-file.cjs',
     'scripts/support-envelope.cjs',
+    'scripts/support-upload-http.cjs',
     'scripts/Update-JavaRock.ps1',
     'scripts/verify-release-integrity.cjs',
     'scripts/javarock-update-http.cjs',
@@ -77,6 +78,7 @@ try {
   assert(releaseManifest.files.includes('scripts/Update-JavaRock.ps1'))
   assert(releaseManifest.files.includes('scripts/New-JavaRockSupportBundle.ps1'))
   assert(releaseManifest.files.includes('scripts/support-envelope.cjs'))
+  assert(releaseManifest.files.includes('scripts/support-upload-http.cjs'))
   assert(releaseManifest.files.includes('scripts/verify-release-integrity.cjs'))
   assert.strictEqual(releaseManifest.integrity.length, releaseManifest.files.length - 1)
   assert(releaseManifest.integrity.every(entry => /^[0-9a-f]{64}$/.test(entry.sha256)))

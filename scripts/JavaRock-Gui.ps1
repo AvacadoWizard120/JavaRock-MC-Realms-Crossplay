@@ -1601,12 +1601,34 @@ function Complete-SupportBundle {
     $uploadMessage = [string](Get-ObjectValue $result 'uploadMessage' '')
     $bundlePath = [string](Get-ObjectValue $result 'bundlePath' '')
     $message = [string](Get-ObjectValue $result 'message' 'Support bundle finished.')
+    $uploadReceipt = [string](Get-ObjectValue $result 'uploadReceipt' '')
+    $uploadId = [string](Get-ObjectValue $result 'uploadId' '')
+    $uploadCfRay = [string](Get-ObjectValue $result 'uploadCfRay' '')
+    $uploadAttempt = [int](Get-ObjectValue $result 'uploadAttempt' 0)
+    $uploadConfirmed = [bool](Get-ObjectValue $result 'uploadConfirmed' $false)
+    $uploadConfirmationStatus = [string](Get-ObjectValue $result 'uploadConfirmationStatus' 'not_requested')
     if ($success) {
-        Add-Log 'support' "$message $bundlePath"
+        $diagnosticParts = @()
+        if ($uploadAttempt -or $uploaded -or $uploadFailed) {
+            if ($uploadId) { $diagnosticParts += "upload-id=$uploadId" }
+            if ($uploadReceipt) { $diagnosticParts += "receipt=$uploadReceipt" }
+            if ($uploadAttempt) { $diagnosticParts += "attempt=$uploadAttempt" }
+            if ($uploadConfirmationStatus) { $diagnosticParts += "confirmation=$uploadConfirmationStatus" }
+            if ($uploadCfRay) { $diagnosticParts += "cf-ray=$uploadCfRay" }
+        }
+        $deliveryDiagnostics = if ($diagnosticParts.Count) { ' ' + ($diagnosticParts -join ' ') } else { '' }
+        Add-Log 'support' "$message $bundlePath$deliveryDiagnostics"
         $detail = if ($uploaded) {
-            "The support ZIP was created. An encrypted copy was sent to the configured destination.`r`n`r`nThe local ZIP is at:`r`n$bundlePath"
+            if ($uploadReceipt -and $uploadConfirmed) {
+                "The support ZIP was accepted by the inbox and the stored copy was confirmed.`r`n`r`nConfirmed inbox receipt:`r`n$uploadReceipt`r`n`r`nThe local ZIP is at:`r`n$bundlePath"
+            } elseif ($uploadReceipt) {
+                "The support ZIP was accepted by the inbox. Storage confirmation is still pending, so keep this receipt with the report:`r`n`r`n$uploadReceipt`r`n`r`nThe local ZIP is at:`r`n$bundlePath"
+            } else {
+                "The support ZIP was copied to the configured destination and verified.`r`n`r`nThe local ZIP is at:`r`n$bundlePath"
+            }
         } elseif ($uploadFailed) {
-            "The support ZIP was created, but it could not be sent after three attempts.`r`n`r`n$uploadMessage`r`n`r`nThe ZIP is still available at:`r`n$bundlePath"
+            $attemptIdDetail = if ($uploadId) { "`r`n`r`nUpload attempt ID:`r`n$uploadId" } else { '' }
+            "The support ZIP was created, but it could not be sent after three attempts.`r`n`r`n$uploadMessage$attemptIdDetail`r`n`r`nThe ZIP is still available at:`r`n$bundlePath"
         } else {
             "The support ZIP is ready:`r`n`r`n$bundlePath`r`n`r`nSet an upload destination under Diagnostics to send future bundles automatically."
         }
@@ -1620,9 +1642,10 @@ function Complete-SupportBundle {
             Start-Process -FilePath 'explorer.exe' -ArgumentList (Quote-NativeArgument (Split-Path -Parent $bundlePath))
         }
     } else {
-        Add-Log 'support' "Support ZIP failed: $message"
+        $failureIdDetail = if ($uploadId) { " Upload attempt ID: $uploadId" } else { '' }
+        Add-Log 'support' "Support ZIP failed: $message$failureIdDetail"
         [void][Windows.Forms.MessageBox]::Show(
-            $message,
+            "$message$failureIdDetail",
             'Support ZIP failed',
             [Windows.Forms.MessageBoxButtons]::OK,
             [Windows.Forms.MessageBoxIcon]::Error

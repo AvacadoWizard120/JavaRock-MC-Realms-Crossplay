@@ -130,6 +130,22 @@ $uploadMessage = ''
 $remoteLocation = ''
 $encryptedUploadPath = ''
 $integrityVerified = $false
+$uploadReceipt = ''
+$uploadBytes = [int64]0
+$uploadSha256 = ''
+$uploadEndpoint = ''
+$uploadId = [Guid]::NewGuid().ToString().ToLowerInvariant()
+$uploadProtocol = 0
+$uploadStartedAt = ''
+$uploadCompletedAt = ''
+$uploadAttempt = 0
+$uploadCfRay = ''
+$uploadRequestId = ''
+$uploadConfirmationCfRay = ''
+$uploadConfirmationRequestId = ''
+$uploadConfirmationStatus = 'not_requested'
+$uploadConfirmed = $false
+$uploadConfirmationMessage = ''
 
 try {
     $stageFull = [IO.Path]::GetFullPath($script:StageDirectory)
@@ -258,23 +274,65 @@ try {
                 throw 'The support ZIP could not be encrypted. Nothing was uploaded.'
             }
             $uploadName = [IO.Path]::GetFileName($encryptedUploadPath)
+            $uploadBytes = [int64](Get-Item -LiteralPath $encryptedUploadPath).Length
+            $uploadSha256 = Get-Sha256 -Path $encryptedUploadPath
 
-            if ($UploadDestination -match '^https?://') {
-                $headers = @{
-                    'X-JavaRock-Filename' = $uploadName
-                    'X-JavaRock-Version' = $version
+            $isHttpUpload = $UploadDestination -match '^https?://'
+            if (-not $isHttpUpload -and -not [IO.Path]::IsPathRooted($UploadDestination)) {
+                throw 'The support destination must be an HTTPS inbox URL or an absolute shared-folder path.'
+            }
+            if ($isHttpUpload) {
+                if ($UploadDestination -notmatch '^https://') {
+                    throw 'The support inbox URL must use HTTPS.'
                 }
-                if ($UploadToken) { $headers.Authorization = "Bearer $UploadToken" }
+                $httpUploader = Join-Path $PSScriptRoot 'support-upload-http.cjs'
+                if (-not (Test-Path -LiteralPath $httpUploader -PathType Leaf)) {
+                    throw 'Remote sharing is disabled because the support upload verifier is missing. Reinstall the latest official release.'
+                }
                 $lastUploadError = $null
                 foreach ($attempt in 1..3) {
                     try {
+                        $uploadAttempt = $attempt
                         Write-Host "[JavaRock] Uploading encrypted support bundle (attempt $attempt of 3)..."
-                        $response = Invoke-WebRequest -Uri $UploadDestination -Method Put -InFile $encryptedUploadPath -ContentType 'application/vnd.javarock.support+encrypted' -Headers $headers -UseBasicParsing -TimeoutSec 60
-                        if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) {
-                            throw "The upload endpoint returned HTTP $($response.StatusCode)."
+                        $savedUploadToken = [Environment]::GetEnvironmentVariable('JAVAROCK_SUPPORT_UPLOAD_TOKEN', 'Process')
+                        $previousErrorAction = $ErrorActionPreference
+                        $uploadOutput = @()
+                        $uploadExitCode = -1
+                        try {
+                            [Environment]::SetEnvironmentVariable('JAVAROCK_SUPPORT_UPLOAD_TOKEN', $UploadToken, 'Process')
+                            $ErrorActionPreference = 'Continue'
+                            $uploadOutput = @(& node.exe $httpUploader `
+                                '--url' $UploadDestination `
+                                '--file' $encryptedUploadPath `
+                                '--filename' $uploadName `
+                                '--version' $version `
+                                '--upload-id' $uploadId 2>&1)
+                            $uploadExitCode = $LASTEXITCODE
+                        } finally {
+                            $ErrorActionPreference = $previousErrorAction
+                            [Environment]::SetEnvironmentVariable('JAVAROCK_SUPPORT_UPLOAD_TOKEN', $savedUploadToken, 'Process')
                         }
+                        $uploadOutputText = (@($uploadOutput | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+                        if ($uploadExitCode -ne 0) {
+                            throw $(if ($uploadOutputText) { $uploadOutputText } else { "The support upload verifier exited with code $uploadExitCode." })
+                        }
+                        try { $uploadAck = $uploadOutputText | ConvertFrom-Json } catch { throw 'The support upload verifier returned an unreadable result.' }
+                        $uploadReceipt = [string]$uploadAck.receipt
+                        $uploadBytes = [int64]$uploadAck.bytes
+                        $uploadSha256 = [string]$uploadAck.sha256
+                        $uploadEndpoint = [string]$uploadAck.endpoint
+                        $uploadProtocol = [int]$uploadAck.protocol
+                        $uploadStartedAt = [string]$uploadAck.startedAt
+                        $uploadCompletedAt = [string]$uploadAck.completedAt
+                        $uploadCfRay = [string]$uploadAck.cfRay
+                        $uploadRequestId = [string]$uploadAck.requestId
+                        $uploadConfirmationCfRay = [string]$uploadAck.confirmationCfRay
+                        $uploadConfirmationRequestId = [string]$uploadAck.confirmationRequestId
+                        $uploadConfirmationStatus = [string]$uploadAck.confirmationStatus
+                        $uploadConfirmed = [bool]$uploadAck.confirmed
+                        $uploadConfirmationMessage = [string]$uploadAck.confirmationMessage
                         $uploaded = $true
-                        $remoteLocation = $UploadDestination
+                        $remoteLocation = $uploadEndpoint
                         break
                     } catch {
                         $lastUploadError = $_.Exception
@@ -291,10 +349,22 @@ try {
                 [IO.Directory]::CreateDirectory($remoteDirectory) | Out-Null
                 $remotePath = Join-Path $remoteDirectory $uploadName
                 Copy-Item -LiteralPath $encryptedUploadPath -Destination $remotePath -Force
+                $remoteHash = Get-Sha256 -Path $remotePath
+                $remoteBytes = [int64](Get-Item -LiteralPath $remotePath).Length
+                if ($remoteHash -ne $uploadSha256 -or $remoteBytes -ne $uploadBytes) {
+                    throw 'The copied support bundle did not match the encrypted local file.'
+                }
                 $uploaded = $true
                 $remoteLocation = $remotePath
+                $uploadEndpoint = $remotePath
             }
-            Write-Host '[JavaRock] Support ZIP sent successfully.'
+            Write-Host $(if ($uploadReceipt -and $uploadConfirmed) {
+                "[JavaRock] Support ZIP accepted by the inbox and storage confirmed. Receipt: $uploadReceipt"
+            } elseif ($uploadReceipt) {
+                "[JavaRock] Support ZIP accepted by the inbox; storage confirmation is pending. Receipt: $uploadReceipt"
+            } else {
+                '[JavaRock] Support ZIP copied and verified successfully.'
+            })
         } catch {
             $uploadFailed = $true
             $uploadMessage = $_.Exception.Message
@@ -309,10 +379,36 @@ try {
         uploadFailed = $uploadFailed
         uploadMessage = $uploadMessage
         remoteLocation = $remoteLocation
+        uploadReceipt = $uploadReceipt
+        uploadId = $uploadId
+        uploadBytes = $uploadBytes
+        uploadSha256 = $uploadSha256
+        uploadEndpoint = $uploadEndpoint
+        uploadProtocol = $uploadProtocol
+        uploadStartedAt = $uploadStartedAt
+        uploadCompletedAt = $uploadCompletedAt
+        uploadAttempt = $uploadAttempt
+        uploadCfRay = $uploadCfRay
+        uploadRequestId = $uploadRequestId
+        uploadConfirmationCfRay = $uploadConfirmationCfRay
+        uploadConfirmationRequestId = $uploadConfirmationRequestId
+        uploadConfirmationStatus = $uploadConfirmationStatus
+        uploadConfirmed = $uploadConfirmed
+        uploadConfirmationMessage = $uploadConfirmationMessage
         integrityVerified = $integrityVerified
         uploadEncrypted = $uploaded
         includedFiles = $script:IncludedFiles.Count
-        message = if ($uploaded) { 'Support ZIP created and sent.' } elseif ($uploadFailed) { 'Support ZIP created, but it could not be sent.' } else { 'Support ZIP created.' }
+        message = if ($uploaded -and $uploadReceipt -and $uploadConfirmed) {
+            'Support ZIP created, accepted by the inbox, and storage confirmed.'
+        } elseif ($uploaded -and $uploadReceipt) {
+            'Support ZIP created and accepted by the inbox; storage confirmation is pending.'
+        } elseif ($uploaded) {
+            'Support ZIP created, copied, and verified.'
+        } elseif ($uploadFailed) {
+            'Support ZIP created, but it could not be sent.'
+        } else {
+            'Support ZIP created.'
+        }
     }
 } catch {
     $message = $_.Exception.Message
@@ -324,6 +420,22 @@ try {
         integrityVerified = $integrityVerified
         uploadEncrypted = $false
         remoteLocation = ''
+        uploadReceipt = $uploadReceipt
+        uploadId = $uploadId
+        uploadBytes = $uploadBytes
+        uploadSha256 = $uploadSha256
+        uploadEndpoint = $uploadEndpoint
+        uploadProtocol = $uploadProtocol
+        uploadStartedAt = $uploadStartedAt
+        uploadCompletedAt = $uploadCompletedAt
+        uploadAttempt = $uploadAttempt
+        uploadCfRay = $uploadCfRay
+        uploadRequestId = $uploadRequestId
+        uploadConfirmationCfRay = $uploadConfirmationCfRay
+        uploadConfirmationRequestId = $uploadConfirmationRequestId
+        uploadConfirmationStatus = $uploadConfirmationStatus
+        uploadConfirmed = $uploadConfirmed
+        uploadConfirmationMessage = $uploadConfirmationMessage
         message = $message
     }
     exit 1

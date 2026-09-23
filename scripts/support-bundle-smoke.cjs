@@ -71,6 +71,14 @@ try {
   assert.strictEqual(result.success, true)
   assert.strictEqual(result.uploaded, false)
   assert.strictEqual(result.uploadFailed, false)
+  assert.strictEqual(result.uploadReceipt, '')
+  assert.strictEqual(result.uploadBytes, 0)
+  assert.strictEqual(result.uploadSha256, '')
+  assert.strictEqual(result.uploadEndpoint, '')
+  assert.strictEqual(result.uploadProtocol, 0)
+  assert.strictEqual(result.uploadConfirmationStatus, 'not_requested')
+  assert.strictEqual(result.uploadConfirmed, false)
+  assert.match(result.uploadId, /^[0-9a-f-]{36}$/)
   assert(fs.existsSync(result.bundlePath))
 
   const expand = spawnSync('powershell.exe', [
@@ -142,6 +150,12 @@ try {
   const supportSource = fs.readFileSync(script, 'utf8')
   assert.match(supportSource, /attempt \$attempt of 3/)
   assert.match(supportSource, /uploadFailed = \$uploadFailed/)
+  assert.match(supportSource, /support-upload-http\.cjs/)
+  assert.match(supportSource, /uploadReceipt = \$uploadReceipt/)
+  assert.match(supportSource, /uploadProtocol = \$uploadProtocol/)
+  assert.match(supportSource, /uploadConfirmationStatus = \$uploadConfirmationStatus/)
+  assert.match(supportSource, /uploadConfirmed = \$uploadConfirmed/)
+  assert.doesNotMatch(supportSource, /Invoke-WebRequest/)
 
   console.log('JavaRock support bundle smoke check passed.')
 } finally {
