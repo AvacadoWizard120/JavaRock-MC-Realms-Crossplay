@@ -72,10 +72,10 @@ public class ClientPlayerPackets {
 
     static float bridgeVerticalVelocity(final float observedDeltaY, final boolean levitating, final int levitationAmplifier, final boolean climbing) {
         if (climbing && observedDeltaY > 0F) {
-            // Java has already applied ladder/vine climb physics. Applying the
-            // ordinary airborne gravity step again understates the ascent sent
-            // to Bedrock and causes repeated downward movement corrections.
-            return observedDeltaY;
+            // Java reports an already-dragged 0.1176 ascent while Bedrock's
+            // authoritative ladder/vine simulation advances at 0.2 per tick.
+            // Preserve stronger upward impulses, but do not understate a climb.
+            return Math.max(observedDeltaY, 0.2F);
         }
 
         final float gravityAdjusted = levitating

@@ -191,8 +191,8 @@ function normalizeItemExtraForUpstreamItemStackRequest (extra) {
   return out
 }
 
-function normalizeItemForUpstreamItemStackRequest (item) {
-  if (!item || typeof item !== 'object') return { network_id: 0 }
+function normalizeItemStackRequestResultDescriptorForUpstream (owner, item) {
+  if (!item || typeof item !== 'object') return null
 
   const networkId = firstNonEmpty(
     item.network_id,
@@ -202,12 +202,19 @@ function normalizeItemForUpstreamItemStackRequest (item) {
     item.runtimeId
   )
   const parsedNetworkId = numberOrZero(networkId)
-  if (parsedNetworkId === 0) return { network_id: 0 }
+  if (parsedNetworkId === 0) return null
+
+  const name = bridgeItemNameForRecipeMatch(owner, item)
+  if (!name) return null
 
   return {
-    network_id: parsedNetworkId,
-    count: numberOrDefault(firstNonEmpty(item.count, item.amount), 1),
+    // 1.26.40 replaced the numeric ItemLegacy result with the named
+    // ItemStackRequestInstanceDescriptor used by CraftResultsDeprecated.
+    type: 'name',
+    legacy_type: 0,
+    name,
     metadata: numberOrDefault(firstNonEmpty(item.metadata, item.meta, item.damage), 0),
+    count: numberOrDefault(firstNonEmpty(item.count, item.amount), 1),
     block_runtime_id: numberOrDefault(firstNonEmpty(item.block_runtime_id, item.blockRuntimeId, item.block_runtime, item.blockRuntime), 0),
     extra: normalizeItemExtraForUpstreamItemStackRequest(item.extra)
   }
@@ -522,26 +529,31 @@ function normalizeInventoryContentForLocalViaBedrock (params = {}, options = {})
 
 function normalizeItemStackResponseSlotForLocalViaBedrock (slot = {}) {
   if (!slot || typeof slot !== 'object') return slot
+  const rawStackId = firstNonNull(slot.stack_network_id, slot.stackNetworkId, slot.stack_id, slot.stackId, slot.item_stack_id, slot.itemStackId)
   const stackNetworkId = normalizeStackIdForLocalViaBedrock({
-    stack_id: firstNonNull(slot.stack_network_id, slot.stackNetworkId, slot.stack_id, slot.stackId, slot.item_stack_id, slot.itemStackId)
+    stack_id: rawStackId
   })
+  const hasStackId = rawStackId != null
 
   const out = {
     ...slot,
     slot: numberOrDefault(slot.slot, 0),
     hotbar_slot: numberOrDefault(firstNonNull(slot.hotbar_slot, slot.hotbarSlot), 0),
     count: numberOrDefault(slot.count, 0),
-    stack_network_id: numberOrDefault(stackNetworkId, 0),
-    // The local ViaBedrock/bedrock-protocol 1.26.10 serializer still expects
-    // both strings to exist. firstNonEmpty('', '') returns undefined, which was
-    // the cause of the v0.3.36 native-recorder drop: SizeOf error for undefined.
+    // Bedrock 1.26.45 has a named presence bit followed by an optional
+    // zigzag item stack ID. The Realm-facing 1.26.50 shape removed the named
+    // bit, so restore it while translating back to the local ViaBedrock wire.
+    item_stack_id_presence: hasStackId,
+    item_stack_id: hasStackId ? numberOrDefault(stackNetworkId, 0) : undefined,
     custom_name: stringOrDefault(firstNonNull(slot.custom_name, slot.customName), ''),
     filtered_custom_name: stringOrDefault(firstNonNull(slot.filtered_custom_name, slot.filteredCustomName), ''),
     durability_correction: numberOrDefault(firstNonNull(slot.durability_correction, slot.durabilityCorrection), 0)
   }
 
   delete out.hotbarSlot
+  delete out.stack_network_id
   delete out.stackNetworkId
+  delete out.stack_id
   delete out.stackId
   delete out.itemStackId
   delete out.customName
@@ -552,27 +564,47 @@ function normalizeItemStackResponseSlotForLocalViaBedrock (slot = {}) {
 
 function normalizeItemStackResponseContainerForLocalViaBedrock (container = {}) {
   if (!container || typeof container !== 'object') return container
-  return {
+  const out = {
     ...container,
-    container_id: firstNonEmpty(container.container_id, container.containerId),
+    slot_type: normalizeFullContainerNameForLocalViaBedrock(
+      container.slot_type || container.slotType || {
+        container_id: firstNonEmpty(container.container_id, container.containerId),
+        dynamic_container_id: firstNonNull(container.dynamic_container_id, container.dynamicContainerId)
+      }
+    ),
     slots: Array.isArray(container.slots)
       ? container.slots.map(normalizeItemStackResponseSlotForLocalViaBedrock)
       : []
   }
+  delete out.slotType
+  delete out.container_id
+  delete out.containerId
+  delete out.dynamic_container_id
+  delete out.dynamicContainerId
+  return out
 }
 
 function normalizeItemStackResponseForLocalViaBedrock (params = {}) {
   const rawResponses = params.responses || params.entries || params.response || []
   const out = { ...params }
   out.responses = Array.isArray(rawResponses)
-    ? rawResponses.map(response => ({
-        ...response,
-        result: firstNonEmpty(response.result, response.status),
-        request_id: numberOrDefault(firstNonEmpty(response.request_id, response.requestId), 0),
-        containers: Array.isArray(response.containers)
-          ? response.containers.map(normalizeItemStackResponseContainerForLocalViaBedrock)
-          : []
-      }))
+    ? rawResponses.map(response => {
+        const hasContainers = Array.isArray(response.containers)
+        const normalized = {
+          ...response,
+          status: firstNonEmpty(response.status, response.result),
+          request_id: numberOrDefault(firstNonEmpty(response.request_id, response.requestId), 0),
+          // 1.26.45 carries both this explicit field and the option
+          // discriminator encoded from containers itself.
+          containers_presence: hasContainers,
+          containers: hasContainers
+            ? response.containers.map(normalizeItemStackResponseContainerForLocalViaBedrock)
+            : undefined
+        }
+        delete normalized.result
+        delete normalized.requestId
+        return normalized
+      })
     : []
   delete out.entries
   delete out.response
@@ -1696,7 +1728,11 @@ function bridgeItemStackRequest (requestId, actions) {
   return {
     requests: [{
       request_id: requestId,
-      actions,
+      actions: actions.map(action => ({
+        ...action,
+        // Required immediately after type_id on the 1.26.40+ wire.
+        legacy_type_id: numberOrDefault(action?.legacy_type_id, 0)
+      })),
       custom_names: [],
       cause: -1
     }]
@@ -3062,6 +3098,8 @@ function bridgeModernRequestsForLegacyCraftCommit (owner, consumedActions, resul
     slot: 50,
     stack_id: craftRequestId
   }
+  const resultDescriptor = normalizeItemStackRequestResultDescriptorForUpstream(owner, recipe.output || resultItem)
+  if (!resultDescriptor) return null
   const craftResultAction = resultDestinationContainerId === 'cursor'
     ? {
         type_id: 'take',
@@ -3085,7 +3123,7 @@ function bridgeModernRequestsForLegacyCraftCommit (owner, consumedActions, resul
       }
   const craftActions = [
     { type_id: 'craft_recipe', recipe_network_id: numberOrDefault(recipe.network_id, 0), times_crafted: 1 },
-    { type_id: 'results_deprecated', result_items: [normalizeItemForUpstreamItemStackRequest(recipe.output || resultItem)], times_crafted: 1 },
+    { type_id: 'results_deprecated', result_items: [resultDescriptor], times_crafted: 1 },
     ...consumed.map(entry => ({
       type_id: 'consume',
       count: entry.count,
@@ -6762,6 +6800,7 @@ module.exports = {
   normalizeItemArrayForLocalViaBedrock,
   normalizeItemV4ForLocalViaBedrock,
   normalizeItemV4ArrayForLocalViaBedrock,
+  normalizeItemStackRequestResultDescriptorForUpstream,
   normalizeInventoryContentForLocalViaBedrock,
   normalizeMobEquipmentForLocalViaBedrock,
   normalizeMobArmorEquipmentForLocalViaBedrock,

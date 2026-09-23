@@ -1700,7 +1700,7 @@ public class InventoryContainer extends Container {
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
         wrapper.write(BedrockTypes.VAR_INT, requestId);
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
-        wrapper.write(Types.BYTE, (byte) actionType.getValue());
+        this.writeItemStackRequestActionType(wrapper, actionType);
         wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, count)));
         this.writeStackRequestSlot(wrapper, source);
         this.writeStackRequestSlot(wrapper, destination);
@@ -1726,7 +1726,7 @@ public class InventoryContainer extends Container {
         for (int index = 0; index < requestIds.size(); index++) {
             wrapper.write(BedrockTypes.VAR_INT, requestIds.get(index).intValue());
             wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
-            wrapper.write(Types.BYTE, (byte) actionTypes.get(index).getValue());
+            this.writeItemStackRequestActionType(wrapper, actionTypes.get(index));
             wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, counts.get(index).intValue())));
             this.writeStackRequestSlot(wrapper, sources.get(index));
             this.writeStackRequestSlot(wrapper, destinations.get(index));
@@ -1742,7 +1742,7 @@ public class InventoryContainer extends Container {
         wrapper.write(BedrockTypes.VAR_INT, requestId);
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, sources.size());
         for (int index = 0; index < sources.size(); index++) {
-            wrapper.write(Types.BYTE, (byte) ItemStackRequestActionType.Take.getValue());
+            this.writeItemStackRequestActionType(wrapper, ItemStackRequestActionType.Take);
             wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, counts.get(index).intValue())));
             this.writeStackRequestSlot(wrapper, sources.get(index));
             this.writeStackRequestSlot(wrapper, destination);
@@ -1765,24 +1765,24 @@ public class InventoryContainer extends Container {
         wrapper.write(BedrockTypes.VAR_INT, requestId);
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, consumeSources.size() + 3);
 
-        wrapper.write(Types.BYTE, (byte) ItemStackRequestActionType.CraftRecipe.getValue());
+        this.writeItemStackRequestActionType(wrapper, ItemStackRequestActionType.CraftRecipe);
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, recipe.networkId);
         wrapper.write(Types.BYTE, (byte) craftCount);
 
-        wrapper.write(Types.BYTE, (byte) ItemStackRequestActionType.CraftResults.getValue());
+        this.writeItemStackRequestActionType(wrapper, ItemStackRequestActionType.CraftResults);
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
         BedrockItem result = recipe.output.copy();
         result.setNetId(null);
-        this.writeLegacyCraftResultItem(wrapper, result);
+        this.writeItemStackRequestResultDescriptor(wrapper, result);
         wrapper.write(Types.BYTE, (byte) 1);
 
         for (int index = 0; index < consumeSources.size(); index++) {
-            wrapper.write(Types.BYTE, (byte) ItemStackRequestActionType.Consume.getValue());
+            this.writeItemStackRequestActionType(wrapper, ItemStackRequestActionType.Consume);
             wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, consumeCounts.get(index).intValue())));
             this.writeStackRequestSlot(wrapper, consumeSources.get(index));
         }
 
-        wrapper.write(Types.BYTE, (byte) resultActionType.getValue());
+        this.writeItemStackRequestActionType(wrapper, resultActionType);
         wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, recipe.output.amount() * craftCount)));
         this.writeStackRequestSlot(wrapper, new BridgeNativeStackSlot(
                 ContainerEnumName.CreatedOutputContainer,
@@ -1794,44 +1794,61 @@ public class InventoryContainer extends Container {
         wrapper.sendToServer(BedrockProtocol.class);
     }
 
-    private void writeLegacyCraftResultItem(PacketWrapper wrapper, BedrockItem item) {
-        ByteBuf encoded = Unpooled.buffer();
-        try {
-            // CraftResultsDeprecated uses ItemLegacy. ViaBedrock's ordinary
-            // item type always includes the inventory stack-ID presence byte,
-            // which ItemLegacy omits. Reuse the tested item encoder for the
-            // rest of the shape and remove only that marker.
-            this.user.get(ItemRewriter.class).itemType().write(encoded, item);
-            ByteBuf cursor = encoded.duplicate();
-            int identifier = BedrockTypes.VAR_INT.read(cursor);
-            if (identifier == 0) {
-                wrapper.write(Types.REMAINING_BYTES, new byte[] { 0 });
-                return;
-            }
-
-            cursor.skipBytes(2); // count (unsigned short LE)
-            BedrockTypes.UNSIGNED_VAR_INT.read(cursor); // metadata
-            int markerOffset = cursor.readerIndex();
-            if (!cursor.isReadable() || encoded.getByte(markerOffset) != 0) {
-                throw new IllegalStateException("Craft result item did not contain the expected empty stack-ID marker");
-            }
-
-            int start = encoded.readerIndex();
-            int prefixLength = markerOffset - start;
-            int suffixLength = encoded.writerIndex() - markerOffset - 1;
-            byte[] legacyItem = new byte[prefixLength + suffixLength];
-            encoded.getBytes(start, legacyItem, 0, prefixLength);
-            encoded.getBytes(markerOffset + 1, legacyItem, prefixLength, suffixLength);
-            wrapper.write(Types.REMAINING_BYTES, legacyItem);
-        } finally {
-            encoded.release();
+    private void writeItemStackRequestResultDescriptor(PacketWrapper wrapper, BedrockItem item) {
+        final String identifier = this.bridgeIdentifier(item);
+        if (identifier == null || identifier.isEmpty()) {
+            throw new IllegalStateException("Missing Bedrock item identifier for native craft result " + item.identifier());
         }
+
+        // Bedrock 1.26.40 replaced the numeric ItemLegacy value used by
+        // CraftResultsDeprecated with ItemStackRequestInstanceDescriptor.
+        // Its leading discriminators are separate from the ordinary inventory
+        // item type and must be written even though all JavaRock results use a
+        // named item descriptor.
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1); // descriptor type: name
+        wrapper.write(Types.BYTE, (byte) 0); // legacy descriptor type
+        wrapper.write(BedrockTypes.STRING, identifier);
+        wrapper.write(BedrockTypes.VAR_INT, (int) item.data());
+        wrapper.write(BedrockTypes.SHORT_LE, (short) item.amount());
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, item.blockRuntimeId());
+
+        ByteBuf extra = Unpooled.buffer();
+        try {
+            if (item.tag() != null) {
+                extra.writeShortLE(-1);
+                extra.writeByte(1);
+                BedrockTypes.TAG_LE.write(extra, item.tag());
+            } else {
+                extra.writeShortLE(0);
+            }
+            BedrockTypes.UTF8_STRING_ARRAY.write(extra, item.canPlace() == null ? new String[0] : item.canPlace());
+            BedrockTypes.UTF8_STRING_ARRAY.write(extra, item.canBreak() == null ? new String[0] : item.canBreak());
+
+            byte[] payload = new byte[extra.readableBytes()];
+            extra.getBytes(extra.readerIndex(), payload);
+            wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, payload.length);
+            wrapper.write(Types.REMAINING_BYTES, payload);
+        } finally {
+            extra.release();
+        }
+    }
+
+    private void writeItemStackRequestActionType(PacketWrapper wrapper, ItemStackRequestActionType actionType) {
+        // Bedrock 1.26.40 added a legacy action-type byte immediately after
+        // the ordinary varint action type. Omitting it shifts the action
+        // payload by one byte, so the relay cannot decode any request emitted
+        // by this patch. JavaRock targets the 1.26.45 downstream protocol.
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, actionType.getValue());
+        wrapper.write(Types.BYTE, (byte) 0);
     }
 
     private void writeStackRequestSlot(PacketWrapper wrapper, BridgeNativeStackSlot slot) {
         wrapper.write(BedrockTypes.FULL_CONTAINER_NAME, new FullContainerName(slot.containerName, null));
         wrapper.write(Types.BYTE, (byte) slot.slot);
-        wrapper.write(BedrockTypes.VAR_INT, slot.stackId);
+        // StackRequestSlotInfo.stack_id changed from zigzag32 to little-endian
+        // int32 in Bedrock 1.26.40. ViaBedrock's generic VAR_INT is the old
+        // shape and makes the following slot descriptor drift.
+        wrapper.write(BedrockTypes.INT_LE, slot.stackId);
     }
 
     public void bridgeHandleItemStackResponse(PacketWrapper wrapper) {
@@ -1844,19 +1861,16 @@ public class InventoryContainer extends Container {
             for (int responseIndex = 0; responseIndex < responseCount; responseIndex++) {
                 int status = wrapper.read(Types.UNSIGNED_BYTE).intValue();
                 int requestId = wrapper.read(BedrockTypes.VAR_INT);
-                if (status != 0) {
-                    if (this.bridgeRollbackPendingNativeRequest(requestId)) rolledBackRequests++;
-                    final ItemStackNetResult statusName = ItemStackNetResult.getByValue(status);
-                    ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
-                            "[BedrockRealmBridge] Realm rejected native item_stack_request" +
-                                    " requestId=" + requestId +
-                                    " status=" + status +
-                                    " statusName=" + (statusName == null ? "unknown" : statusName.name()));
-                    continue;
-                }
-
+                // Bedrock 1.26.45 carries both the named presence field and
+                // the option discriminator generated by its packet schema.
+                // Consume both even for an error response so a later response
+                // in the same packet remains aligned.
+                boolean containersPresence = wrapper.read(Types.BOOLEAN);
+                boolean containersOptionPresence = wrapper.read(Types.BOOLEAN);
                 BridgePendingNativeRequest pending = this.bridgePendingNativeRequests.get(Integer.valueOf(requestId));
-                int containerCount = wrapper.read(BedrockTypes.UNSIGNED_VAR_INT);
+                int containerCount = containersOptionPresence
+                        ? wrapper.read(BedrockTypes.UNSIGNED_VAR_INT)
+                        : 0;
                 for (int containerIndex = 0; containerIndex < containerCount; containerIndex++) {
                     FullContainerName containerName = wrapper.read(BedrockTypes.FULL_CONTAINER_NAME);
                     int slotCount = wrapper.read(BedrockTypes.UNSIGNED_VAR_INT);
@@ -1864,11 +1878,16 @@ public class InventoryContainer extends Container {
                         int slot = wrapper.read(Types.UNSIGNED_BYTE).intValue();
                         wrapper.read(Types.UNSIGNED_BYTE); // hotbar slot
                         int count = wrapper.read(Types.UNSIGNED_BYTE).intValue();
-                        int stackId = wrapper.read(BedrockTypes.VAR_INT);
+                        boolean stackIdPresence = wrapper.read(Types.BOOLEAN);
+                        boolean stackIdOptionPresence = wrapper.read(Types.BOOLEAN);
+                        int stackId = stackIdOptionPresence
+                                ? wrapper.read(BedrockTypes.VAR_INT)
+                                : 0;
                         wrapper.read(BedrockTypes.STRING); // custom name
                         wrapper.read(BedrockTypes.STRING); // filtered custom name
                         wrapper.read(BedrockTypes.VAR_INT); // durability correction
 
+                        if (status != 0) continue;
                         ContainerEnumName name = containerName == null ? null : containerName.name();
                         boolean applyCursor = requestId == this.bridgeLatestNativeRequestId;
                         if (name == ContainerEnumName.CursorContainer && !applyCursor) {
@@ -1883,6 +1902,18 @@ public class InventoryContainer extends Container {
                         BedrockItem predicted = this.bridgePredictedItemForResponse(pending, name, slot);
                         if (this.bridgeApplyItemStackResponseSlot(name, slot, count, stackId, predicted)) changedSlots++;
                     }
+                }
+
+                if (status != 0) {
+                    if (this.bridgeRollbackPendingNativeRequest(requestId)) rolledBackRequests++;
+                    final ItemStackNetResult statusName = ItemStackNetResult.getByValue(status);
+                    ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
+                            "[BedrockRealmBridge] Realm rejected native item_stack_request" +
+                                    " requestId=" + requestId +
+                                    " status=" + status +
+                                    " statusName=" + (statusName == null ? "unknown" : statusName.name()) +
+                                    " containersPresence=" + containersPresence);
+                    continue;
                 }
                 this.bridgePendingNativeRequests.remove(Integer.valueOf(requestId));
                 this.bridgeReleaseNativeSlotClaims(requestId, pending);

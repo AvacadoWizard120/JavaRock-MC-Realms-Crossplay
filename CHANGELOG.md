@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.100 - 2026-09-23
+
+- Fixed inventory, chest, and crafting interactions on Bedrock 1.26.45. JavaRock now writes the required legacy action byte and fixed-width stack ids, so native item-stack requests reach the Realm instead of being dropped as malformed.
+- Item-stack responses are translated back into the complete 1.26.45 container and stack-id shape, including presence fields and full container names.
+- Ladder and vine ascent now matches Bedrock's 0.2-block climb velocity while preserving stronger upward impulses, eliminating the repeated correction seen in the support capture.
+- Fixed the launcher repeatedly playing the Windows error sound after a large warning burst filled the read-only log. Log trimming is now silent, and late bridge output remains suppressed after Stop Bridge.
+
 ## 0.3.99 - 2026-09-23
 
 - Support uploads now use Node's HTTPS transport instead of Windows PowerShell web requests, avoiding the Schannel failure seen on the release host.

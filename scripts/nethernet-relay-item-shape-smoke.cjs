@@ -9,7 +9,8 @@ const {
   normalizeMobArmorEquipmentForLocalViaBedrock,
   normalizeItemForLocalViaBedrock,
   normalizeItemArrayForLocalViaBedrock,
-  normalizeItemV4ForLocalViaBedrock
+  normalizeItemV4ForLocalViaBedrock,
+  normalizeItemStackRequestResultDescriptorForUpstream
 } = require('../src/nethernetBedrockRelay')
 const { createDeserializer, createSerializer } = require('bedrock-protocol/src/transforms/serializer')
 
@@ -107,6 +108,103 @@ assert.deepStrictEqual(decodedContent45.input[4].extra.can_place_on, ['minecraft
 assert.deepStrictEqual(decodedContent45.input[4].extra.can_destroy, ['minecraft:dirt'])
 assert.strictEqual(decodedContent45.container.container_id, 'hotbar_and_inventory')
 assert.strictEqual(decodedContent45.storage_item.network_id, 0)
+
+// The 0.3.99 support capture contained this exact native cursor Take request,
+// but the Java patch omitted the 1.26.40+ legacy_type_id byte and encoded each
+// stack ID as the old zigzag varint. With those two fields corrected, the
+// 1.26.45 decoder must consume the entire packet and recover both slots.
+const correctedCapturedTake = Buffer.from(
+  '9301011d010000011c0000040000003b00000000000000ffffffff',
+  'hex'
+)
+const decodedCapturedTake = createDeserializer('1.26.45').parsePacketBuffer(correctedCapturedTake)
+assert.strictEqual(decodedCapturedTake.metadata.size, correctedCapturedTake.length)
+assert.strictEqual(decodedCapturedTake.data.name, 'item_stack_request')
+assert.strictEqual(decodedCapturedTake.data.params.requests[0].request_id, -15)
+assert.strictEqual(decodedCapturedTake.data.params.requests[0].actions[0].legacy_type_id, 0)
+assert.strictEqual(decodedCapturedTake.data.params.requests[0].actions[0].source.slot_type.container_id, 'hotbar')
+assert.strictEqual(decodedCapturedTake.data.params.requests[0].actions[0].source.stack_id, 4)
+assert.strictEqual(decodedCapturedTake.data.params.requests[0].actions[0].destination.slot_type.container_id, 'cursor')
+assert.strictEqual(decodedCapturedTake.data.params.requests[0].actions[0].destination.stack_id, 0)
+
+// CraftResultsDeprecated also changed in 1.26.40: its numeric ItemLegacy was
+// replaced by a named ItemStackRequestInstanceDescriptor. Lock down both the
+// exact 1.26.45 bytes and a full decode so a numeric legacy result cannot drift
+// back into the Java or relay-generated crafting paths.
+const craftResultDescriptor45 = normalizeItemStackRequestResultDescriptorForUpstream({
+  bridgeItemNameByNetworkId: new Map([['5', 'minecraft:oak_planks']])
+}, {
+  network_id: 5,
+  count: 4,
+  metadata: 0,
+  block_runtime_id: 1921718966,
+  extra: { can_place_on: [], can_destroy: [] }
+})
+assert.deepStrictEqual(craftResultDescriptor45, {
+  type: 'name',
+  legacy_type: 0,
+  name: 'minecraft:oak_planks',
+  metadata: 0,
+  count: 4,
+  block_runtime_id: 1921718966,
+  extra: { has_nbt: 0, can_place_on: [], can_destroy: [] }
+})
+const craftResultRequest45 = {
+  requests: [{
+    request_id: -101,
+    actions: [{
+      type_id: 'results_deprecated',
+      legacy_type_id: 0,
+      result_items: [craftResultDescriptor45],
+      times_crafted: 1
+    }],
+    custom_names: [],
+    cause: -1
+  }]
+}
+const encodedCraftResult45 = createSerializer('1.26.45').createPacketBuffer({
+  name: 'item_stack_request',
+  params: craftResultRequest45
+})
+assert.strictEqual(
+  encodedCraftResult45.toString('hex'),
+  '930101c901011100010100146d696e6563726166743a6f616b5f706c616e6b73000400b6b5ac94070a000000000000000000000100ffffffff'
+)
+const decodedCraftResult45 = createDeserializer('1.26.45').parsePacketBuffer(encodedCraftResult45)
+assert.strictEqual(decodedCraftResult45.metadata.size, encodedCraftResult45.length)
+assert.strictEqual(decodedCraftResult45.data.params.requests[0].actions[0].legacy_type_id, 0)
+assert.strictEqual(decodedCraftResult45.data.params.requests[0].actions[0].result_items[0].type, 'name')
+assert.strictEqual(decodedCraftResult45.data.params.requests[0].actions[0].result_items[0].name, 'minecraft:oak_planks')
+assert.strictEqual(decodedCraftResult45.data.params.requests[0].actions[0].result_items[0].block_runtime_id, 1921718966)
+
+// Realm 1.26.50 removed named response presence fields. Translating the reply
+// back to ViaBedrock's 1.26.45 wire has to restore both named bits and option
+// discriminators before the Java response handler reads it.
+const response45 = normalizeClientboundForLocalViaBedrock('item_stack_response', {
+  responses: [{
+    status: 'ok',
+    request_id: -15,
+    containers: [{
+      slot_type: { container_id: 'cursor' },
+      slots: [{
+        slot: 0,
+        hotbar_slot: 0,
+        count: 1,
+        item_stack_id: 91,
+        custom_name: '',
+        filtered_custom_name: undefined,
+        durability_correction: 0
+      }]
+    }]
+  }]
+})
+assert.strictEqual(response45.responses[0].containers_presence, true)
+assert.strictEqual(response45.responses[0].containers[0].slot_type.container_id, 'cursor')
+assert.strictEqual(response45.responses[0].containers[0].slots[0].item_stack_id_presence, true)
+const decodedResponse45 = roundTrip('1.26.45', 'item_stack_response', response45)
+assert.strictEqual(decodedResponse45.responses[0].containers_presence, true)
+assert.strictEqual(decodedResponse45.responses[0].containers[0].slots[0].item_stack_id_presence, true)
+assert.strictEqual(decodedResponse45.responses[0].containers[0].slots[0].item_stack_id, 91)
 
 // 1.26.30 uses the same ItemV4 fields, but its stack_id value is the older
 // discriminated {type,id} object rather than the 1.26.40+ integer.

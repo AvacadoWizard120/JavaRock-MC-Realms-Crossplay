@@ -466,6 +466,23 @@ function ConvertTo-DisplayLogText {
     return [regex]::Replace($clean, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '')
 }
 
+function Trim-LogDisplay {
+    param([Parameter(Mandatory = $true)][System.Windows.Forms.RichTextBox]$Control)
+
+    if ($Control.TextLength -le 300000) { return }
+
+    # Editing SelectedText on a read-only RichTextBox is rejected by the native
+    # control. Once the log crossed the cap, that rejected edit happened for
+    # every later log batch and Windows played its default error sound each
+    # time. Replace Text programmatically instead; ReadOnly only blocks user
+    # edits, so this is silent and actually releases the old log text.
+    $currentText = $Control.Text
+    $trimAt = [Math]::Min(75000, $currentText.Length)
+    $nextLine = $currentText.IndexOf("`n", $trimAt)
+    if ($nextLine -ge 0) { $trimAt = $nextLine + 1 }
+    $Control.Text = $currentText.Substring($trimAt)
+}
+
 function Add-Log {
     param(
         [string]$Source,
@@ -476,13 +493,16 @@ function Add-Log {
     $normalized = (ConvertTo-DisplayLogText -Text $Text).TrimEnd("`r", "`n")
     if (-not $normalized) { return }
     $timestamp = Get-Date -Format 'HH:mm:ss'
-    $script:LogBox.AppendText("[$timestamp] [$Source] $normalized`r`n")
-    if ($script:LogBox.TextLength -gt 300000) {
-        $script:LogBox.Select(0, 75000)
-        $script:LogBox.SelectedText = ''
+    try {
+        $script:LogBox.AppendText("[$timestamp] [$Source] $normalized`r`n")
+        Trim-LogDisplay -Control $script:LogBox
+        $script:LogBox.SelectionStart = $script:LogBox.TextLength
+        $script:LogBox.ScrollToCaret()
+    } catch {
+        # Log rendering is best-effort. The complete stdout/stderr files remain
+        # on disk, and a display failure must never become a recurring WinForms
+        # error dialog or alert sound from the 500 ms refresh timer.
     }
-    $script:LogBox.SelectionStart = $script:LogBox.TextLength
-    $script:LogBox.ScrollToCaret()
 }
 
 function Parse-Realms {
@@ -1747,7 +1767,10 @@ $timer.Add_Tick({
     }
     if ($null -ne $script:StopProcess -and $script:StopProcess.HasExited) {
         Move-BridgeLogCursorsToEnd
-        $script:SuppressBridgeLogs = $false
+        # Keep ignoring bridge output after Stop finishes. A killed child can
+        # still flush a final stderr burst; the next Start explicitly re-enables
+        # bridge log display after resetting both cursors.
+        $script:SuppressBridgeLogs = $true
         Add-Log 'stop' "Stop request finished with exit code $($script:StopProcess.ExitCode)."
         $script:StopProcess.Dispose()
         $script:StopProcess = $null
@@ -1844,6 +1867,13 @@ if ($SmokeTest) {
     if ((ConvertTo-DisplayLogText -Text $logNoiseSmoke) -ne "error`tkept`r`n") {
         throw 'Console ANSI/control sanitization failed.'
     }
+    $logBox.Text = [string]::new('x', 310000) + "`r`n"
+    $logLengthBeforeTrim = $logBox.TextLength
+    Trim-LogDisplay -Control $logBox
+    if (-not $logBox.ReadOnly -or $logBox.TextLength -ge $logLengthBeforeTrim -or $logBox.TextLength -gt 300000) {
+        throw 'Read-only log display trimming did not silently release old output.'
+    }
+    $logBox.Clear()
     $cursorSmokePath = Join-Path ([IO.Path]::GetTempPath()) "javarock-log-cursor-$([Guid]::NewGuid().ToString('N')).log"
     try {
         [IO.File]::WriteAllText($cursorSmokePath, ('x' * 65536), [Text.UTF8Encoding]::new($false))
