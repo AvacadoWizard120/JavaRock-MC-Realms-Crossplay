@@ -77,8 +77,9 @@ function emptyItemV4ForLocalViaBedrock () {
     network_id: 0,
     count: 0,
     metadata: 0,
+    has_stack_id: false,
     block_runtime_id: 0,
-    extra_data: Buffer.alloc(0)
+    extra: normalizeItemExtraForLocalViaBedrock()
   }
 }
 
@@ -114,6 +115,24 @@ function localViaBedrockUsesItemV4 (options = {}) {
     process.env.BEDROCK_RELAY_VERSION ||
     '1.26.45'
   return protocolVersionAtLeast(version, '1.26.30')
+}
+
+function localViaBedrockUsesNumericItemV4StackId (options = {}) {
+  const version = options.localBedrockVersion ||
+    options.version ||
+    process.env.NETHERNET_RELAY_LOCAL_BEDROCK_VERSION ||
+    process.env.BEDROCK_RELAY_VERSION ||
+    '1.26.45'
+  return protocolVersionAtLeast(version, '1.26.40')
+}
+
+function localViaBedrockInventorySlotUsesItemV4 (options = {}) {
+  const version = options.localBedrockVersion ||
+    options.version ||
+    process.env.NETHERNET_RELAY_LOCAL_BEDROCK_VERSION ||
+    process.env.BEDROCK_RELAY_VERSION ||
+    '1.26.45'
+  return protocolVersionAtLeast(version, '1.26.20')
 }
 
 function normalizeStringArray (value) {
@@ -203,9 +222,9 @@ function normalizeStackIdForLocalViaBedrock (item) {
 }
 
 function normalizeHasStackIdForLocalViaBedrock (item, stackId) {
-  if (item.has_stack_id != null) return isTruthyProtocolFlag(item.has_stack_id) ? 1 : 0
-  if (item.hasStackId != null) return isTruthyProtocolFlag(item.hasStackId) ? 1 : 0
-  return stackId != null && stackId !== '' ? 1 : 0
+  if (item.has_stack_id != null) return isTruthyProtocolFlag(item.has_stack_id)
+  if (item.hasStackId != null) return isTruthyProtocolFlag(item.hasStackId)
+  return stackId != null && stackId !== ''
 }
 
 function normalizeItemForLocalViaBedrock (item) {
@@ -251,30 +270,24 @@ function normalizeItemForLocalViaBedrock (item) {
 
 function normalizeItemArrayForLocalViaBedrock (items) {
   if (!Array.isArray(items)) return []
-  return items.map(item => normalizeItemForLocalViaBedrock(item))
-}
-
-function normalizeItemV4ExtraDataForLocalViaBedrock (extraData) {
-  if (Buffer.isBuffer(extraData)) return extraData
-  if (Array.isArray(extraData)) return Buffer.from(extraData)
-  if (extraData && typeof extraData === 'object') {
-    if (Array.isArray(extraData.data)) return Buffer.from(extraData.data)
-    if (Buffer.isBuffer(extraData.data)) return extraData.data
-  }
-  return Buffer.alloc(0)
+  return Array.from(items, item => normalizeItemForLocalViaBedrock(item))
 }
 
 function normalizeItemV4NetIdVariantForLocalViaBedrock (item = {}) {
-  const variant = item.net_id_variant || item.netIdVariant
+  const stackId = normalizeStackIdForLocalViaBedrock(item)
+  const stackIdValue = stackId != null && stackId !== '' ? stackId : undefined
+  const stackIdObject = item.stack_id && typeof item.stack_id === 'object'
+    ? item.stack_id
+    : (item.stackId && typeof item.stackId === 'object' ? item.stackId : undefined)
+  const variant = stackIdObject || item.net_id_variant || item.netIdVariant
   if (variant && typeof variant === 'object') {
-    const id = firstNonNull(variant.id, variant.stack_id, variant.stackId, variant.item_stack_net_id, variant.itemStackNetId)
+    const id = firstNonNull(stackIdValue, variant.id, variant.stack_id, variant.stackId, variant.item_stack_net_id, variant.itemStackNetId)
     return {
       type: variant.type || variant.variant || 'item_stack_net_id',
       id: numberOrDefault(id, 0)
     }
   }
 
-  const stackId = normalizeStackIdForLocalViaBedrock(item)
   const hasStackId = normalizeHasStackIdForLocalViaBedrock(item, stackId)
   if (!hasStackId) return undefined
   return {
@@ -283,7 +296,7 @@ function normalizeItemV4NetIdVariantForLocalViaBedrock (item = {}) {
   }
 }
 
-function normalizeItemV4ForLocalViaBedrock (item) {
+function normalizeItemV4ForLocalViaBedrock (item, options = {}) {
   if (!item || typeof item !== 'object') return emptyItemV4ForLocalViaBedrock()
 
   const networkId = firstNonEmpty(
@@ -296,23 +309,33 @@ function normalizeItemV4ForLocalViaBedrock (item) {
   const parsedNetworkId = numberOrZero(networkId)
   if (parsedNetworkId === 0) return emptyItemV4ForLocalViaBedrock()
 
+  const netIdVariant = normalizeItemV4NetIdVariantForLocalViaBedrock(item)
+  const explicitlyHasStackId = item.has_stack_id != null || item.hasStackId != null
+  const hasStackId = explicitlyHasStackId
+    ? normalizeHasStackIdForLocalViaBedrock(item, netIdVariant?.id)
+    : Boolean(netIdVariant)
+
   const out = {
     network_id: parsedNetworkId,
     count: numberOrDefault(firstNonEmpty(item.count, item.amount), 1),
     metadata: numberOrDefault(firstNonEmpty(item.metadata, item.meta, item.damage), 0),
+    has_stack_id: hasStackId,
     block_runtime_id: numberOrDefault(firstNonEmpty(item.block_runtime_id, item.blockRuntimeId, item.block_runtime, item.blockRuntime), 0),
-    extra_data: normalizeItemV4ExtraDataForLocalViaBedrock(firstNonNull(item.extra_data, item.extraData))
+    extra: normalizeItemExtraForLocalViaBedrock(firstNonNull(item.extra, item.extra_data, item.extraData))
   }
 
-  const netIdVariant = normalizeItemV4NetIdVariantForLocalViaBedrock(item)
-  if (netIdVariant) out.net_id_variant = netIdVariant
+  if (hasStackId) {
+    out.stack_id = localViaBedrockUsesNumericItemV4StackId(options)
+      ? numberOrDefault(netIdVariant?.id, 1)
+      : (netIdVariant || { type: 'item_stack_net_id', id: 1 })
+  }
 
   return out
 }
 
-function normalizeItemV4ArrayForLocalViaBedrock (items) {
+function normalizeItemV4ArrayForLocalViaBedrock (items, options = {}) {
   if (!Array.isArray(items)) return []
-  return items.map(item => normalizeItemV4ForLocalViaBedrock(item))
+  return Array.from(items, item => normalizeItemV4ForLocalViaBedrock(item, options))
 }
 
 
@@ -419,16 +442,19 @@ function normalizeInventoryContentAddressForLocalViaBedrock (params = {}) {
 
 
 
-function normalizeMobEquipmentForLocalViaBedrock (params = {}) {
+function normalizeMobEquipmentForLocalViaBedrock (params = {}, options = {}) {
   const out = { ...params }
-  out.item = normalizeItemForLocalViaBedrock(out.item || out.new_item || out.newItem || out.held_item || out.heldItem)
+  const item = out.item || out.new_item || out.newItem || out.held_item || out.heldItem
+  out.item = localViaBedrockInventorySlotUsesItemV4(options)
+    ? normalizeItemV4ForLocalViaBedrock(item, options)
+    : normalizeItemForLocalViaBedrock(item)
   return out
 }
 
 function normalizeMobArmorEquipmentForLocalViaBedrock (params = {}, options = {}) {
   const out = { ...params }
   const normalize = localViaBedrockUsesItemV4(options)
-    ? normalizeItemV4ForLocalViaBedrock
+    ? item => normalizeItemV4ForLocalViaBedrock(item, options)
     : normalizeItemForLocalViaBedrock
   out.helmet = normalize(out.helmet)
   out.chestplate = normalize(out.chestplate)
@@ -439,20 +465,26 @@ function normalizeMobArmorEquipmentForLocalViaBedrock (params = {}, options = {}
 }
 
 function normalizeClientboundEntityItemFieldsForLocalViaBedrock (name, params = {}, options = {}) {
-  if (name === 'mob_equipment') return normalizeMobEquipmentForLocalViaBedrock(params)
+  if (name === 'mob_equipment') return normalizeMobEquipmentForLocalViaBedrock(params, options)
   if (name === 'mob_armor_equipment') return normalizeMobArmorEquipmentForLocalViaBedrock(params, options)
 
   if (name === 'add_item_entity') {
+    const item = params.item || params.new_item || params.newItem
     return {
       ...params,
-      item: normalizeItemForLocalViaBedrock(params.item || params.new_item || params.newItem)
+      item: localViaBedrockUsesNumericItemV4StackId(options)
+        ? normalizeItemV4ForLocalViaBedrock(item, options)
+        : normalizeItemForLocalViaBedrock(item)
     }
   }
 
   if (name === 'add_player') {
+    const item = params.held_item || params.heldItem || params.item
     return {
       ...params,
-      held_item: normalizeItemForLocalViaBedrock(params.held_item || params.heldItem || params.item)
+      held_item: localViaBedrockUsesNumericItemV4StackId(options)
+        ? normalizeItemV4ForLocalViaBedrock(item, options)
+        : normalizeItemForLocalViaBedrock(item)
     }
   }
 
@@ -475,8 +507,8 @@ function normalizeContainerSetContentForLocalViaBedrock (params = {}) {
 function normalizeInventoryContentForLocalViaBedrock (params = {}, options = {}) {
   const out = normalizeInventoryContentAddressForLocalViaBedrock(params)
   if (localViaBedrockUsesItemV4(options)) {
-    out.storage_item = normalizeItemV4ForLocalViaBedrock(out.storage_item || out.storageItem)
-    out.input = normalizeItemV4ArrayForLocalViaBedrock(out.input || out.items || out.content)
+    out.storage_item = normalizeItemV4ForLocalViaBedrock(out.storage_item || out.storageItem, options)
+    out.input = normalizeItemV4ArrayForLocalViaBedrock(out.input || out.items || out.content, options)
   } else {
     out.storage_item = normalizeItemForLocalViaBedrock(out.storage_item || out.storageItem)
     out.input = normalizeItemArrayForLocalViaBedrock(out.input || out.items || out.content)
@@ -813,8 +845,11 @@ function normalizeClientboundForLocalViaBedrock (name, params = {}, options = {}
   // emits correct right-click place/use transactions.
   if (name === 'inventory_slot') {
     out = normalizeInventorySlotAddressForLocalViaBedrock(out)
-    out.storage_item = normalizeItemForLocalViaBedrock(out.storage_item || out.storageItem)
-    out.item = normalizeItemForLocalViaBedrock(out.item || out.new_item || out.newItem || out.slot_item || out.slotItem)
+    const normalize = localViaBedrockInventorySlotUsesItemV4(options)
+      ? item => normalizeItemV4ForLocalViaBedrock(item, options)
+      : normalizeItemForLocalViaBedrock
+    out.storage_item = normalize(out.storage_item || out.storageItem)
+    out.item = normalize(out.item || out.new_item || out.newItem || out.slot_item || out.slotItem)
     return out
   }
 
@@ -1901,16 +1936,10 @@ function bridgeRememberPredictedCursorItem (owner, item, stackId = 0) {
   const trustedStackId = numberOrDefault(stackId, bridgeItemStackId(item, 0))
   const source = {
     ...item,
-    ...(trustedStackId ? { stack_id: trustedStackId, has_stack_id: 1 } : {})
+    ...(trustedStackId ? { stack_id: trustedStackId, has_stack_id: true } : {})
   }
-  const isItemV4 = item.net_id_variant != null || item.netIdVariant != null || item.extra_data != null || item.extraData != null
-  const normalized = isItemV4
-    ? bridgeCloneInventoryItemForCache({
-        ...source,
-        net_id_variant: trustedStackId
-          ? { type: 'item_stack_net_id', id: trustedStackId }
-          : firstNonNull(item.net_id_variant, item.netIdVariant)
-      })
+  const normalized = bridgeOwnerUsesItemV4(owner, item)
+    ? normalizeItemV4ForLocalViaBedrock(source, bridgeOwnerLocalBedrockOptions(owner))
     : normalizeItemForLocalViaBedrock(source)
   owner.bridgePredictedCursorItem = normalized
   owner.bridgePredictedCursorItemAt = Date.now()
@@ -1920,7 +1949,10 @@ function bridgeRememberPredictedCursorItem (owner, item, stackId = 0) {
 function bridgePredictedCursorStorageItem (owner, options = {}) {
   const item = owner?.bridgePredictedCursorItem
   if (isEmptyBedrockItemForBridge(item)) return null
-  if (localViaBedrockUsesItemV4(options)) return normalizeItemV4ForLocalViaBedrock(item)
+  const usesItemV4 = options.itemV4 == null
+    ? localViaBedrockUsesItemV4(options)
+    : Boolean(options.itemV4)
+  if (usesItemV4) return normalizeItemV4ForLocalViaBedrock(item, options)
   return normalizeItemForLocalViaBedrock(item)
 }
 
@@ -1930,7 +1962,15 @@ function bridgeCloneInventoryItemForCache (item = {}) {
   if (Buffer.isBuffer(item.extraData)) out.extraData = Buffer.from(item.extraData)
   if (item.net_id_variant && typeof item.net_id_variant === 'object') out.net_id_variant = { ...item.net_id_variant }
   if (item.netIdVariant && typeof item.netIdVariant === 'object') out.netIdVariant = { ...item.netIdVariant }
-  if (item.extra && typeof item.extra === 'object') out.extra = { ...item.extra }
+  if (item.stack_id && typeof item.stack_id === 'object') out.stack_id = { ...item.stack_id }
+  if (item.stackId && typeof item.stackId === 'object') out.stackId = { ...item.stackId }
+  if (item.extra && typeof item.extra === 'object') {
+    out.extra = {
+      ...item.extra,
+      can_place_on: normalizeStringArray(item.extra.can_place_on || item.extra.canPlaceOn),
+      can_destroy: normalizeStringArray(item.extra.can_destroy || item.extra.canDestroy)
+    }
+  }
   return out
 }
 
@@ -1967,15 +2007,19 @@ function bridgeFindAuthoritativeItemStack (owner, stackId) {
   return null
 }
 
-function bridgeOwnerUsesItemV4 (owner, item) {
-  if (item && (item.net_id_variant != null || item.netIdVariant != null || item.extra_data != null || item.extraData != null)) return true
+function bridgeOwnerLocalBedrockOptions (owner) {
   let version
   try {
     version = typeof owner?.downstreamVersionForCensus === 'function'
       ? owner.downstreamVersionForCensus()
       : owner?.server?.downstreamBedrockVersion
   } catch {}
-  return localViaBedrockUsesItemV4({ localBedrockVersion: /\d/.test(String(version || '')) ? version : undefined })
+  return { localBedrockVersion: /\d/.test(String(version || '')) ? version : undefined }
+}
+
+function bridgeOwnerUsesItemV4 (owner, item) {
+  if (item && (item.net_id_variant != null || item.netIdVariant != null || item.extra_data != null || item.extraData != null)) return true
+  return localViaBedrockUsesItemV4(bridgeOwnerLocalBedrockOptions(owner))
 }
 
 function bridgeItemForAcceptedStackState (owner, item, count, stackId) {
@@ -1987,22 +2031,27 @@ function bridgeItemForAcceptedStackState (owner, item, count, stackId) {
   if (isEmptyBedrockItemForBridge(item)) return null
 
   if (bridgeOwnerUsesItemV4(owner, item)) {
-    const out = normalizeItemV4ForLocalViaBedrock({ ...item, count })
-    out.count = count
-    out.net_id_variant = { type: 'item_stack_net_id', id: stackId }
-    return out
+    return normalizeItemV4ForLocalViaBedrock({
+      ...item,
+      count,
+      stack_id: stackId,
+      has_stack_id: Boolean(stackId)
+    }, bridgeOwnerLocalBedrockOptions(owner))
   }
 
-  const out = normalizeItemForLocalViaBedrock({ ...item, count, stack_id: stackId, has_stack_id: 1 })
+  const out = normalizeItemForLocalViaBedrock({ ...item, count, stack_id: stackId, has_stack_id: true })
   out.count = count
   out.stack_id = stackId
-  out.has_stack_id = 1
+  out.has_stack_id = true
   return out
 }
 
 function bridgeOverlayPredictedCursorStorageItem (owner, name, params = {}, options = {}) {
   if (name !== 'inventory_content' && name !== 'inventory_slot') return params
-  const cursor = bridgePredictedCursorStorageItem(owner, name === 'inventory_content' ? options : { localBedrockVersion: '1.26.20' })
+  const itemV4 = name === 'inventory_content'
+    ? localViaBedrockUsesItemV4(options)
+    : localViaBedrockInventorySlotUsesItemV4(options)
+  const cursor = bridgePredictedCursorStorageItem(owner, { ...options, itemV4 })
   if (!cursor) return params
   const storageItem = params.storage_item || params.storageItem
   if (!isEmptyBedrockItemForBridge(storageItem)) return params
@@ -2053,6 +2102,25 @@ function bridgeCachedInventoryItemAtSlot (owner, slotDescriptor) {
   return null
 }
 
+function bridgeSetCachedCursorStorageItem (owner, item) {
+  if (!owner) return false
+  const options = bridgeOwnerLocalBedrockOptions(owner)
+  const normalized = localViaBedrockUsesItemV4(options)
+    ? normalizeItemV4ForLocalViaBedrock(item, options)
+    : normalizeItemForLocalViaBedrock(item)
+  let updated = false
+  for (const property of ['lastPlayerInventoryContent', 'lastPlayerUiContent']) {
+    const packet = owner[property]
+    if (!packet) continue
+    owner[property] = {
+      ...packet,
+      storage_item: bridgeCloneInventoryItemForCache(normalized)
+    }
+    updated = true
+  }
+  return updated
+}
+
 function bridgeSetCachedInventoryItemAtSlot (owner, slotDescriptor, item) {
   const containerId = bridgeSlotContainerId(slotDescriptor)
   const slot = numberOrDefault(slotDescriptor?.slot, -1)
@@ -2060,7 +2128,9 @@ function bridgeSetCachedInventoryItemAtSlot (owner, slotDescriptor, item) {
 
   let property
   let cacheSlot = slot
+  let storageUpdated = false
   if (containerId === 'cursor') {
+    storageUpdated = bridgeSetCachedCursorStorageItem(owner, item)
     property = 'lastPlayerUiContent'
     cacheSlot = 0
   } else if (containerId === 'hotbar' || containerId === 'inventory') {
@@ -2072,7 +2142,7 @@ function bridgeSetCachedInventoryItemAtSlot (owner, slotDescriptor, item) {
   }
 
   const packet = owner[property]
-  if (!packet) return false
+  if (!packet) return storageUpdated
   const input = Array.isArray(packet.input) ? packet.input.slice() : []
   input[cacheSlot] = bridgeCloneInventoryItemForCache(item)
   owner[property] = { ...packet, input }
@@ -4918,11 +4988,13 @@ class ViaBedrockRelayPlayer extends Player {
   }
 
   copyInventoryContentPacket (translated) {
-    const input = Array.isArray(translated.input) ? translated.input.map(item => ({ ...item })) : []
-    return {
+    const input = Array.isArray(translated.input)
+      ? Array.from(translated.input, item => bridgeCloneInventoryItemForCache(item || {}))
+      : []
+    return normalizeInventoryContentForLocalViaBedrock({
       ...translated,
       input
-    }
+    }, bridgeOwnerLocalBedrockOptions(this))
   }
 
   rememberAuthoritativeInventoryPacket (name, translated, context = 'live') {
@@ -4947,10 +5019,10 @@ class ViaBedrockRelayPlayer extends Player {
           ? this.lastPlayerInventoryContent.input.slice()
           : []
         input[slot] = translated.item || translated.storage_item || emptyItemForLocalViaBedrock()
-        this.lastPlayerInventoryContent = {
+        this.lastPlayerInventoryContent = this.copyInventoryContentPacket({
           ...this.lastPlayerInventoryContent,
           input
-        }
+        })
         if (!String(context).startsWith('inventory_replay')) this.scheduleAuthoritativeInventoryReplay('inventory_slot')
         this.scheduleLocalInventoryScreenShim(`inventory_slot:${context}`, 20)
       }
@@ -4963,10 +5035,10 @@ class ViaBedrockRelayPlayer extends Player {
           ? this.lastPlayerUiContent.input.slice()
           : []
         input[slot] = translated.item || translated.storage_item || emptyItemForLocalViaBedrock()
-        this.lastPlayerUiContent = {
+        this.lastPlayerUiContent = this.copyInventoryContentPacket({
           ...this.lastPlayerUiContent,
           input
-        }
+        })
         if (!String(context).startsWith('inventory_replay')) this.scheduleAuthoritativeInventoryReplay('ui_inventory_slot')
         this.scheduleLocalInventoryScreenShim(`ui_inventory_slot:${context}`, 20)
       }
@@ -5063,14 +5135,18 @@ class ViaBedrockRelayPlayer extends Player {
 
   replayAuthoritativeInventoryContents (context, status) {
     let replayed = 0
-    for (const packet of [this.lastPlayerInventoryContent, this.lastPlayerUiContent]) {
-      if (!packet) continue
-      this.recordBridgeToViaBedrock('inventory_content', packet, 'synthetic', {
+    const options = bridgeOwnerLocalBedrockOptions(this)
+    for (const property of ['lastPlayerInventoryContent', 'lastPlayerUiContent']) {
+      if (!this[property]) continue
+      const authoritativePacket = this.copyInventoryContentPacket(this[property])
+      this[property] = authoritativePacket
+      const outboundPacket = bridgeOverlayPredictedCursorStorageItem(this, 'inventory_content', authoritativePacket, options)
+      this.recordBridgeToViaBedrock('inventory_content', outboundPacket, 'synthetic', {
         context,
         translation_status: `synthetic_${status}`
       })
-      this.queue('inventory_content', packet)
-      this.recordBridgeToViaBedrock('inventory_content', packet, 'sent', {
+      this.queue('inventory_content', outboundPacket)
+      this.recordBridgeToViaBedrock('inventory_content', outboundPacket, 'sent', {
         context,
         translation_status: `sent_synthetic_${status}`
       })
@@ -5513,8 +5589,8 @@ class ViaBedrockRelayPlayer extends Player {
     }
 
     const localBedrockOptions = { localBedrockVersion: this.downstreamVersionForCensus() }
-    let translated = normalizeClientboundForLocalViaBedrock(name, params, localBedrockOptions)
-    translated = bridgeOverlayPredictedCursorStorageItem(this, name, translated, localBedrockOptions)
+    const authoritativeTranslated = normalizeClientboundForLocalViaBedrock(name, params, localBedrockOptions)
+    let translated = bridgeOverlayPredictedCursorStorageItem(this, name, authoritativeTranslated, localBedrockOptions)
     translated = this.normalizeClientboundEntityMetadataForViaBedrock(name, translated)
     const inventoryTransactionDrop = clientboundInventoryTransactionDropDiagnosis(name, translated)
     if (inventoryTransactionDrop) {
@@ -5569,7 +5645,7 @@ class ViaBedrockRelayPlayer extends Player {
         context,
         translation_status: 'sent_to_local_viabedrock'
       })
-      this.rememberAuthoritativeInventoryPacket(name, translated, context)
+      this.rememberAuthoritativeInventoryPacket(name, authoritativeTranslated, context)
       this.rememberClientboundEntityPacket(name, translated)
       this.updateCachedEntitySnapshotFromClientboundPacket(name, translated)
       if (name === 'start_game') this.flushStartGameChunkCache(`start_game_sent:${context}`)

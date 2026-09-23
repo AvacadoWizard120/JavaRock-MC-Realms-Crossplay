@@ -2417,14 +2417,14 @@ public class InventoryContainer extends Container {
         PacketWrapper wrapper = PacketWrapper.create(com.viaversion.viaversion.protocols.v1_21_11to26_1.packet.ClientboundPackets26_1.CONTAINER_SET_CONTENT, this.user);
         wrapper.write(Types.VAR_INT, Integer.valueOf(this.javaContainerId()));
         wrapper.write(Types.VAR_INT, Integer.valueOf(stateId));
-        wrapper.write(VersionedTypes.V26_1.itemArray(), this.getJavaItems());
-        wrapper.write(VersionedTypes.V26_1.item(), this.user.get(InventoryTracker.class).getHudContainer().getJavaItem(0));
+        wrapper.write(VersionedTypes.V26_2.itemArray(), this.getJavaItems());
+        wrapper.write(VersionedTypes.V26_2.item(), this.user.get(InventoryTracker.class).getHudContainer().getJavaItem(0));
         wrapper.send(BedrockProtocol.class);
     }
 
     private void sendJavaCursorItem() {
         PacketWrapper cursor = PacketWrapper.create(com.viaversion.viaversion.protocols.v1_21_11to26_1.packet.ClientboundPackets26_1.SET_CURSOR_ITEM, this.user);
-        cursor.write(VersionedTypes.V26_1.item(), this.user.get(InventoryTracker.class).getHudContainer().getJavaItem(0));
+        cursor.write(VersionedTypes.V26_2.item(), this.user.get(InventoryTracker.class).getHudContainer().getJavaItem(0));
         cursor.send(BedrockProtocol.class);
     }
 

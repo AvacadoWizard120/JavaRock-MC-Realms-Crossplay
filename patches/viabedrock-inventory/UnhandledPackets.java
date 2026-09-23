@@ -76,7 +76,10 @@ public class UnhandledPackets {
                     wrapper.cancel();
                     return;
                 }
-                case CONTAINER -> container = new ChestContainer(wrapper.user(), containerId, title, position, 27);
+                case CONTAINER -> {
+                    container = new ChestContainer(wrapper.user(), containerId, title, position, 27);
+                    container.bridgeConfigureContainerBlockTag(blockTag);
+                }
                 case WORKBENCH -> container = new InventoryContainer(
                         wrapper.user(), containerId, title, position, inventoryTracker.getInventoryContainer(), true);
                 case NONE, CAULDRON, JUKEBOX, ARMOR, HAND, HUD, DECORATED_POT -> {

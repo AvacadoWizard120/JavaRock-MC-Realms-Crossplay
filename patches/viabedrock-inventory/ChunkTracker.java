@@ -926,14 +926,40 @@ public class ChunkTracker extends StoredObject {
         final int pairDz = pairZ - position.z();
         if (Math.abs(pairDx) + Math.abs(pairDz) != 1) return null;
 
-        final BlockState pairState = this.javaBlockState(this.getRawJavaBlockState(pairX, position.y(), pairZ));
-        if (!BridgeBlockRendering.isChest(pairState)
-                || !state.identifier().equals(pairState.identifier())
+        final BlockPosition pairPosition = new BlockPosition(pairX, position.y(), pairZ);
+        final BlockState pairState = this.javaBlockState(this.getRawJavaBlockState(pairPosition));
+        final BedrockBlockEntity pairBlockEntity = this.getBlockEntity(pairPosition);
+        return isReciprocalChestPair(position, state, blockEntity, pairPosition, pairState, pairBlockEntity)
+                ? pairPosition
+                : null;
+    }
+
+    static boolean isReciprocalChestPair(final BlockPosition position, final BlockState state,
+                                         final BedrockBlockEntity blockEntity, final BlockPosition pairPosition,
+                                         final BlockState pairState, final BedrockBlockEntity pairBlockEntity) {
+        if (position == null || pairPosition == null || position.y() != pairPosition.y()) return false;
+        if (!BridgeBlockRendering.isChest(state) || !BridgeBlockRendering.isChest(pairState)) return false;
+        if (!state.namespacedIdentifier().equals(pairState.namespacedIdentifier())
                 || !Objects.equals(state.properties().get("facing"), pairState.properties().get("facing"))) {
-            return null;
+            return false;
         }
 
-        return new BlockPosition(pairX, position.y(), pairZ);
+        final int pairDx = pairPosition.x() - position.x();
+        final int pairDz = pairPosition.z() - position.z();
+        if (Math.abs(pairDx) + Math.abs(pairDz) != 1) return false;
+
+        return chestBlockEntityPointsAt(blockEntity, pairPosition)
+                && chestBlockEntityPointsAt(pairBlockEntity, position);
+    }
+
+    private static boolean chestBlockEntityPointsAt(final BedrockBlockEntity blockEntity,
+                                                     final BlockPosition targetPosition) {
+        if (blockEntity == null || targetPosition == null) return false;
+        final NumberTag pairXTag = blockEntity.tag().getNumberTag("pairx");
+        final NumberTag pairZTag = blockEntity.tag().getNumberTag("pairz");
+        return pairXTag != null && pairZTag != null
+                && pairXTag.asInt() == targetPosition.x()
+                && pairZTag.asInt() == targetPosition.z();
     }
 
     private int resolveChestBlockState(final BlockPosition position, final int javaBlockState, final BlockState state) {

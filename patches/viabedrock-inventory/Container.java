@@ -47,6 +47,8 @@ public abstract class Container {
     protected BedrockItem[] items;
     private int[] bridgeAuthoritativeStackIds;
     protected final Set<String> validBlockTags;
+    private String bridgeGenericStorageBlockTag;
+    private boolean bridgeChestStorage;
     protected static final int BRIDGE_QUICK_CRAFT_NONE = -1;
     protected static final int BRIDGE_QUICK_CRAFT_LEFT = 0;
     protected static final int BRIDGE_QUICK_CRAFT_RIGHT = 1;
@@ -65,6 +67,8 @@ public abstract class Container {
         this.items = BedrockItem.emptyArray(size);
         this.bridgeAuthoritativeStackIds = new int[size];
         this.validBlockTags = Set.of(validBlockTags);
+        this.bridgeChestStorage = type == ContainerType.CONTAINER &&
+                (this.validBlockTags.contains("chest") || this.validBlockTags.contains("trapped_chest"));
     }
 
     protected Container(UserConnection user, byte containerId, ContainerType type, TextComponent title, BlockPosition position, BedrockItem[] items, Set<String> validBlockTags) {
@@ -76,6 +80,8 @@ public abstract class Container {
         this.items = items;
         this.bridgeAuthoritativeStackIds = bridgeStackIdsFromItems(items);
         this.validBlockTags = validBlockTags;
+        this.bridgeChestStorage = type == ContainerType.CONTAINER &&
+                (this.validBlockTags.contains("chest") || this.validBlockTags.contains("trapped_chest"));
     }
 
     public boolean handleClick(int stateId, short javaSlotRaw, byte button, ContainerInput input) {
@@ -194,7 +200,7 @@ public abstract class Container {
     }
 
     private boolean bridgePromoteToDoubleChest(int incomingSize) {
-        if (this.type != ContainerType.CONTAINER || this.items.length != SINGLE_CHEST_SIZE || incomingSize != DOUBLE_CHEST_SIZE) {
+        if (!this.bridgeCanPromoteToDoubleChest(incomingSize)) {
             return false;
         }
 
@@ -230,7 +236,7 @@ public abstract class Container {
             slotUpdate.write(Types.VAR_INT, Integer.valueOf(this.javaContainerId()));
             slotUpdate.write(Types.VAR_INT, Integer.valueOf(stateId));
             slotUpdate.write(Types.SHORT, Short.valueOf((short) this.javaSlot(slot)));
-            slotUpdate.write(VersionedTypes.V26_1.item(), this.getJavaItem(slot));
+            slotUpdate.write(VersionedTypes.V26_2.item(), this.getJavaItem(slot));
             slotUpdate.send(BedrockProtocol.class);
             ViaBedrock.getPlatform().getLogger().log(Level.INFO,
                     "[BedrockRealmBridge] replaced authoritative inventory slot update" +
@@ -250,8 +256,21 @@ public abstract class Container {
     public ContainerType type() { return this.type; }
     public TextComponent title() { return this.title; }
     public BlockPosition position() { return this.position; }
+    public void bridgeConfigureContainerBlockTag(String blockTag) {
+        if (this.type != ContainerType.CONTAINER) return;
+        this.bridgeChestStorage = bridgeIsChestStorageBlockTag(blockTag);
+        this.bridgeGenericStorageBlockTag = this.bridgeChestStorage ? null : blockTag;
+    }
+    boolean bridgeCanPromoteToDoubleChest(int incomingSize) {
+        return this.bridgeChestStorage && this.items.length == SINGLE_CHEST_SIZE && incomingSize == DOUBLE_CHEST_SIZE;
+    }
+    private static boolean bridgeIsChestStorageBlockTag(String blockTag) {
+        return "chest".equals(blockTag) || "trapped_chest".equals(blockTag);
+    }
     public boolean isValidBlockTag(String tag) {
-        return tag != null && this.validBlockTags.contains(tag);
+        if (tag == null) return false;
+        if (this.bridgeGenericStorageBlockTag != null) return this.bridgeGenericStorageBlockTag.equals(tag);
+        return this.validBlockTags.contains(tag);
     }
     public int bridgeAuthoritativeStackId(int slot) {
         if (slot < 0 || slot >= this.bridgeAuthoritativeStackIds.length) return 0;
@@ -642,8 +661,8 @@ public abstract class Container {
         PacketWrapper wrapper = PacketWrapper.create(com.viaversion.viaversion.protocols.v1_21_11to26_1.packet.ClientboundPackets26_1.CONTAINER_SET_CONTENT, this.user);
         wrapper.write(Types.VAR_INT, Integer.valueOf(this.javaContainerId()));
         wrapper.write(Types.VAR_INT, Integer.valueOf(stateId));
-        wrapper.write(VersionedTypes.V26_1.itemArray(), this.bridgeMergedJavaContainerItems(inventory));
-        wrapper.write(VersionedTypes.V26_1.item(), tracker.getHudContainer().getJavaItem(0));
+        wrapper.write(VersionedTypes.V26_2.itemArray(), this.bridgeMergedJavaContainerItems(inventory));
+        wrapper.write(VersionedTypes.V26_2.item(), tracker.getHudContainer().getJavaItem(0));
         wrapper.send(BedrockProtocol.class);
     }
 
