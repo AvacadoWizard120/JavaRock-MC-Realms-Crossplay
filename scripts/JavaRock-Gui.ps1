@@ -183,6 +183,10 @@ $StopStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-stop.err.log'
 $UpdateStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-update.out.log'
 $UpdateStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-update.err.log'
 $UpdateResultFile = Join-Path $RuntimeDir 'bridge-windows-gui-update-result.json'
+$UpdateInstallStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-update-install.out.log'
+$UpdateInstallStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-update-install.err.log'
+$UpdateInstallResultFile = Join-Path $RuntimeDir 'bridge-windows-gui-update-install-result.json'
+$UpdateInstallProgressFile = Join-Path $RuntimeDir 'bridge-windows-gui-update-install-progress.json'
 $SupportStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-support.out.log'
 $SupportStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-support.err.log'
 $SupportResultFile = Join-Path $RuntimeDir 'bridge-windows-gui-support-result.json'
@@ -570,6 +574,7 @@ $script:RealmRefreshTimeoutMs = 130000
 $script:StopProcess = $null
 $script:SuppressBridgeLogs = $false
 $script:UpdateProcess = $null
+$script:UpdateInstallProcess = $null
 $script:SupportProcess = $null
 $script:UpdateCheckManual = $false
 $script:UpdatePromptedVersion = ''
@@ -1321,29 +1326,102 @@ function Start-UpdateInstall {
         return
     }
 
+    $existingProgress = Read-JsonFile -Path $UpdateInstallProgressFile
+    $existingState = [string](Get-ObjectValue $existingProgress 'state' '')
+    $existingPid = 0
+    try { $existingPid = [int](Get-ObjectValue $existingProgress 'pid' 0) } catch {}
+    if ($existingState -in @('ready', 'running') -and (Test-ProcessAlive $existingPid)) {
+        $message = "A JavaRock update is already running (PID $existingPid). Its progress window may be behind this one."
+        Add-Log 'update' $message
+        [void][Windows.Forms.MessageBox]::Show(
+            $message,
+            'JavaRock Update',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::None
+        )
+        return
+    }
+
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', $UpdaterScript,
         '-Install',
         '-ReleaseTag', [string]$Update.tag,
         '-ParentProcessId', [string]$PID,
-        '-Restart'
+        '-Restart',
+        '-ResultFile', $UpdateInstallResultFile,
+        '-ProgressFile', $UpdateInstallProgressFile,
+        '-ShowProgress'
     )
+    if ($script:DarkMode) { $arguments += '-DarkMode' }
+
+    $installProcess = $null
     try {
-        Add-Log 'update' "Installing JavaRock $($Update.latestVersion). The launcher will close and restart."
-        Start-Process -FilePath 'powershell.exe' `
+        foreach ($path in @($UpdateInstallResultFile, $UpdateInstallProgressFile, $UpdateInstallStdoutLog, $UpdateInstallStderrLog)) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Remove-Item -LiteralPath $path -Force
+            }
+        }
+        Reset-LogCursor 'update-out'
+        Reset-LogCursor 'update-err'
+        [IO.File]::WriteAllText($UpdateInstallStdoutLog, '', [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($UpdateInstallStderrLog, '', [Text.UTF8Encoding]::new($false))
+
+        Add-Log 'update' "Starting the JavaRock $($Update.latestVersion) updater..."
+        $installProcess = Start-Process -FilePath 'powershell.exe' `
             -ArgumentList (Join-NativeArguments $arguments) `
             -WorkingDirectory $ProjectRoot `
-            -WindowStyle Hidden | Out-Null
+            -RedirectStandardOutput $UpdateInstallStdoutLog `
+            -RedirectStandardError $UpdateInstallStderrLog `
+            -WindowStyle Hidden `
+            -PassThru
+        $script:UpdateInstallProcess = $installProcess
+
+        $ready = $false
+        $deadline = [DateTime]::UtcNow.AddSeconds(8)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if ($installProcess.HasExited) { break }
+            $progress = Read-JsonFile -Path $UpdateInstallProgressFile
+            $state = [string](Get-ObjectValue $progress 'state' '')
+            $progressPid = 0
+            try { $progressPid = [int](Get-ObjectValue $progress 'pid' 0) } catch {}
+            if ($state -in @('ready', 'running') -and $progressPid -eq $installProcess.Id) {
+                $ready = $true
+                break
+            }
+            [Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 100
+        }
+
+        if (-not $ready) {
+            $exitDetail = if ($installProcess.HasExited) { " It exited with code $($installProcess.ExitCode)." } else { '' }
+            if (-not $installProcess.HasExited) {
+                try { $installProcess.Kill() } catch {}
+                try { $installProcess.WaitForExit(2000) } catch {}
+            }
+            $result = Read-JsonFile -Path $UpdateInstallResultFile
+            $resultMessage = [string](Get-ObjectValue $result 'message' '')
+            $details = if ($resultMessage) { " $resultMessage" } else { '' }
+            throw "The updater did not open its progress window, so JavaRock stayed open.$exitDetail$details Review $UpdateInstallStderrLog for details."
+        }
+
+        Add-Log 'update' "JavaRock $($Update.latestVersion) update window is ready. Handing off installation and restart."
         $script:InstallingUpdate = $true
         $form.Close()
     } catch {
-        Add-Log 'update' "Could not start the updater: $($_.Exception.Message)"
+        if ($null -ne $installProcess -and -not $installProcess.HasExited) {
+            try { $installProcess.Kill() } catch {}
+        }
+        if ($null -ne $installProcess) {
+            try { $installProcess.Dispose() } catch {}
+        }
+        $script:UpdateInstallProcess = $null
+        Add-Log 'update' "Could not hand off to the updater: $($_.Exception.Message)"
         [void][Windows.Forms.MessageBox]::Show(
             $_.Exception.Message,
             'JavaRock Update',
             [Windows.Forms.MessageBoxButtons]::OK,
-            [Windows.Forms.MessageBoxIcon]::Error
+            [Windows.Forms.MessageBoxIcon]::None
         )
     }
 }

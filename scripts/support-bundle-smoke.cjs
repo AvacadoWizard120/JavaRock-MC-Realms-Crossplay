@@ -29,6 +29,12 @@ try {
     profile: { name: 'PrivateName', uuid: 'private-uuid', xuid: 'private-xuid' },
     lastEvent: { name: 'resource_packs_info', id: 6 }
   }))
+  write(path.join(runtime, 'bridge-windows-gui-update-install-result.json'), '{"state":"error","message":"update failed"}\n')
+  write(path.join(runtime, 'bridge-windows-gui-update-install-progress.json'), '{"state":"running","phase":"install","message":"Installing JavaRock"}\n')
+  write(path.join(runtime, 'updates', 'latest-update.log'), '[JavaRock] install failed\n')
+  write(path.join(runtime, 'updates', 'latest-result.json'), '{"state":"error","message":"install failed"}\n')
+  write(path.join(runtime, 'updates', 'latest-progress.json'), '{"state":"error","phase":"error"}\n')
+  write(path.join(runtime, 'updates', 'latest-restart.err.log'), 'restart failed\n')
   write(path.join(runtime, 'bridge-windows-gui-preferences.json'), '{"supportUploadDestination":"secret"}\n')
   write(path.join(fixture, '.env'), 'SECRET=do-not-ship\n')
   write(path.join(fixture, '.auth-profiles', 'account', 'token-cache.json'), 'do-not-ship\n')
@@ -107,7 +113,13 @@ try {
     'packet-census/events-run-2.jsonl',
     'packet-census/inventory-trace-run-2.jsonl',
     'runtime/.runtime/bridge-windows-gui-bridge.out.log',
-    'runtime/.runtime/bridge-status.json'
+    'runtime/.runtime/bridge-status.json',
+    'runtime/.runtime/bridge-windows-gui-update-install-result.json',
+    'runtime/.runtime/bridge-windows-gui-update-install-progress.json',
+    'runtime/.runtime/updates/latest-update.log',
+    'runtime/.runtime/updates/latest-result.json',
+    'runtime/.runtime/updates/latest-progress.json',
+    'runtime/.runtime/updates/latest-restart.err.log'
   ]
   for (const relative of expected) {
     assert(fs.existsSync(path.join(extracted, ...relative.split('/'))), `missing ${relative}`)

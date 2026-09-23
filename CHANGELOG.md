@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.102 - 2026-09-23
+
+- Rebuilt the automatic-update handoff around a standalone progress window that follows the launcher's light or dark theme. JavaRock now stays open until that window confirms it is ready, and download, verification, installation, and restart phases remain visible.
+- Updates are verified again after their files are installed, and completion is reported only after the updated launcher confirms that its new window is visible. Failures remain on screen and are saved with the support diagnostics instead of disappearing when the old launcher closes.
+- Version-only package-lock changes no longer delete working dependencies. Real dependency changes still trigger a clean rebuild, and concurrent update attempts are blocked.
+- Update-check and update-install diagnostics are stored separately, so the automatic check after restart cannot erase the install result or its logs.
+
 ## 0.3.101 - 2026-09-23
 
 - Fixed the `ItemStackRequest` disconnect seen after picking up the broken oak log. Every 1.26.40+ action now writes the correct compressed outer discriminator and matching legacy inner discriminator, and named crafting-result descriptors repeat the correct tag.
