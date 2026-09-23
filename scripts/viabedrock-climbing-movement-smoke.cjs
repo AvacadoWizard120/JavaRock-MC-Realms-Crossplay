@@ -60,11 +60,15 @@ public final class BridgeClimbingMovementSmoke {
     }
 
     public static void main(String[] args) {
-        final float ladderAscent = ClientPlayerPackets.bridgeVerticalVelocity(0.2F, false, 0, true);
+        final float observedJavaLadderAscent = 0.1176F;
+        final float ladderAscent = ClientPlayerPackets.bridgeVerticalVelocity(observedJavaLadderAscent, false, 0, true);
         final float airborneAscent = ClientPlayerPackets.bridgeVerticalVelocity(0.2F, false, 0, false);
-        close(ladderAscent, 0.2F, "ladder ascent must preserve the observed positive delta");
+        close(ladderAscent, 0.2F, "Java's dragged ladder ascent must be normalized to Bedrock's climb velocity");
         close(airborneAscent, 0.1176F, "ordinary airborne ascent must retain gravity and vertical drag");
         check(ladderAscent > airborneAscent, "climb handling must not collapse back to airborne physics");
+
+        final float strongerClimbingImpulse = ClientPlayerPackets.bridgeVerticalVelocity(0.42F, false, 0, true);
+        close(strongerClimbingImpulse, 0.42F, "climb normalization must preserve stronger upward impulses");
 
         final float climbingDescent = ClientPlayerPackets.bridgeVerticalVelocity(-0.1F, false, 0, true);
         final float airborneDescent = ClientPlayerPackets.bridgeVerticalVelocity(-0.1F, false, 0, false);

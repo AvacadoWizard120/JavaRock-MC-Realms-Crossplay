@@ -918,6 +918,13 @@ function assertMouseActionStateMachine () {
     'bridgeRollbackPendingNativeRequest(requestId)',
     'rolledBackRequests=',
     'native_item_stack_response',
+    'private void writeItemStackRequestActionType(',
+    'wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, actionType.getValue())',
+    'wrapper.write(BedrockTypes.INT_LE, slot.stackId)',
+    'boolean containersPresence = wrapper.read(Types.BOOLEAN)',
+    'boolean containersOptionPresence = wrapper.read(Types.BOOLEAN)',
+    'boolean stackIdPresence = wrapper.read(Types.BOOLEAN)',
+    'boolean stackIdOptionPresence = wrapper.read(Types.BOOLEAN)',
     'private void sendNativeCraftItemStackRequest(',
     'ItemStackRequestActionType.CraftRecipe',
     'ItemStackRequestActionType.CraftResults',
@@ -926,6 +933,15 @@ function assertMouseActionStateMachine () {
     'private void sendBatchedItemStackRequestMoves('
   ]) {
     if (!inventorySource.includes(marker)) throw new Error(`patched InventoryContainer.java is missing native mouse-action marker: ${marker}`)
+  }
+  const stackSlotWriterStart = inventorySource.indexOf('private void writeStackRequestSlot(')
+  const stackSlotWriterEnd = inventorySource.indexOf('public void bridgeHandleItemStackResponse(', stackSlotWriterStart)
+  const stackSlotWriter = inventorySource.slice(stackSlotWriterStart, stackSlotWriterEnd)
+  if (stackSlotWriter.includes('BedrockTypes.VAR_INT, slot.stackId')) {
+    throw new Error('native StackRequestSlotInfo regressed to the pre-1.26.40 zigzag stack-ID wire shape')
+  }
+  if ((inventorySource.match(/writeItemStackRequestActionType\(wrapper,/g) || []).length !== 7) {
+    throw new Error('every native item_stack_request action writer must include the 1.26.45 legacy action-type byte')
   }
   for (const marker of [
     'ClientboundBedrockPackets.ITEM_STACK_RESPONSE',

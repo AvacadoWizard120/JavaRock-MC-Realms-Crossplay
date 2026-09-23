@@ -62,7 +62,10 @@ const normalizedResponse = normalizeItemStackResponseForLocalViaBedrock({
 const responseSlot = normalizedResponse.responses[0].containers[0].slots[0]
 assert(responseSlot.custom_name === '', 'item_stack_response slot custom_name must be an explicit empty string')
 assert(responseSlot.filtered_custom_name === '', 'item_stack_response slot filtered_custom_name must be an explicit empty string')
-assert(responseSlot.stack_network_id === 0, 'item_stack_response slot stack_network_id must normalize from item_stack_id')
+assert(responseSlot.item_stack_id === 0, 'item_stack_response slot item_stack_id must preserve an explicit zero ID')
+assert(responseSlot.item_stack_id_presence === true, 'item_stack_response slot must restore the 1.26.45 stack-ID presence field')
+assert(normalizedResponse.responses[0].containers_presence === true, 'item_stack_response must restore the 1.26.45 container presence field')
+assert(normalizedResponse.responses[0].containers[0].slot_type.container_id === 'cursor', 'item_stack_response must normalize its FullContainerName field')
 
 const owner = {
   server: { bridgeConfig: { javaLan: { viaProxyRunDir: process.cwd() } } },
@@ -619,6 +622,7 @@ const craft = bridgeModernItemStackRequestsForLegacyInventoryTransaction(craftOw
 assert(Array.isArray(craft) && craft.length === 1, '2x2 craft commit should rewrite to a staged craft request')
 const craftActions = craft[0].params.requests[0].actions.map(action => action.type_id)
 assert(craftActions.join(',') === 'craft_recipe,results_deprecated,consume,place', `unexpected craft action sequence: ${craftActions.join(',')}`)
+assert(craft[0].params.requests[0].actions.every(action => action.legacy_type_id === 0), 'every synthetic 1.26.45 craft action must include legacy_type_id=0')
 assert(craft[0].params.requests[0].actions[0].recipe_network_id === 252, 'craft recipe request must preserve live Bedrock recipe network id')
 assert(craft[0].params.requests[0].actions.find(action => action.type_id === 'consume').source.stack_id === 15, 'craft consume must use the server-authoritative crafting-grid stack id')
 const craftPlaceAction = craft[0].params.requests[0].actions.find(action => action.type_id === 'place')
@@ -627,7 +631,9 @@ assert(craftPlaceAction.source.stack_id === craft[0].params.requests[0].request_
 assert(craftPlaceAction.destination.slot_type.container_id === 'hotbar', 'direct craft placement must target the intended hotbar slot')
 assert(craftPlaceAction.destination.stack_id === 0, 'direct craft placement into an empty slot must target destination stack id 0')
 const craftResultItem = craft[0].params.requests[0].actions.find(action => action.type_id === 'results_deprecated').result_items[0]
-assert(craftResultItem.network_id === 5, 'craft result item must preserve the output network id')
+assert(craftResultItem.type === 'name' && craftResultItem.legacy_type === 0, 'craft result item must use the 1.26.45 named instance descriptor')
+assert(craftResultItem.name === 'minecraft:oak_planks', 'craft result descriptor must resolve its name from the live item palette')
+assert(craftResultItem.metadata === 0, 'craft result descriptor must preserve output metadata')
 assert(craftResultItem.count === 4, 'craft result item must preserve the output count')
 assert(craftResultItem.block_runtime_id === 1921718966, 'craft result item must preserve the output block runtime id')
 assert(craftResultItem.has_stack_id == null, 'Realm-bound craft result items must not include local ViaBedrock has_stack_id')

@@ -189,8 +189,10 @@ const stackResponse = normalizeClientboundForLocalViaBedrock('item_stack_respons
   }]
 })
 assert.strictEqual(stackResponse.responses[0].request_id, 44)
-assert.strictEqual(stackResponse.responses[0].containers[0].container_id, 'hotbar_and_inventory')
-assert.strictEqual(stackResponse.responses[0].containers[0].slots[0].stack_network_id, 333)
+assert.strictEqual(stackResponse.responses[0].containers_presence, true)
+assert.strictEqual(stackResponse.responses[0].containers[0].slot_type.container_id, 'hotbar_and_inventory')
+assert.strictEqual(stackResponse.responses[0].containers[0].slots[0].item_stack_id_presence, true)
+assert.strictEqual(stackResponse.responses[0].containers[0].slots[0].item_stack_id, 333)
 assert.strictEqual(stackResponse.entries, undefined)
 
 {
