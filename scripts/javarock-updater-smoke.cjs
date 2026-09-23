@@ -344,6 +344,8 @@ try {
   assert.match(updaterSource, /Get-PackageLockDependencyHash/)
   assert.match(updaterSource, /Get-ReleaseAssets/)
   assert.match(updaterSource, /unexpected release-assets URL/)
+  assert.match(updaterSource, /\[IO\.File\]::ReadAllText\(\$stdoutPath\)\.Trim\(\)/)
+  assert.doesNotMatch(updaterSource, /\(\[string\]\(Get-Content -LiteralPath \$stdoutPath[^\n]+\)\)\.Trim\(\)/)
   assert.match(updaterSource, /Native Windows GUI is visible/)
   assert.match(updaterSource, /Start-JavaRock\.ps1/)
   assert.match(updaterSource, /latest-result\.json/)

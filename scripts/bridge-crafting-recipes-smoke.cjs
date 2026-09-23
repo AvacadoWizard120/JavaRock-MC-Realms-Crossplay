@@ -180,10 +180,10 @@ const tinyIds = recipeIds(db)
 const tinyStationIds = recipeIds(stationDb)
 if (db.recipe_count !== 3) throw new Error(`expected exactly 3 tiny crafting_table 2x2 recipes, got ${db.recipe_count}`)
 if (craftingTableDb.recipe_count !== 4) throw new Error(`expected exactly 4 tiny crafting-table recipes, got ${craftingTableDb.recipe_count}`)
-if (recipeBookDb.recipe_count !== 5) throw new Error(`expected 5 tiny crafting recipe-book displays, got ${recipeBookDb.recipe_count}`)
+if (recipeBookDb.recipe_count !== 4) throw new Error(`expected 4 executable tiny crafting recipe-book displays, got ${recipeBookDb.recipe_count}`)
 if (!recipeIds(craftingTableDb).has('minecraft:too_large')) throw new Error('valid 3x3 recipe was omitted from crafting-table DB')
 if (tinyIds.has('minecraft:too_large')) throw new Error('3x3 recipe leaked into player 2x2 crafting DB')
-if (!recipeIds(recipeBookDb).has('minecraft:deprecated_old_recipe')) throw new Error('deprecated Bedrock crafting recipe was not retained for recipe-book matching')
+if (recipeIds(recipeBookDb).has('minecraft:deprecated_old_recipe')) throw new Error('network_id 0 recipe must not be exposed as an executable recipe-book display')
 if (!tinyIds.has('minecraft:test_vertical_sticks_shape')) throw new Error('column-major vertical shaped recipe was not exported')
 if (tinyIds.has('minecraft:furnace_log_oak')) throw new Error('tiny furnace recipe leaked into crafting DB')
 if (!tinyStationIds.has('minecraft:furnace_log_oak')) throw new Error('tiny furnace recipe was not preserved for future station DB')
@@ -208,13 +208,119 @@ if (!ladderShape || ladderEmptySlots.join(',') !== '1,7') {
   throw new Error(`3x3 shaped recipe was transposed; expected empty slots 1,7, got ${ladderEmptySlots?.join(',')}`)
 }
 
+// Bedrock 1.26.40 removed the tagged `recipes` array and moved recipe kinds
+// into separate arrays. Ingredients also changed from numeric IDs to named or
+// tag descriptors. This fixture is mandatory because release archives do not
+// include the optional packet-census sample exercised above.
+const validName = (name, count = 1) => ({
+  type: 'valid',
+  descriptor_type: 'name',
+  name,
+  metadata: 32767,
+  count
+})
+const validTag = (tag, count = 1) => ({
+  type: 'valid',
+  descriptor_type: 'item_tag',
+  tag,
+  metadata: 32767,
+  count
+})
+const emptyDescriptorIngredient = { type: 'valid', descriptor_type: 'empty', metadata: 32767, count: 0 }
+const modernRecipeOptions = {
+  networkIdByItemName: new Map([
+    ['minecraft:oak_log', 17],
+    ['minecraft:stick', 352]
+  ])
+}
+const modernSplitPacket = {
+  shaped_recipes: [
+    {
+      recipe_id: 'minecraft:modern_oak_planks',
+      width: 1,
+      height: 1,
+      input: [validName('minecraft:oak_log')],
+      output: [{ network_id: -742, count: 4, metadata: 0, block_runtime_id: 1921718966 }],
+      block: 'crafting_table',
+      priority: 0,
+      network_id: 2501
+    },
+    {
+      recipe_id: 'minecraft:modern_barrel',
+      width: 3,
+      height: 3,
+      input: [
+        validTag('minecraft:planks'), validTag('minecraft:planks'), validTag('minecraft:planks'),
+        validTag('minecraft:planks'), emptyDescriptorIngredient, validTag('minecraft:planks'),
+        validTag('minecraft:planks'), validTag('minecraft:planks'), validTag('minecraft:planks')
+      ],
+      output: [{ network_id: -203, count: 1, metadata: 0, block_runtime_id: 198111737 }],
+      block: 'crafting_table',
+      priority: 0,
+      network_id: 2502
+    },
+    {
+      recipe_id: 'minecraft:modern_non_executable',
+      width: 1,
+      height: 1,
+      input: [validName('minecraft:oak_log')],
+      output: [{ network_id: -742, count: 4, metadata: 0, block_runtime_id: 1921718966 }],
+      block: 'crafting_table',
+      priority: 0,
+      network_id: 0
+    }
+  ],
+  shapeless_recipes: [
+    {
+      recipe_id: 'minecraft:modern_shapeless',
+      input: [validName('minecraft:stick'), validTag('minecraft:planks')],
+      output: [{ network_id: 58, count: 1, metadata: 0, block_runtime_id: 0 }],
+      block: 'crafting_table',
+      priority: 0,
+      network_id: 2503
+    }
+  ],
+  multi_recipes: [],
+  shulker_box_recipes: [],
+  shapeless_chemistry_recipes: [],
+  shaped_chemistry_recipes: [],
+  smithing_transform_recipes: [],
+  smithing_trim_recipes: [],
+  potion_type_recipes: [],
+  potion_container_recipes: [],
+  material_reducers: [],
+  clear_recipes: true
+}
+
+const modern2x2 = simplifyCraftingDataForBridge2x2(modernSplitPacket, modernRecipeOptions)
+const modern3x3 = simplifyCraftingDataForBridge3x3(modernSplitPacket, modernRecipeOptions)
+const modernBook = simplifyCraftingDataForRecipeBook(modernSplitPacket, modernRecipeOptions)
+if (modern2x2.recipe_count !== 2) throw new Error(`expected 2 modern executable 2x2 recipes, got ${modern2x2.recipe_count}`)
+if (modern3x3.recipe_count !== 3) throw new Error(`expected 3 modern executable 3x3 recipes, got ${modern3x3.recipe_count}`)
+if (modernBook.recipe_count !== 3) throw new Error(`expected 3 modern recipe-book displays, got ${modernBook.recipe_count}`)
+const modernPlanks = modern2x2.recipes.find(recipe => recipe.recipe_id === 'minecraft:modern_oak_planks')
+if (!modernPlanks || modernPlanks.network_id !== 2501 || modernPlanks.pattern[0]?.network_id !== 17) {
+  throw new Error('modern named ingredient was not resolved through the live item palette')
+}
+if (modernPlanks.output.network_id !== -742) throw new Error('negative Bedrock item runtime IDs must remain valid recipe outputs')
+if (!modern3x3.recipes.some(recipe => recipe.recipe_id === 'minecraft:modern_barrel' && recipe.network_id === 2502)) {
+  throw new Error('modern split-array 3x3 recipe was not exported with an executable network ID')
+}
+if (modernBook.recipes.some(recipe => recipe.network_id <= 0)) {
+  throw new Error('recipe book exposed a recipe without an executable Bedrock network ID')
+}
+const modernWithoutPalette = simplifyCraftingDataForBridge2x2(modernSplitPacket)
+if (modernWithoutPalette.recipe_count !== 0) {
+  throw new Error('unresolved named ingredients must reject a recipe instead of silently dropping required cells')
+}
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-crafting-recipes-'))
 try {
   const result = writeBridgeCraftingRecipesForViaProxy(tmp, path.join(tmp, 'viaproxy-run'), tinyPacket)
   if (!result.written || result.recipeCount !== 3) throw new Error('recipe writer did not report the expected crafting output')
   if (result.craftingTableRecipeCount !== 4) throw new Error(`expected 4 crafting-table recipes, got ${result.craftingTableRecipeCount}`)
   if (result.stationRecipeCount !== 3) throw new Error(`expected 3 preserved station recipes, got ${result.stationRecipeCount}`)
-  if (result.recipeBookCount !== 5) throw new Error(`expected 5 recipe-book displays, got ${result.recipeBookCount}`)
+  if (result.recipeBookCount !== 4) throw new Error(`expected 4 executable recipe-book displays, got ${result.recipeBookCount}`)
   for (const target of result.targets) {
     if (!fs.existsSync(target)) throw new Error(`missing recipe DB target: ${target}`)
     const written = JSON.parse(fs.readFileSync(target, 'utf8'))
@@ -238,7 +344,7 @@ try {
   for (const target of result.recipeBookTargets) {
     if (!fs.existsSync(target)) throw new Error(`missing recipe-book target: ${target}`)
     const written = JSON.parse(fs.readFileSync(target, 'utf8'))
-    if (written.recipe_count !== 5 || written.unlock_state_ready !== false) {
+    if (written.recipe_count !== 4 || written.unlock_state_ready !== false) {
       throw new Error(`fresh recipe-book catalog has bad state in ${target}`)
     }
   }
@@ -273,6 +379,63 @@ try {
   const resetBook = JSON.parse(fs.readFileSync(result.recipeBookTargets[0], 'utf8'))
   if (resetBook.unlock_state_ready || resetBook.unlocked_recipe_ids.length) {
     throw new Error('new crafting_data did not clear stale recipe unlock state')
+  }
+
+  const modernResult = writeBridgeCraftingRecipesForViaProxy(
+    tmp,
+    path.join(tmp, 'viaproxy-run'),
+    modernSplitPacket,
+    modernRecipeOptions
+  )
+  if (!modernResult.written || modernResult.sourceSchema !== 'split_recipe_arrays' || modernResult.sourceRecipeCount !== 4) {
+    throw new Error(`modern split recipe writer reported unexpected result: ${JSON.stringify(modernResult)}`)
+  }
+  if (modernResult.recipeCount !== 2 || modernResult.craftingTableRecipeCount !== 3 || modernResult.recipeBookCount !== 3) {
+    throw new Error('modern split recipe writer did not persist executable 2x2, 3x3, and recipe-book catalogs')
+  }
+  for (const target of [...modernResult.targets, ...modernResult.craftingTableTargets, ...modernResult.recipeBookTargets]) {
+    const written = JSON.parse(fs.readFileSync(target, 'utf8'))
+    if (written.recipe_count <= 0 || written.recipes.some(recipe => recipe.network_id <= 0)) {
+      throw new Error(`modern recipe target is empty or non-executable: ${target}`)
+    }
+  }
+
+  const unresolvedSplitResult = writeBridgeCraftingRecipesForViaProxy(
+    tmp,
+    path.join(tmp, 'viaproxy-run'),
+    {
+      ...modernSplitPacket,
+      shaped_recipes: [modernSplitPacket.shaped_recipes[0]],
+      shapeless_recipes: []
+    }
+  )
+  if (unresolvedSplitResult.written ||
+      !unresolvedSplitResult.clearedStaleRecipeCatalogs ||
+      unresolvedSplitResult.sourceSchema !== 'split_recipe_arrays' ||
+      unresolvedSplitResult.sourceRecipeCount !== 1) {
+    throw new Error('split-array catalog with unresolved named ingredients did not report stale-catalog clearing')
+  }
+  for (const target of [...unresolvedSplitResult.targets, ...unresolvedSplitResult.craftingTableTargets, ...unresolvedSplitResult.recipeBookTargets]) {
+    const written = JSON.parse(fs.readFileSync(target, 'utf8'))
+    if (written.recipe_count !== 0 || written.recipes.length !== 0) {
+      throw new Error(`stale recipe catalog survived a split-array parse failure: ${target}`)
+    }
+  }
+
+  const clearedResult = writeBridgeCraftingRecipesForViaProxy(
+    tmp,
+    path.join(tmp, 'viaproxy-run'),
+    { unexpected_recipe_payload: modernSplitPacket.shaped_recipes },
+    modernRecipeOptions
+  )
+  if (clearedResult.written || !clearedResult.clearedStaleRecipeCatalogs || clearedResult.sourceSchema !== 'unrecognized') {
+    throw new Error('unrecognized crafting_data schema did not report stale-catalog clearing')
+  }
+  for (const target of [...clearedResult.targets, ...clearedResult.craftingTableTargets, ...clearedResult.recipeBookTargets]) {
+    const written = JSON.parse(fs.readFileSync(target, 'utf8'))
+    if (written.recipe_count !== 0 || written.recipes.length !== 0) {
+      throw new Error(`stale recipe catalog survived an unrecognized crafting_data schema: ${target}`)
+    }
   }
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true })

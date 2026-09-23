@@ -7,6 +7,9 @@ param(
     [string]$UploadToken = $env:JAVAROCK_SUPPORT_UPLOAD_TOKEN,
     [string]$ResultFile = '',
     [ValidateRange(1, 10)][int]$RecentRuns = 3,
+    [ValidateRange(1, 2048)][int]$MaxPacketSampleFiles = 512,
+    [ValidateRange(1, 67108864)][long]$MaxPacketSampleBytes = 16777216,
+    [ValidateRange(1, 16777216)][long]$MaxPacketSampleFileBytes = 8388608,
     [switch]$NoUpload,
     [switch]$IncludePacketLedger,
     [switch]$IncludeRawPackets
@@ -113,6 +116,68 @@ function Add-SupportFile {
     }
 }
 
+function Add-PacketSampleReferencesFromFile {
+    param([Parameter(Mandatory = $true)][string]$Source)
+
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { return }
+    $input = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    try {
+        $reader = [IO.StreamReader]::new($input, [Text.Encoding]::UTF8, $true, 65536, $true)
+        try {
+            while (-not $reader.EndOfStream) {
+                $line = $reader.ReadLine()
+                foreach ($match in $script:PacketSampleReferencePattern.Matches($line)) {
+                    $null = $script:PacketSampleReferences.Add($match.Groups['name'].Value)
+                }
+            }
+        } finally {
+            $reader.Dispose()
+        }
+    } finally {
+        $input.Dispose()
+    }
+}
+
+function Add-SelectedPacketSample {
+    param([Parameter(Mandatory = $true)][IO.FileInfo]$File)
+
+    if ($script:PacketSampleCount -ge $MaxPacketSampleFiles) { return }
+    if ($File.Length -gt $MaxPacketSampleFileBytes) {
+        return
+    }
+    if (($script:PacketSampleBytes + $File.Length) -gt $MaxPacketSampleBytes) {
+        return
+    }
+
+    # PacketCensus writes these JSON files only after recursively redacting the
+    # packet payload. Raw packet journals live outside samples/ and are handled
+    # solely by the explicit IncludeRawPackets switch below.
+    Add-SupportFile -Source $File.FullName -RelativePath (Join-Path 'packet-census\samples' $File.Name)
+    $script:PacketSampleCount++
+    $script:PacketSampleBytes += $File.Length
+}
+
+function Add-PacketSampleCandidatePass {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Runs,
+        [Parameter(Mandatory = $true)][string]$Property
+    )
+
+    $index = 0
+    while ($script:PacketSampleCount -lt $MaxPacketSampleFiles) {
+        $sawCandidate = $false
+        foreach ($run in $Runs) {
+            $files = @($run.$Property)
+            if ($index -ge $files.Count) { continue }
+            $sawCandidate = $true
+            Add-SelectedPacketSample -File $files[$index]
+            if ($script:PacketSampleCount -ge $MaxPacketSampleFiles) { break }
+        }
+        if (-not $sawCandidate) { break }
+        $index++
+    }
+}
+
 $timestamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')
 $suffix = [Guid]::NewGuid().ToString('N').Substring(0, 6)
 $version = 'unknown'
@@ -124,6 +189,13 @@ $bundleName = "JavaRock-support-$version-$timestamp-$suffix.zip"
 $bundlePath = Join-Path $OutputDirectory $bundleName
 $script:StageDirectory = Join-Path $OutputDirectory ".support-stage-$PID-$suffix"
 $script:IncludedFiles = [Collections.Generic.List[string]]::new()
+$script:SelectedPacketRunIds = [Collections.Generic.List[string]]::new()
+$script:PacketSampleReferences = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$script:PacketSampleReferencePattern = [regex]::new('"samples/(?<name>[A-Za-z0-9][A-Za-z0-9._-]*\.json)"', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+$script:PacketSampleCount = 0
+$script:PacketSampleBytes = [long]0
+$script:PacketSampleCandidateCount = 0
+$script:PacketSamplesSkipped = 0
 $uploaded = $false
 $uploadFailed = $false
 $uploadMessage = ''
@@ -188,6 +260,7 @@ try {
             $activeRunId = [string]$latestRun.run_id
         } catch {}
         if ($activeRunId -match '^[A-Za-z0-9_-]+$') {
+            if (-not $script:SelectedPacketRunIds.Contains($activeRunId)) { $script:SelectedPacketRunIds.Add($activeRunId) }
             foreach ($name in @("run-summary-$activeRunId.json", "events-$activeRunId.jsonl", "inventory-trace-$activeRunId.jsonl")) {
                 Add-SupportFile -Source (Join-Path $packetDirectory $name) -RelativePath (Join-Path 'packet-census' $name) -RedactText
             }
@@ -201,11 +274,63 @@ try {
             Select-Object -First $RecentRuns)
         foreach ($summary in $summaries) {
             $runId = $summary.BaseName.Substring('run-summary-'.Length)
+            if ($runId -notmatch '^[A-Za-z0-9_-]+$') { continue }
+            if (-not $script:SelectedPacketRunIds.Contains($runId)) { $script:SelectedPacketRunIds.Add($runId) }
             foreach ($name in @("run-summary-$runId.json", "events-$runId.jsonl", "inventory-trace-$runId.jsonl")) {
                 Add-SupportFile -Source (Join-Path $packetDirectory $name) -RelativePath (Join-Path 'packet-census' $name) -RedactText
             }
             if ($IncludeRawPackets) {
                 Add-SupportFile -Source (Join-Path $packetDirectory "raw-packets-$runId.jsonl") -RelativePath (Join-Path 'packet-census' "raw-packets-$runId.jsonl")
+            }
+        }
+
+        if ($script:SelectedPacketRunIds.Count -gt 0) {
+            Add-PacketSampleReferencesFromFile -Source (Join-Path $packetDirectory 'census.json')
+            foreach ($runId in $script:SelectedPacketRunIds) {
+                foreach ($name in @("run-summary-$runId.json", "events-$runId.jsonl", "inventory-trace-$runId.jsonl")) {
+                    Add-PacketSampleReferencesFromFile -Source (Join-Path $packetDirectory $name)
+                }
+            }
+
+            $samplesDirectory = Join-Path $packetDirectory 'samples'
+            $samplesDirectoryItem = Get-Item -LiteralPath $samplesDirectory -Force -ErrorAction SilentlyContinue
+            if ($samplesDirectoryItem -and $samplesDirectoryItem.PSIsContainer -and (($samplesDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) {
+                $samplesRoot = [IO.Path]::GetFullPath($samplesDirectory).TrimEnd('\') + '\'
+                $candidatesByRun = @()
+                foreach ($runId in $script:SelectedPacketRunIds) {
+                    $candidates = [Collections.Generic.List[IO.FileInfo]]::new()
+                    foreach ($sampleName in $script:PacketSampleReferences) {
+                        if (-not $sampleName.StartsWith("$runId-", [StringComparison]::OrdinalIgnoreCase)) { continue }
+                        $source = [IO.Path]::GetFullPath((Join-Path $samplesDirectory $sampleName))
+                        if (-not $source.StartsWith($samplesRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { continue }
+                        $file = Get-Item -LiteralPath $source -Force
+                        if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                        $candidates.Add($file)
+                        $script:PacketSampleCandidateCount++
+                    }
+
+                    $coverage = [Collections.Generic.List[IO.FileInfo]]::new()
+                    $remaining = [Collections.Generic.List[IO.FileInfo]]::new()
+                    $seenKinds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                    foreach ($file in @($candidates | Sort-Object LastWriteTimeUtc, Name -Descending)) {
+                        $stem = [IO.Path]::GetFileNameWithoutExtension($file.Name).Substring($runId.Length + 1)
+                        $kind = $stem -replace '-[0-9a-f]{16}$', ''
+                        if ($seenKinds.Add($kind)) { $coverage.Add($file) } else { $remaining.Add($file) }
+                    }
+                    $candidatesByRun += [pscustomobject]@{
+                        RunId = $runId
+                        Coverage = $coverage
+                        Remaining = $remaining
+                    }
+                }
+
+                # Round-robin run coverage prevents one noisy run from crowding
+                # out every sample from the other selected recent runs.
+                Add-PacketSampleCandidatePass -Runs $candidatesByRun -Property 'Coverage'
+                Add-PacketSampleCandidatePass -Runs $candidatesByRun -Property 'Remaining'
+                $script:PacketSamplesSkipped = [Math]::Max(0, $script:PacketSampleCandidateCount - $script:PacketSampleCount)
+                Write-Host "[JavaRock] Included $($script:PacketSampleCount) redacted packet sample(s) ($($script:PacketSampleBytes) bytes); skipped $($script:PacketSamplesSkipped) due to sample limits."
             }
         }
     }
@@ -220,6 +345,10 @@ try {
         is_64_bit_process = [Environment]::Is64BitProcess
         node = Get-CommandOutput 'node.exe' @('--version')
         java = Get-CommandOutput 'java.exe' @('-version')
+        redacted_packet_sample_candidates = $script:PacketSampleCandidateCount
+        redacted_packet_samples_included = $script:PacketSampleCount
+        redacted_packet_sample_bytes_included = $script:PacketSampleBytes
+        redacted_packet_samples_skipped = $script:PacketSamplesSkipped
         raw_packet_journals_included = [bool]$IncludeRawPackets
         auth_files_included = $false
     }

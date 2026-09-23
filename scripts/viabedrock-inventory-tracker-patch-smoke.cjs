@@ -792,6 +792,13 @@ function assertGenericStorageLifecycle () {
   if (!unhandledSource.includes('container.bridgeConfigureContainerBlockTag(blockTag)')) {
     throw new Error('CONTAINER_OPEN does not bind generic storage to its actual block tag')
   }
+  for (const marker of ['opened generic storage', 'blockStateId=', 'blockTag=', 'position=']) {
+    if (!unhandledSource.includes(marker)) throw new Error(`CONTAINER_OPEN diagnostics are missing marker: ${marker}`)
+  }
+
+  for (const marker of ['bridgeConfiguredStorageBlockTag', 'promoted generic container to double chest', 'blockTag=', 'position=']) {
+    if (!containerSource.includes(marker)) throw new Error(`double-chest promotion diagnostics are missing marker: ${marker}`)
+  }
 
   const inventoryTrackerSource = fs.readFileSync(path.join(patchRoot, 'InventoryTracker.java'), 'utf8')
   if (!inventoryTrackerSource.includes('if (!this.currentContainer.isValidBlockTag(tag))')) {

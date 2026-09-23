@@ -34,7 +34,8 @@ const source = fs.readFileSync(playerPacketsSource, 'utf8')
 for (const marker of [
   'ActorFlags.WALLCLIMBING',
   'ActorFlags.IN_ASCENDABLE_BLOCK',
-  'bridgeTouchesClimbableBlock(wrapper.user(), prevPosition, clientPlayer.position())',
+  'bridgeTouchesClimbableBlock(wrapper.user(), clientPlayer.eyeOffset(), prevPosition, clientPlayer.position())',
+  'bridgePlayerFeetBlockY(position.y(), eyeOffset)',
   'bridgeVerticalVelocity(positionDelta.y(), levitating, levitationAmplifier, climbing)'
 ]) {
   if (!source.includes(marker)) throw new Error(`movement patch is missing climb-aware marker: ${marker}`)
@@ -72,13 +73,16 @@ public final class BridgeClimbingMovementSmoke {
 
         final float climbingDescent = ClientPlayerPackets.bridgeVerticalVelocity(-0.1F, false, 0, true);
         final float airborneDescent = ClientPlayerPackets.bridgeVerticalVelocity(-0.1F, false, 0, false);
-        close(climbingDescent, airborneDescent, "descending climb motion must retain ordinary gravity and drag");
-        close(climbingDescent, -0.1764F, "descending climb motion value");
+        close(airborneDescent, -0.1764F, "ordinary descending motion value");
+        close(climbingDescent, -0.15F, "descending climb motion must retain Java's ladder speed cap");
 
         final float climbingStationary = ClientPlayerPackets.bridgeVerticalVelocity(0F, false, 0, true);
         final float airborneStationary = ClientPlayerPackets.bridgeVerticalVelocity(0F, false, 0, false);
         close(climbingStationary, airborneStationary, "stationary climb motion must retain ordinary gravity and drag");
         close(climbingStationary, -0.0784F, "stationary climb motion value");
+
+        check(ClientPlayerPackets.bridgePlayerFeetBlockY(73.62F, 1.62F) == 72,
+                "climbable fallback must probe the feet block, not the eye-height block");
 
         check(ClientPlayerPackets.bridgeIsClimbableBlockIdentifier("minecraft:ladder"), "ladder fallback");
         check(ClientPlayerPackets.bridgeIsClimbableBlockIdentifier("minecraft:vine"), "vine fallback");
