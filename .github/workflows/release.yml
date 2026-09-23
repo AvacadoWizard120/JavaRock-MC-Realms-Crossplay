@@ -127,18 +127,26 @@ jobs:
             & gh release create $tag --repo $repository --draft --verify-tag --generate-notes --title "JavaRock $tag"
             $createExitCode = $LASTEXITCODE
             if ($createExitCode -ne 0) { throw "Could not create draft release $tag (gh exit $createExitCode)." }
+
+            $existingText = & gh release view $tag --repo $repository --json databaseId,isDraft,tagName
+            $viewExitCode = $LASTEXITCODE
+            if ($viewExitCode -ne 0) { throw "Could not reload draft release $tag (gh exit $viewExitCode)." }
+            $existing = ($existingText | Out-String) | ConvertFrom-Json
+            if ([string]$existing.tagName -cne $tag -or -not [bool]$existing.isDraft) {
+              throw "Release $tag is not the expected draft."
+            }
           }
 
-          $encodedTag = [Uri]::EscapeDataString($tag)
-          $draftText = & gh api "repos/$repository/releases/tags/$encodedTag"
+          $releaseId = [int64]$existing.databaseId
+          if ($releaseId -le 0) { throw "Draft release $tag has no valid release ID." }
+          $draftText = & gh api "repos/$repository/releases/$releaseId"
           $draftExitCode = $LASTEXITCODE
           if ($draftExitCode -ne 0) { throw "Could not load draft release $tag (gh exit $draftExitCode)." }
           $draft = ($draftText | Out-String) | ConvertFrom-Json
           if ([string]$draft.tag_name -cne $tag -or -not [bool]$draft.draft) {
             throw "Release $tag is not the expected draft; refusing to upload assets."
           }
-          $releaseId = [int64]$draft.id
-          if ($releaseId -le 0) { throw "Draft release $tag has no valid release ID." }
+          if ([int64]$draft.id -ne $releaseId) { throw "GitHub returned a different draft release ID for $tag." }
 
           foreach ($local in $localAssets) {
             $matches = @(@($draft.assets) | Where-Object { [string]$_.name -ceq $local.Name })
