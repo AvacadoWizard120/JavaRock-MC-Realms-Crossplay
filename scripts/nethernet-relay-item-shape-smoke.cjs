@@ -10,7 +10,8 @@ const {
   normalizeItemForLocalViaBedrock,
   normalizeItemArrayForLocalViaBedrock,
   normalizeItemV4ForLocalViaBedrock,
-  normalizeItemStackRequestResultDescriptorForUpstream
+  normalizeItemStackRequestResultDescriptorForUpstream,
+  bridgeLegacyItemStackRequestActionTypeId
 } = require('../src/nethernetBedrockRelay')
 const { createDeserializer, createSerializer } = require('bedrock-protocol/src/transforms/serializer')
 
@@ -127,6 +128,35 @@ assert.strictEqual(decodedCapturedTake.data.params.requests[0].actions[0].source
 assert.strictEqual(decodedCapturedTake.data.params.requests[0].actions[0].destination.slot_type.container_id, 'cursor')
 assert.strictEqual(decodedCapturedTake.data.params.requests[0].actions[0].destination.stack_id, 0)
 
+// The 0.3.100 capture exposed the other half of the discriminator change.
+// Place is outer ID 1 and must repeat legacy ID 1; repeating Take (0) makes
+// the Realm terminate the connection as PacketMalformed.
+const correctedCapturedPlace = Buffer.from(
+  '93010109010101013b0000030000000d001d0000000000ffffffff',
+  'hex'
+)
+const decodedCapturedPlace = createDeserializer('1.26.45').parsePacketBuffer(correctedCapturedPlace)
+assert.strictEqual(decodedCapturedPlace.metadata.size, correctedCapturedPlace.length)
+assert.strictEqual(decodedCapturedPlace.data.params.requests[0].request_id, -5)
+assert.strictEqual(decodedCapturedPlace.data.params.requests[0].actions[0].type_id, 'place')
+assert.strictEqual(decodedCapturedPlace.data.params.requests[0].actions[0].legacy_type_id, 1)
+assert.strictEqual(decodedCapturedPlace.data.params.requests[0].actions[0].source.slot_type.container_id, 'cursor')
+assert.strictEqual(decodedCapturedPlace.data.params.requests[0].actions[0].source.stack_id, 3)
+assert.strictEqual(decodedCapturedPlace.data.params.requests[0].actions[0].destination.slot_type.container_id, 'crafting_input')
+assert.strictEqual(decodedCapturedPlace.data.params.requests[0].actions[0].destination.slot, 29)
+
+// The outer oneOf removed two deprecated action variants while each concrete
+// action retained the legacy enum byte. Lock down the full family, including
+// the +2 gap after Create, so a newly used action cannot silently emit zero.
+assert.deepStrictEqual(
+  Array.from({ length: 18 }, (_, actionId) => bridgeLegacyItemStackRequestActionTypeId(actionId)),
+  [0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+)
+assert.strictEqual(bridgeLegacyItemStackRequestActionTypeId('place'), 1)
+assert.strictEqual(bridgeLegacyItemStackRequestActionTypeId('craft_recipe'), 12)
+assert.strictEqual(bridgeLegacyItemStackRequestActionTypeId('results_deprecated'), 19)
+assert.strictEqual(bridgeLegacyItemStackRequestActionTypeId('18'), null)
+
 // CraftResultsDeprecated also changed in 1.26.40: its numeric ItemLegacy was
 // replaced by a named ItemStackRequestInstanceDescriptor. Lock down both the
 // exact 1.26.45 bytes and a full decode so a numeric legacy result cannot drift
@@ -142,7 +172,7 @@ const craftResultDescriptor45 = normalizeItemStackRequestResultDescriptorForUpst
 })
 assert.deepStrictEqual(craftResultDescriptor45, {
   type: 'name',
-  legacy_type: 0,
+  legacy_type: 1,
   name: 'minecraft:oak_planks',
   metadata: 0,
   count: 4,
@@ -154,7 +184,7 @@ const craftResultRequest45 = {
     request_id: -101,
     actions: [{
       type_id: 'results_deprecated',
-      legacy_type_id: 0,
+      legacy_type_id: 19,
       result_items: [craftResultDescriptor45],
       times_crafted: 1
     }],
@@ -168,11 +198,11 @@ const encodedCraftResult45 = createSerializer('1.26.45').createPacketBuffer({
 })
 assert.strictEqual(
   encodedCraftResult45.toString('hex'),
-  '930101c901011100010100146d696e6563726166743a6f616b5f706c616e6b73000400b6b5ac94070a000000000000000000000100ffffffff'
+  '930101c901011113010101146d696e6563726166743a6f616b5f706c616e6b73000400b6b5ac94070a000000000000000000000100ffffffff'
 )
 const decodedCraftResult45 = createDeserializer('1.26.45').parsePacketBuffer(encodedCraftResult45)
 assert.strictEqual(decodedCraftResult45.metadata.size, encodedCraftResult45.length)
-assert.strictEqual(decodedCraftResult45.data.params.requests[0].actions[0].legacy_type_id, 0)
+assert.strictEqual(decodedCraftResult45.data.params.requests[0].actions[0].legacy_type_id, 19)
 assert.strictEqual(decodedCraftResult45.data.params.requests[0].actions[0].result_items[0].type, 'name')
 assert.strictEqual(decodedCraftResult45.data.params.requests[0].actions[0].result_items[0].name, 'minecraft:oak_planks')
 assert.strictEqual(decodedCraftResult45.data.params.requests[0].actions[0].result_items[0].block_runtime_id, 1921718966)
