@@ -3,7 +3,7 @@
 require('../src/preferVendoredProtocol').installVendoredProtocolPath()
 
 const assert = require('assert')
-const { createSerializer } = require('bedrock-protocol/src/transforms/serializer')
+const { createDeserializer, createSerializer } = require('bedrock-protocol/src/transforms/serializer')
 const {
   ViaBedrockRelayPlayer,
   bridgeCraftingDrainRequestIds,
@@ -18,7 +18,8 @@ const {
   normalizeClientboundEntityNoiseForLocalViaBedrock
 } = require('../src/nethernetBedrockRelay')
 
-const inventorySerializer = createSerializer('1.26.30')
+const inventorySerializer = createSerializer('1.26.45')
+const inventoryDeserializer = createDeserializer('1.26.45')
 
 {
   const drain = {
@@ -128,7 +129,7 @@ const newItem = normalizeItemForLocalViaBedrock({
   extra: { has_nbt: 'false' }
 })
 assert.strictEqual(newItem.network_id, 351)
-assert.strictEqual(newItem.has_stack_id, 1)
+assert.strictEqual(newItem.has_stack_id, true)
 assert.strictEqual(newItem.stack_id, 12345)
 assert.strictEqual(newItem.extra.has_nbt, 'false')
 
@@ -143,9 +144,16 @@ assert.deepStrictEqual(mainSlot.container, {
   container_id: 'hotbar_and_inventory',
   dynamic_container_id: undefined
 })
-assert.deepStrictEqual(mainSlot.storage_item, { network_id: 0 })
+assert.deepStrictEqual(mainSlot.storage_item, {
+  network_id: 0,
+  count: 0,
+  metadata: 0,
+  has_stack_id: false,
+  block_runtime_id: 0,
+  extra: { has_nbt: 'false', can_place_on: [], can_destroy: [] }
+})
 assert.strictEqual(mainSlot.item.network_id, 351)
-assert.strictEqual(mainSlot.item.has_stack_id, 0)
+assert.strictEqual(mainSlot.item.has_stack_id, false)
 
 const offhandFromArmor = normalizeClientboundForLocalViaBedrock('inventory_slot', {
   window_id: 'armor',
@@ -190,16 +198,18 @@ assert.strictEqual(stackResponse.entries, undefined)
     network_id: 0,
     count: 0,
     metadata: 0,
+    has_stack_id: false,
     block_runtime_id: 0,
-    extra_data: Buffer.alloc(0)
+    extra: { has_nbt: 'false', can_place_on: [], can_destroy: [] }
   })
   const gravel = {
     network_id: 13,
     count: 37,
     metadata: 0,
-    net_id_variant: { type: 'item_stack_net_id', id: 12 },
+    has_stack_id: true,
+    stack_id: { type: 'item_stack_net_id', id: 12 },
     block_runtime_id: 1529044762,
-    extra_data: Buffer.alloc(10)
+    extra: { has_nbt: 'false', can_place_on: [], can_destroy: [] }
   }
   const owner = {
     server: { downstreamBedrockVersion: '1.26.30' },
@@ -249,7 +259,7 @@ assert.strictEqual(stackResponse.entries, undefined)
   assert.strictEqual(owner.lastPlayerUiContent.input[0].network_id, 0)
   assert.strictEqual(owner.lastPlayerInventoryContent.input[3].network_id, 13)
   assert.strictEqual(owner.lastPlayerInventoryContent.input[3].count, 37)
-  assert.strictEqual(owner.lastPlayerInventoryContent.input[3].net_id_variant.id, 12)
+  assert.strictEqual(owner.lastPlayerInventoryContent.input[3].stack_id.id, 12)
   assert.strictEqual(owner.bridgePredictedItemStackIds.has('cursor:0'), false)
   assert.strictEqual(owner.bridgePredictedItemStackIds.get('hotbar:3'), 12)
   assert.strictEqual(owner.pendingBridgeToRealmItemStackRequests.has('-5'), false)
@@ -375,12 +385,82 @@ try {
     input: Array.from({ length: 54 }, (_, i) => i === 28 ? { network_id: 0 } : { network_id: 0 })
   }
   relayPlayer.recordBridgeToViaBedrock = (name, packet, phase, meta) => recorded.push({ name, packet, phase, meta })
-  relayPlayer.queue = (name, packet) => queued.push({ name, packet })
+  relayPlayer.queue = (name, packet) => {
+    const buffer = inventorySerializer.createPacketBuffer({ name, params: packet })
+    const decoded = inventoryDeserializer.parsePacketBuffer(buffer)
+    assert.strictEqual(decoded.metadata.size, buffer.length)
+    queued.push({ name, packet, decoded: decoded.data.params })
+  }
   relayPlayer.scheduleLocalInventoryScreenShim = () => false
 
   assert.strictEqual(relayPlayer.replayAuthoritativeInventory('smoke'), true)
   assert.deepStrictEqual(queued.map(e => e.packet.window_id), ['inventory', 'ui'])
   assert.deepStrictEqual(recorded.filter(e => e.phase === 'sent').map(e => e.packet.window_id), ['inventory', 'ui'])
+}
+
+{
+  // A locally predicted carried item may be overlaid on the packet sent to
+  // ViaBedrock, but it must never become part of the authoritative replay
+  // cache. Once the accepted response clears the cursor, replay must stay
+  // empty instead of resurrecting a ghost carried stack.
+  const relayPlayer = Object.create(ViaBedrockRelayPlayer.prototype)
+  const queued = []
+  relayPlayer.downstreamPlayReady = true
+  relayPlayer.lastPlayerInventoryContent = null
+  relayPlayer.lastPlayerUiContent = null
+  relayPlayer.bridgePredictedCursorItem = {
+    network_id: 17,
+    count: 1,
+    metadata: 0,
+    has_stack_id: true,
+    stack_id: 18,
+    block_runtime_id: 0,
+    extra: { has_nbt: 'false', can_place_on: [], can_destroy: [] }
+  }
+  relayPlayer.bridgePredictedItemStackIds = new Map([['cursor:0', 18]])
+  relayPlayer.bridgeAuthoritativeItemsByStackId = new Map()
+  relayPlayer.pendingBridgeToRealmItemStackRequests = new Map()
+  relayPlayer.usesViaBedrockDownstream = () => true
+  relayPlayer.downstreamVersionForCensus = () => '1.26.45'
+  relayPlayer.normalizeClientboundEntityMetadataForViaBedrock = (name, packet) => packet
+  relayPlayer.prepareClientboundEntityPacketForViaBedrock = () => true
+  relayPlayer.recordBridgeToViaBedrock = () => {}
+  relayPlayer.rememberClientboundEntityPacket = () => {}
+  relayPlayer.updateCachedEntitySnapshotFromClientboundPacket = () => {}
+  relayPlayer.scheduleAuthoritativeInventoryReplay = () => {}
+  relayPlayer.scheduleLocalInventoryScreenShim = () => false
+  relayPlayer.queue = (name, packet) => {
+    const buffer = inventorySerializer.createPacketBuffer({ name, params: packet })
+    const decoded = inventoryDeserializer.parsePacketBuffer(buffer)
+    assert.strictEqual(decoded.metadata.size, buffer.length)
+    queued.push({ name, packet, decoded: decoded.data.params })
+  }
+
+  assert.strictEqual(relayPlayer.queueClientbound('inventory_content', {
+    window_id: 'inventory',
+    container: { container_id: 'hotbar_and_inventory' },
+    input: Array.from({ length: 36 }, () => ({ network_id: 0 })),
+    storage_item: { network_id: 0 }
+  }, 'predicted_cursor_cache_smoke'), true)
+  assert.strictEqual(queued[0].decoded.storage_item.network_id, 17)
+  assert.strictEqual(relayPlayer.lastPlayerInventoryContent.storage_item.network_id, 0)
+
+  bridgeTrackClientboundInventoryStacks(relayPlayer, 'item_stack_response', {
+    responses: [{
+      status: 'ok',
+      request_id: -41,
+      containers: [{
+        slot_type: { container_id: 'cursor' },
+        slots: [{ slot: 0, count: 0, item_stack_id: 0 }]
+      }]
+    }]
+  })
+  assert.strictEqual(relayPlayer.bridgePredictedCursorItem, undefined)
+  assert.strictEqual(relayPlayer.lastPlayerInventoryContent.storage_item.network_id, 0)
+
+  queued.length = 0
+  assert.strictEqual(relayPlayer.replayAuthoritativeInventoryContents('cursor_clear_replay', 'authoritative_inventory_replay'), 1)
+  assert.strictEqual(queued[0].decoded.storage_item.network_id, 0)
 }
 
 {
@@ -399,7 +479,12 @@ try {
   relayPlayer.recordBridgeToViaBedrock = (name, packet, phase, meta) => recorded.push({ name, packet, phase, meta })
   relayPlayer.scheduleAuthoritativeInventoryReplay = reason => replays.push(reason)
   relayPlayer.scheduleLocalInventoryScreenShim = () => false
-  relayPlayer.queue = (name, packet) => queued.push({ name, packet })
+  relayPlayer.queue = (name, packet) => {
+    const buffer = inventorySerializer.createPacketBuffer({ name, params: packet })
+    const decoded = inventoryDeserializer.parsePacketBuffer(buffer)
+    assert.strictEqual(decoded.metadata.size, buffer.length)
+    queued.push({ name, packet, decoded: decoded.data.params })
+  }
 
   const transaction = {
     transaction: {
@@ -431,6 +516,11 @@ try {
   assert.strictEqual(queued[0].name, 'inventory_slot')
   assert.strictEqual(queued[0].packet.slot, 4)
   assert.strictEqual(queued[0].packet.item.network_id, 367)
+  assert.strictEqual(relayPlayer.replayAuthoritativeInventoryContents('pickup_replay_smoke', 'authoritative_inventory_replay'), 1)
+  const replayedContent = queued.find(entry => entry.name === 'inventory_content')
+  assert.strictEqual(replayedContent.decoded.input[4].network_id, 367)
+  assert.strictEqual(replayedContent.decoded.input[4].stack_id, 777)
+  assert.strictEqual(replayedContent.decoded.container.container_id, 'hotbar_and_inventory')
   const dropped = recorded.find(entry => entry.phase === 'dropped')
   assert.strictEqual(dropped.meta.diagnostic.appliedInventoryDeltas, 1)
   assert.ok(replays.some(reason => String(reason).includes('inventory_slot')))
@@ -492,7 +582,7 @@ try {
   }
 
   assert.strictEqual(relayPlayer.lastPlayerInventoryContent.input[6].network_id, 58)
-  assert.strictEqual(relayPlayer.lastPlayerInventoryContent.input[6].has_stack_id, 0)
+  assert.strictEqual(relayPlayer.lastPlayerInventoryContent.input[6].has_stack_id, false)
   assert.strictEqual(relayPlayer.bridgePredictedItemStackIds.has('hotbar:6'), false)
   assert.strictEqual(queued.length, 1)
   assert.strictEqual(queued[0].name, 'inventory_slot')

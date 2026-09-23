@@ -516,7 +516,15 @@ const cursorOverlayContent = bridgeOverlayPredictedCursorStorageItem(trustedLega
   storage_item: { network_id: 0 }
 })
 assert(cursorOverlayContent.storage_item.network_id === 17, 'empty inventory_content storage_item must keep the predicted carried cursor item')
-assert(cursorOverlayContent.storage_item.net_id_variant?.id === 18, '1.26.30 cursor overlay must keep the predicted carried stack id as ItemV4 net_id_variant')
+assert(cursorOverlayContent.storage_item.has_stack_id === true, 'default cursor overlay must keep the ItemV4 stack-id presence bit')
+assert(cursorOverlayContent.storage_item.stack_id === 18, '1.26.45 cursor overlay must keep the predicted carried numeric stack id')
+const v12630CursorOverlayContent = bridgeOverlayPredictedCursorStorageItem(trustedLegacyPlayerPickupFallbackOwner, 'inventory_content', {
+  window_id: 'inventory',
+  input: [{ network_id: 0 }],
+  container: { container_id: 'hotbar_and_inventory' },
+  storage_item: { network_id: 0 }
+}, { localBedrockVersion: '1.26.30' })
+assert(v12630CursorOverlayContent.storage_item.stack_id?.id === 18, '1.26.30 cursor overlay must use the nested ItemV4 stack-id variant')
 const legacyCursorOverlayContent = bridgeOverlayPredictedCursorStorageItem(trustedLegacyPlayerPickupFallbackOwner, 'inventory_content', {
   window_id: 'inventory',
   input: [{ network_id: 0 }],

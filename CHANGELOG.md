@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.98 - 2026-09-22
+
+- Fixed the disconnect after picking up or moving a nonempty item. Stack-id presence is now encoded as a real protocol boolean, and cached inventory replays are normalized before they are sent.
+- Updated every patched Java item, equipment, particle, entity-data, and recipe packet writer to ViaProxy's current 26.2 component codec.
+- Inventory content, slots, armor, equipment, and cursor items now preserve the correct stack-id and item-extra shape across Bedrock 1.26.20, 1.26.30, and 1.26.45.
+- Barrels and other generic storage no longer close during validation or get promoted into a double-chest screen solely because 54 slots arrived.
+- Chest halves now require reciprocal pair metadata with matching block type and facing, so stale one-sided metadata remains a single chest.
+- Ladder and vine ascent now preserves the Java client's positive climb velocity instead of applying airborne gravity a second time.
+
 ## 0.3.97 - 2026-09-22
 
 - Added Bedrock 1.26.50 compatibility aliases for new stair corners and fence/pane connections so those blocks no longer become air or flood the launcher log.

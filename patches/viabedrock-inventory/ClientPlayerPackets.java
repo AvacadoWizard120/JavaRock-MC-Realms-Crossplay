@@ -17,6 +17,7 @@
  */
 package net.raphimc.viabedrock.protocol.packet;
 
+import com.viaversion.viaversion.api.connection.UserConnection;
 import com.viaversion.viaversion.api.minecraft.BlockPosition;
 import com.viaversion.viaversion.api.minecraft.Vector3d;
 import com.viaversion.viaversion.api.protocol.packet.PacketWrapper;
@@ -27,6 +28,7 @@ import com.viaversion.viaversion.protocols.v1_21_11to26_1.packet.ClientboundPack
 import com.viaversion.viaversion.protocols.v1_21_11to26_1.packet.ServerboundPackets26_1;
 import com.viaversion.viaversion.util.Pair;
 import net.raphimc.viabedrock.ViaBedrock;
+import net.raphimc.viabedrock.api.model.BlockState;
 import net.raphimc.viabedrock.api.model.container.player.InventoryContainer;
 import net.raphimc.viabedrock.api.model.entity.ClientPlayerEntity;
 import net.raphimc.viabedrock.api.model.entity.Entity;
@@ -54,6 +56,7 @@ import net.raphimc.viabedrock.experimental.rewriter.InventoryTransactionRewriter
 import net.raphimc.viabedrock.protocol.model.BedrockItem;
 import net.raphimc.viabedrock.protocol.model.Position2f;
 import net.raphimc.viabedrock.protocol.model.Position3f;
+import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
 import net.raphimc.viabedrock.protocol.rewriter.GameTypeRewriter;
 import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
 import net.raphimc.viabedrock.protocol.storage.*;
@@ -66,6 +69,57 @@ import java.util.UUID;
 import java.util.logging.Level;
 
 public class ClientPlayerPackets {
+
+    static float bridgeVerticalVelocity(final float observedDeltaY, final boolean levitating, final int levitationAmplifier, final boolean climbing) {
+        if (climbing && observedDeltaY > 0F) {
+            // Java has already applied ladder/vine climb physics. Applying the
+            // ordinary airborne gravity step again understates the ascent sent
+            // to Bedrock and causes repeated downward movement corrections.
+            return observedDeltaY;
+        }
+
+        final float gravityAdjusted = levitating
+                ? observedDeltaY + (0.05F * (levitationAmplifier + 1)) * 0.2F
+                : observedDeltaY - ProtocolConstants.PLAYER_GRAVITY;
+        return gravityAdjusted * 0.98F;
+    }
+
+    static boolean bridgeIsClimbableBlockIdentifier(final String identifier) {
+        if (identifier == null) return false;
+
+        return identifier.equals("minecraft:ladder")
+                || identifier.equals("minecraft:vine")
+                || identifier.equals("minecraft:weeping_vines")
+                || identifier.equals("minecraft:weeping_vines_plant")
+                || identifier.equals("minecraft:twisting_vines")
+                || identifier.equals("minecraft:twisting_vines_plant")
+                || identifier.equals("minecraft:cave_vines")
+                || identifier.equals("minecraft:cave_vines_plant")
+                || identifier.equals("minecraft:cave_vines_body_with_berries")
+                || identifier.equals("minecraft:cave_vines_head_with_berries");
+    }
+
+    private static boolean bridgeTouchesClimbableBlock(final UserConnection user, final Position3f... positions) {
+        final ChunkTracker chunkTracker = user.get(ChunkTracker.class);
+        final BlockStateRewriter blockStateRewriter = user.get(BlockStateRewriter.class);
+        if (chunkTracker == null || blockStateRewriter == null) return false;
+
+        for (Position3f position : positions) {
+            if (position == null) continue;
+
+            final int x = (int) Math.floor(position.x());
+            final int y = (int) Math.floor(position.y());
+            final int z = (int) Math.floor(position.z());
+            for (int offsetY = 0; offsetY <= 1; offsetY++) {
+                final int blockStateId = chunkTracker.getBlockState(new BlockPosition(x, y + offsetY, z));
+                final BlockState blockState = blockStateRewriter.blockState(blockStateId);
+                if (blockState != null && bridgeIsClimbableBlockIdentifier(blockState.namespacedIdentifier())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 
     private static final PacketHandler CLIENT_PLAYER_GAME_MODE_INFO_UPDATE = wrapper -> {
         final ClientPlayerEntity clientPlayer = wrapper.user().get(EntityTracker.class).getClientPlayer();
@@ -568,20 +622,20 @@ public class ClientPlayerPackets {
                 velocity = positionDelta;
             } else {
                 float dx = positionDelta.x() * 0.98F;
-                float dy = positionDelta.y();
                 float dz = positionDelta.z() * 0.98F;
                 final float friction = clientPlayer.isOnGround() ? ProtocolConstants.BLOCK_FRICTION : 1F;
                 dx *= friction;
                 dz *= friction;
 
-                if (clientPlayer.effects().containsKey("minecraft:levitation")) {
-                    dy += (0.05F * (clientPlayer.effects().get("minecraft:levitation").amplifier() + 1)) * 0.2F;
-                } else {
-                    dy -= ProtocolConstants.PLAYER_GRAVITY;
-                }
+                final boolean levitating = clientPlayer.effects().containsKey("minecraft:levitation");
+                final int levitationAmplifier = levitating ? clientPlayer.effects().get("minecraft:levitation").amplifier() : 0;
+                final boolean climbing = clientPlayer.entityFlags().contains(ActorFlags.WALLCLIMBING)
+                        || clientPlayer.entityFlags().contains(ActorFlags.IN_ASCENDABLE_BLOCK)
+                        || bridgeTouchesClimbableBlock(wrapper.user(), prevPosition, clientPlayer.position());
+                final float dy = bridgeVerticalVelocity(positionDelta.y(), levitating, levitationAmplifier, climbing);
                 // Slow falling does not change the velocity when standing still
 
-                velocity = new Position3f(dx * 0.91F, dy * 0.98F, dz * 0.91F);
+                velocity = new Position3f(dx * 0.91F, dy, dz * 0.91F);
             }
 
             wrapper.write(BedrockTypes.FLOAT_LE, clientPlayer.rotation().x()); // pitch

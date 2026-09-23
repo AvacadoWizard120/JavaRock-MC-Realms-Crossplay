@@ -130,6 +130,53 @@ function assertNormalItemSnapshotTypes () {
   }
 }
 
+function assertJavaItemPacketStageCodec () {
+  const upstreamPacketFactory = run('javap', [
+    '-classpath',
+    viaProxyJar,
+    '-c',
+    '-p',
+    'net.raphimc.viabedrock.api.util.PacketFactory'
+  ]).stdout
+  if (!upstreamPacketFactory.includes('VersionedTypes.V26_2')) {
+    throw new Error('bundled ViaProxy PacketFactory no longer uses the expected V26_2 Java item codec; rebase the bridge packet writers')
+  }
+
+  const packetSources = [
+    'Container.java',
+    'InventoryContainer.java',
+    'WorldEffectPackets.java',
+    'EntityPackets.java',
+    'RecipeBookTracker.java'
+  ]
+  for (const sourceName of packetSources) {
+    const source = fs.readFileSync(path.join(patchRoot, sourceName), 'utf8')
+    if (source.includes('VersionedTypes.V26_1')) {
+      throw new Error(`${sourceName} still writes Java packets with the obsolete V26_1 item/data codec`)
+    }
+    if (!source.includes('VersionedTypes.V26_2')) {
+      throw new Error(`${sourceName} does not use ViaProxy's V26_2 Java packet-stage codec`)
+    }
+  }
+
+  const packetClasses = [
+    'net/raphimc/viabedrock/api/model/container/Container.class',
+    'net/raphimc/viabedrock/api/model/container/player/InventoryContainer.class',
+    'net/raphimc/viabedrock/protocol/packet/WorldEffectPackets.class',
+    'net/raphimc/viabedrock/protocol/packet/EntityPackets.class',
+    'net/raphimc/viabedrock/protocol/storage/RecipeBookTracker.class'
+  ]
+  for (const className of packetClasses) {
+    const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(className)]).stdout
+    if (bytecode.includes('VersionedTypes.V26_1')) {
+      throw new Error(`${className} still contains the obsolete V26_1 Java item/data codec`)
+    }
+    if (!bytecode.includes('VersionedTypes.V26_2')) {
+      throw new Error(`${className} is missing ViaProxy's V26_2 Java packet-stage codec`)
+    }
+  }
+}
+
 function assertRenderingDataCurrent () {
   run(process.execPath, [path.join(__dirname, 'generate-viabedrock-rendering-data.cjs'), '--check'], { cwd: projectRoot })
 }
@@ -366,7 +413,9 @@ function assertChunkLifecycleFixes () {
     'PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition, lowerJavaBlockState)',
     'PacketFactory.sendJavaBlockUpdate(this.user(), upperPosition, upperJavaBlockState)',
     'if (doorStateChanged) return null',
-    'public BlockPosition getPairedChestPosition'
+    'public BlockPosition getPairedChestPosition',
+    'static boolean isReciprocalChestPair',
+    'chestBlockEntityPointsAt(pairBlockEntity, position)'
   ]) {
     if (!source.includes(marker)) throw new Error(`patched ChunkTracker.java is missing lifecycle marker: ${marker}`)
   }
@@ -728,6 +777,77 @@ function assertDoubleChestUpgrade () {
   }
 }
 
+function assertGenericStorageLifecycle () {
+  const containerSource = fs.readFileSync(path.join(patchRoot, 'Container.java'), 'utf8')
+  for (const marker of [
+    'private String bridgeGenericStorageBlockTag',
+    'public void bridgeConfigureContainerBlockTag(String blockTag)',
+    'if (this.bridgeGenericStorageBlockTag != null) return this.bridgeGenericStorageBlockTag.equals(tag)',
+    'return this.bridgeChestStorage && this.items.length == SINGLE_CHEST_SIZE && incomingSize == DOUBLE_CHEST_SIZE'
+  ]) {
+    if (!containerSource.includes(marker)) throw new Error(`patched Container.java is missing generic-storage lifecycle marker: ${marker}`)
+  }
+
+  const unhandledSource = fs.readFileSync(path.join(patchRoot, 'UnhandledPackets.java'), 'utf8')
+  if (!unhandledSource.includes('container.bridgeConfigureContainerBlockTag(blockTag)')) {
+    throw new Error('CONTAINER_OPEN does not bind generic storage to its actual block tag')
+  }
+
+  const inventoryTrackerSource = fs.readFileSync(path.join(patchRoot, 'InventoryTracker.java'), 'utf8')
+  if (!inventoryTrackerSource.includes('if (!this.currentContainer.isValidBlockTag(tag))')) {
+    throw new Error('InventoryTracker.tick no longer validates the current container through its configured block tag')
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-generic-storage-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'api', 'model', 'container')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const sourcePath = path.join(packageDir, 'BridgeGenericStorageSmoke.java')
+    fs.writeFileSync(sourcePath, `
+package net.raphimc.viabedrock.api.model.container;
+
+public final class BridgeGenericStorageSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static ChestContainer container() {
+        return new ChestContainer(null, (byte) 2, null, null, 27);
+    }
+
+    public static void main(String[] args) {
+        final ChestContainer barrel = container();
+        barrel.bridgeConfigureContainerBlockTag("barrel");
+        check(barrel.isValidBlockTag("barrel"), "barrel must survive InventoryTracker block-tag validation");
+        check(!barrel.isValidBlockTag("chest"), "barrel must not inherit chest-only lifecycle validation");
+        check(!barrel.bridgeCanPromoteToDoubleChest(54), "barrel must not receive chest-only 27-to-54 promotion");
+
+        final ChestContainer chest = container();
+        chest.bridgeConfigureContainerBlockTag("chest");
+        check(chest.isValidBlockTag("chest"), "chest lifecycle validation");
+        check(chest.isValidBlockTag("trapped_chest"), "existing chest-family validation");
+        check(chest.bridgeCanPromoteToDoubleChest(54), "real chest must retain double-chest promotion");
+
+        final ChestContainer trappedChest = container();
+        trappedChest.bridgeConfigureContainerBlockTag("trapped_chest");
+        check(trappedChest.isValidBlockTag("trapped_chest"), "trapped chest lifecycle validation");
+        check(trappedChest.bridgeCanPromoteToDoubleChest(54), "trapped chest must retain double-chest promotion");
+
+        final ChestContainer unknown = container();
+        unknown.bridgeConfigureContainerBlockTag(null);
+        check(!unknown.bridgeCanPromoteToDoubleChest(54), "unknown generic storage must not be promoted as a chest");
+    }
+}
+`)
+
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.api.model.container.BridgeGenericStorageSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
 function assertAuthoritativeContainerSlotCodec () {
   const source = fs.readFileSync(path.join(patchRoot, 'Container.java'), 'utf8')
   for (const marker of [
@@ -739,7 +859,7 @@ function assertAuthoritativeContainerSlotCodec () {
     'if (!this.bridgeApplyingJavaClick)',
     'this.bridgeSendJavaContainerSetSlot(slot)',
     'PacketWrapper.create(ClientboundPackets26_1.CONTAINER_SET_SLOT, this.user)',
-    'slotUpdate.write(VersionedTypes.V26_1.item(), this.getJavaItem(slot))',
+    'slotUpdate.write(VersionedTypes.V26_2.item(), this.getJavaItem(slot))',
     "replaced authoritative inventory slot update"
   ]) {
     if (!source.includes(marker)) throw new Error(`patched Container.java is missing authoritative slot codec marker: ${marker}`)
@@ -748,11 +868,11 @@ function assertAuthoritativeContainerSlotCodec () {
   const containerClass = bundledPatchedClassPath('net/raphimc/viabedrock/api/model/container/Container.class')
   const result = run('javap', ['-c', '-p', containerClass])
   const text = `${result.stdout || ''}${result.stderr || ''}`
-  for (const marker of ['ClientboundPackets26_1.CONTAINER_SET_SLOT', 'VersionedTypes.V26_1', 'bridgeSendJavaContainerSetSlot']) {
+  for (const marker of ['ClientboundPackets26_1.CONTAINER_SET_SLOT', 'VersionedTypes.V26_2', 'bridgeSendJavaContainerSetSlot']) {
     if (!text.includes(marker)) throw new Error(`patched Container.class is missing authoritative slot bytecode marker: ${marker}`)
   }
-  if (text.includes('VersionedTypes.V26_2')) {
-    throw new Error('patched Container.class writes a Java container packet with the wrong V26_2 packet-stage codec')
+  if (text.includes('VersionedTypes.V26_1')) {
+    throw new Error('patched Container.class writes a Java container packet with the obsolete V26_1 packet-stage codec')
   }
 }
 
@@ -875,6 +995,8 @@ function assertRenderingBehavior () {
 package net.raphimc.viabedrock.protocol.storage;
 
 import com.viaversion.nbt.tag.CompoundTag;
+import com.viaversion.viaversion.api.minecraft.BlockPosition;
+import net.raphimc.viabedrock.api.chunk.BedrockBlockEntity;
 import net.raphimc.viabedrock.api.model.BlockState;
 
 public final class BridgeBlockRenderingSmoke {
@@ -884,6 +1006,16 @@ public final class BridgeBlockRenderingSmoke {
 
     private static BlockState state(String value) {
         return BlockState.fromString(value);
+    }
+
+    private static BedrockBlockEntity chestEntity(BlockPosition position, BlockPosition pairPosition) {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("id", "Chest");
+        if (pairPosition != null) {
+            tag.putInt("pairx", pairPosition.x());
+            tag.putInt("pairz", pairPosition.z());
+        }
+        return new BedrockBlockEntity(position, tag);
     }
 
     public static void main(String[] args) {
@@ -915,6 +1047,36 @@ public final class BridgeBlockRenderingSmoke {
         check("right".equals(BridgeBlockRendering.chestType(chest, -1, 0, 1)), "pairlead right chest");
         check("left".equals(BridgeBlockRendering.chestType(chest, 1, 0, null)), "geometry left chest");
         check("single".equals(BridgeBlockRendering.chestType(chest, 2, 0, 0)), "invalid chest pair");
+
+        BlockPosition chestPosition = new BlockPosition(10, 64, 10);
+        BlockPosition pairPosition = new BlockPosition(11, 64, 10);
+        BedrockBlockEntity currentChestEntity = chestEntity(chestPosition, pairPosition);
+        BedrockBlockEntity unpairedChestEntity = chestEntity(chestPosition, null);
+        BedrockBlockEntity reciprocalPair = chestEntity(pairPosition, chestPosition);
+        BedrockBlockEntity oneSidedPair = chestEntity(pairPosition, null);
+        BedrockBlockEntity nonreciprocalPair = chestEntity(pairPosition, new BlockPosition(12, 64, 10));
+        BlockState southChest = state("minecraft:chest[facing=south,type=single,waterlogged=false]");
+        BlockState trappedChest = state("minecraft:trapped_chest[facing=north,type=single,waterlogged=false]");
+        BlockState barrel = state("minecraft:barrel[facing=north,open=false]");
+
+        check(!ChunkTracker.isReciprocalChestPair(chestPosition, chest, currentChestEntity, pairPosition, chest, null),
+                "missing partner block entity must remain a single chest");
+        check(!ChunkTracker.isReciprocalChestPair(chestPosition, chest, unpairedChestEntity, pairPosition, chest, reciprocalPair),
+                "missing current-side pair metadata must remain a single chest");
+        check(!ChunkTracker.isReciprocalChestPair(chestPosition, chest, currentChestEntity, pairPosition, chest, oneSidedPair),
+                "one-sided partner metadata must remain a single chest");
+        check(!ChunkTracker.isReciprocalChestPair(chestPosition, chest, currentChestEntity, pairPosition, chest, nonreciprocalPair),
+                "nonreciprocal partner metadata must remain a single chest");
+        check(!ChunkTracker.isReciprocalChestPair(chestPosition, chest, currentChestEntity, pairPosition, southChest, reciprocalPair),
+                "mismatched partner facing must remain a single chest");
+        check(!ChunkTracker.isReciprocalChestPair(chestPosition, chest, currentChestEntity, pairPosition, trappedChest, reciprocalPair),
+                "mismatched chest family must remain a single chest");
+        check(ChunkTracker.isReciprocalChestPair(chestPosition, chest, currentChestEntity, pairPosition, chest, reciprocalPair),
+                "reciprocal same-family same-facing chest pair");
+        check("left".equals(BridgeBlockRendering.chestType(chest, 1, 0, 0)),
+                "validated reciprocal pair retains existing left/right derivation");
+        check(!ChunkTracker.isReciprocalChestPair(chestPosition, barrel, currentChestEntity, pairPosition, chest, reciprocalPair),
+                "stale Chest NBT over a raw barrel must remain a barrel");
 
         BlockState lowerDoor = state("minecraft:oak_door[facing=west,half=lower,hinge=left,open=true,powered=false]");
         BlockState staleUpperDoor = state("minecraft:oak_door[facing=west,half=upper,hinge=right,open=false,powered=false]");
@@ -953,7 +1115,7 @@ function assertRecipeBookSync () {
     'ClientboundPackets26_1.RECIPE_BOOK_SETTINGS',
     'ClientboundPackets26_1.RECIPE_BOOK_ADD',
     'ClientboundPackets26_1.RECIPE_BOOK_REMOVE',
-    'VersionedTypes.V26_1.itemTemplate()',
+    'VersionedTypes.V26_2.itemTemplate()',
     'add.write(Types.BOOLEAN, replace)',
     'add.write(Types.BOOLEAN, true)',
     'Types.HOLDER_SET',
@@ -1046,7 +1208,7 @@ function assertCraftingTableBridge () {
   }
 
   const container = fs.readFileSync(path.join(patchRoot, 'Container.java'), 'utf8')
-  if (!container.includes('tag != null && this.validBlockTags.contains(tag)')) {
+  if (!container.includes('if (tag == null) return false') || !container.includes('this.validBlockTags.contains(tag)')) {
     throw new Error('container block-tag validation must tolerate unmapped block states')
   }
 
@@ -1131,6 +1293,7 @@ assertNoObjectPacketEnumDescriptor()
 assertRegisteredCompanionDependencies()
 assertNoStalePlayerPickupStrings()
 assertNormalItemSnapshotTypes()
+assertJavaItemPacketStageCodec()
 assertRenderingDataCurrent()
 assertRenderingBytecode()
 assertItemFrameMetadata()
@@ -1146,6 +1309,7 @@ assertMovementCorrectionRebase()
 assertAssignedLocalPlayerEntityId()
 assertSubChunkRequestWireLayout()
 assertDoubleChestUpgrade()
+assertGenericStorageLifecycle()
 assertAuthoritativeContainerSlotCodec()
 assertMouseActionStateMachine()
 assertRenderingBehavior()

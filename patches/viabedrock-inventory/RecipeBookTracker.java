@@ -343,7 +343,7 @@ public final class RecipeBookTracker extends StoredObject {
         wrapper.write(Types.VAR_INT, recipe.ingredients().size());
         for (final ResolvedSlot slot : recipe.ingredients()) this.writeSlotDisplay(wrapper, slot);
         wrapper.write(Types.VAR_INT, SLOT_ITEM_STACK);
-        wrapper.write(VersionedTypes.V26_1.itemTemplate(), recipe.result());
+        wrapper.write(VersionedTypes.V26_2.itemTemplate(), recipe.result());
         wrapper.write(Types.VAR_INT, SLOT_ITEM);
         wrapper.write(Types.VAR_INT, craftingTableItemId());
     }
