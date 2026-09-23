@@ -1253,6 +1253,21 @@ function assertCraftingTableBridge () {
   if (!inventoryTracker.includes('crafting_table_close_return_3x3_grid')) {
     throw new Error('crafting-table close does not return remaining 3x3 ingredients')
   }
+  const markPendingCloseStart = inventoryTracker.indexOf('public void markPendingClose(Container container)')
+  const markPendingCloseEnd = inventoryTracker.indexOf('public void setCurrentContainerClosed', markPendingCloseStart)
+  const markPendingCloseMethod = inventoryTracker.slice(markPendingCloseStart, markPendingCloseEnd)
+  const facadeCloseStart = markPendingCloseMethod.indexOf('if (container instanceof InventoryContainer inventory\n                && !inventory.bridgeIsCraftingTable()\n                && inventory.type() == ContainerType.INVENTORY)')
+  const workbenchCloseStart = markPendingCloseMethod.indexOf('if (container instanceof InventoryContainer inventory && inventory.bridgeIsCraftingTable())')
+  if (facadeCloseStart < 0 || workbenchCloseStart <= facadeCloseStart) {
+    throw new Error('synthetic player-inventory facade close does not drain the canonical 2x2 grid before workbench handling')
+  }
+  const facadeCloseBranch = markPendingCloseMethod.slice(facadeCloseStart, workbenchCloseStart)
+  if (!facadeCloseBranch.includes('this.inventoryContainer.bridgeReturnCraftingGridToInventory("player_inventory_close_return_2x2_grid")')) {
+    throw new Error('synthetic player-inventory facade close does not return remaining 2x2 ingredients')
+  }
+  if (facadeCloseBranch.includes('this.pendingCloseContainer = null') || facadeCloseBranch.includes('\n            return;')) {
+    throw new Error('synthetic player-inventory facade close must continue through the normal numeric-window close handshake')
+  }
 
   const hudClass = 'net/raphimc/viabedrock/api/model/container/player/HudContainer.class'
   if (!CLASS_RELATIVE_PATHS.includes(hudClass)) throw new Error('HudContainer.class is not registered in the ViaProxy patch')
