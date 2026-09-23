@@ -8,6 +8,7 @@ JavaRock combines original interoperability code with separately licensed softwa
 | --- | --- | --- |
 | JavaRock-original source | Repository files except the exceptions below | [PolyForm Noncommercial 1.0.0](LICENSE) |
 | Modified ViaBedrock compatibility classes | `patches/viabedrock-inventory/` | [GPL-3.0-or-later](LICENSES/GPL-3.0-or-later.txt) |
+| CloudburstMC/Data-derived Bedrock palette aliases | `patches/viabedrock-inventory/BedrockBlockStateCompatibility.java` | [Apache License 2.0](LICENSES/Apache-2.0.txt) |
 | ViaProxy and its bundled Via projects | Downloaded by `npm run setup`; not committed here | GPLv3 and applicable upstream licenses |
 | Node.js dependencies | Installed from `package-lock.json`; not committed here | Each package's declared license |
 
@@ -19,6 +20,7 @@ The PolyForm noncommercial restriction applies only to material whose copyright 
 - ViaBedrock: <https://github.com/RaphiMC/ViaBedrock>
 - ViaVersion: <https://github.com/ViaVersion/ViaVersion>
 - PrismarineJS: <https://github.com/PrismarineJS>
+- CloudburstMC/Data: <https://github.com/CloudburstMC/Data>
 
 The setup script downloads ViaProxy from its official GitHub release and builds the local compatibility patch from the corresponding source included in this repository.
 

@@ -138,7 +138,7 @@ function assertRenderingBytecode () {
   const chunkTrackerClass = bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/ChunkTracker.class')
   const result = run('javap', ['-c', '-p', chunkTrackerClass])
   const text = `${result.stdout || ''}${result.stderr || ''}`
-  for (const marker of ['getSkyLight', 'createSkyLightData', 'getBlockLight', 'resolveDerivedJavaBlockState', 'resolveDoorBlockState', 'syncItemFramesAfterChunkSend', 'getPairedChestPosition', 'spawnSafetyPosition', 'BridgeBlockRendering.emission', 'BlockLightData.mask']) {
+  for (const marker of ['getSkyLight', 'createSkyLightData', 'getBlockLight', 'resolveDerivedJavaBlockState', 'resolveDoorBlockState', 'queueDoorUpdate', 'flushPendingDoorUpdates', 'sendPairedDoorUpdate', 'PacketFactory.sendJavaBlockUpdate', 'syncItemFramesAfterChunkSend', 'getPairedChestPosition', 'spawnSafetyPosition', 'BridgeBlockRendering.emission', 'BlockLightData.mask']) {
     if (!text.includes(marker)) throw new Error(`patched ChunkTracker.class is missing rendering marker: ${marker}`)
   }
 
@@ -357,6 +357,14 @@ function assertChunkLifecycleFixes () {
     'spawnSafetyPosition',
     'BlockState.fromString("minecraft:barrier")',
     '!this.isSubChunkReady(chunkX, (feetY - 1) >> 4, chunkZ)',
+    'private final Set<BlockPosition> pendingDoorUpdates',
+    'private final LongSet warnedBlockEntityBeforeChunk',
+    'Block entity arrived before its chunk and was ignored:',
+    'this.queueDoorUpdate(blockPosition, previousJavaBlockState, nextJavaBlockState)',
+    'this.flushPendingDoorUpdates()',
+    'private boolean sendPairedDoorUpdate',
+    'PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition, lowerJavaBlockState)',
+    'PacketFactory.sendJavaBlockUpdate(this.user(), upperPosition, upperJavaBlockState)',
     'if (doorStateChanged) return null',
     'public BlockPosition getPairedChestPosition'
   ]) {
@@ -364,6 +372,26 @@ function assertChunkLifecycleFixes () {
   }
   if (source.includes('paletteIndexBlockStateTags')) {
     throw new Error('ChunkTracker still detects item frames through palette indexes after Bedrock-to-Java palette coalescing')
+  }
+
+  const tickStart = source.indexOf('public void tick()')
+  const dirtySnapshot = source.indexOf('final long[] dirtyChunks = this.dirtyChunks.toLongArray()', tickStart)
+  const doorFlush = source.indexOf('this.flushPendingDoorUpdates()', tickStart)
+  if (tickStart < 0 || doorFlush < tickStart || dirtySnapshot < 0 || doorFlush > dirtySnapshot) {
+    throw new Error('paired door updates must flush before the dirty-chunk fallback snapshot')
+  }
+
+  const doorFlushStart = source.indexOf('private void flushPendingDoorUpdates()')
+  const doorSendStart = source.indexOf('private boolean sendPairedDoorUpdate', doorFlushStart)
+  const doorHelpersEnd = source.indexOf('private void syncItemFramesAfterChunkSend', doorSendStart)
+  const doorFlushSource = source.slice(doorFlushStart, doorSendStart)
+  const doorSendSource = source.slice(doorSendStart, doorHelpersEnd)
+  if (!doorFlushSource.includes('if (this.sendPairedDoorUpdate(lowerPosition)) continue') ||
+      !doorFlushSource.includes('this.markLoadedChunksDirtyAround(chunkX, chunkZ, true)')) {
+    throw new Error('paired door update must retain a dirty-chunk fallback when either half is unsafe')
+  }
+  if ((doorSendSource.match(/PacketFactory\.sendJavaBlockUpdate/g) || []).length !== 2) {
+    throw new Error('paired door update must emit exactly one Java block update for each door half')
   }
 
   const unloadedStart = source.indexOf('public boolean isInUnloadedChunkSection')
@@ -400,6 +428,189 @@ function assertChunkLifecycleFixes () {
   const sendChunk = source.slice(sendStart, sendEnd)
   if (sendChunk.indexOf('levelChunkWithLight.send(BedrockProtocol.class)') > sendChunk.indexOf('this.syncItemFramesAfterChunkSend(')) {
     throw new Error('item frames must be synchronized only after LEVEL_CHUNK_WITH_LIGHT is sent')
+  }
+}
+
+function assertMissingBlockStateWarningDedupe () {
+  const source = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
+  for (const marker of [
+    'private final IntSet warnedMissingBlockStates = new IntOpenHashSet()',
+    'private final IntSet warnedMissingWaterloggedBlockStates = new IntOpenHashSet()',
+    'private final Set<String> warnedMissingPersistentBlockStates = new HashSet<>()',
+    'if (this.warnedMissingBlockStates.add(bedrockBlockState))',
+    'if (this.warnedMissingWaterloggedBlockStates.add(bedrockBlockState))',
+    'if (this.warnedMissingPersistentBlockStates.add(blockStateKey))'
+  ]) {
+    if (!source.includes(marker)) throw new Error(`ChunkTracker missing-state warning dedupe is missing marker: ${marker}`)
+  }
+
+  const guardedCalls = source.match(/this\.warnMissingBlockState\(/g) || []
+  if (guardedCalls.length !== 3) {
+    throw new Error(`all three missing-state warning sites must use the dedupe helper; found ${guardedCalls.length}`)
+  }
+  const directLogs = source.match(/log\(Level\.WARNING, "Missing block state: "/g) || []
+  if (directLogs.length !== 2) {
+    throw new Error(`missing-state warnings must only be emitted by the two typed dedupe helpers; found ${directLogs.length} log sites`)
+  }
+  const waterloggedCalls = source.match(/this\.warnMissingWaterloggedBlockState\(/g) || []
+  if (waterloggedCalls.length !== 2) {
+    throw new Error(`both missing-waterlogged warning sites must use the dedupe helper; found ${waterloggedCalls.length}`)
+  }
+
+  const chunkTrackerClass = bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/ChunkTracker.class')
+  const bytecode = run('javap', ['-c', '-p', chunkTrackerClass]).stdout
+  for (const marker of ['IntOpenHashSet', 'warnedMissingBlockStates', 'warnedMissingWaterloggedBlockStates', 'warnedMissingPersistentBlockStates', 'warnMissingBlockState', 'warnMissingWaterloggedBlockState']) {
+    if (!bytecode.includes(marker)) throw new Error(`compiled ChunkTracker.class is missing warning-dedupe bytecode: ${marker}`)
+  }
+}
+
+function assertBedrockBlockStateCompatibility () {
+  const sourceName = 'BedrockBlockStateCompatibility.java'
+  const className = 'net/raphimc/viabedrock/protocol/storage/BedrockBlockStateCompatibility.class'
+  if (!PATCH_SOURCE_RELATIVE_PATHS.includes(sourceName)) {
+    throw new Error(`${sourceName} is not registered in the ViaProxy patch`)
+  }
+  if (!CLASS_RELATIVE_PATHS.includes(className)) {
+    throw new Error(`${className} is not registered in the ViaProxy patch`)
+  }
+
+  const source = fs.readFileSync(path.join(patchRoot, sourceName), 'utf8')
+  for (const marker of [
+    'EXPECTED_ALIAS_COUNT = 5765',
+    '630d18a535900fbfbe6a4ea2bc4aaa11f5313840e83d4364f4cf0c97dc07b8e5',
+    'computedAliasDataSha256()',
+    'MessageDigest.getInstance("SHA-256")',
+    'Bedrock block-state compatibility alias digest mismatch',
+    'blockStateIdMappings',
+    'blockStateTags',
+    'Installed " + installed + " Bedrock 1.26.50 block-state compatibility aliases'
+  ]) {
+    if (!source.includes(marker)) throw new Error(`Bedrock block-state compatibility source is missing marker: ${marker}`)
+  }
+
+  const chunkSource = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
+  if (!chunkSource.includes('BedrockBlockStateCompatibility.install(user.get(BlockStateRewriter.class))')) {
+    throw new Error('ChunkTracker does not install the Bedrock 1.26.50 block-state aliases')
+  }
+
+  const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(className)]).stdout
+  for (const marker of ['install', 'aliasCount', 'localId', 'computedAliasDataSha256', 'sha256', 'blockStateIdMappings', 'blockStateTags']) {
+    if (!bytecode.includes(marker)) throw new Error(`Bedrock block-state compatibility class is missing bytecode: ${marker}`)
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-block-state-compat-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const smokeSource = path.join(packageDir, 'BedrockBlockStateCompatibilitySmoke.java')
+    fs.writeFileSync(smokeSource, `
+package net.raphimc.viabedrock.protocol.storage;
+
+import com.viaversion.viaversion.libs.fastutil.ints.Int2IntOpenHashMap;
+import com.viaversion.viaversion.libs.fastutil.ints.Int2ObjectOpenHashMap;
+import net.raphimc.viabedrock.ViaBedrock;
+import net.raphimc.viabedrock.platform.ViaBedrockConfig;
+import net.raphimc.viabedrock.platform.ViaBedrockPlatform;
+import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
+import sun.misc.Unsafe;
+
+import java.io.File;
+import java.lang.reflect.Field;
+import java.lang.reflect.Proxy;
+import java.util.logging.Logger;
+
+public final class BedrockBlockStateCompatibilitySmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (!type.isPrimitive()) return null;
+        if (type == boolean.class) return false;
+        if (type == char.class) return '\\0';
+        if (type == byte.class) return (byte) 0;
+        if (type == short.class) return (short) 0;
+        if (type == int.class) return 0;
+        if (type == long.class) return 0L;
+        if (type == float.class) return 0F;
+        if (type == double.class) return 0D;
+        throw new AssertionError("unexpected primitive: " + type);
+    }
+
+    private static void initializeViaBedrock() {
+        final Logger logger = Logger.getLogger("BedrockBlockStateCompatibilitySmoke");
+        logger.setUseParentHandlers(false);
+        final ViaBedrockPlatform platform = (ViaBedrockPlatform) Proxy.newProxyInstance(
+                ViaBedrockPlatform.class.getClassLoader(),
+                new Class<?>[]{ViaBedrockPlatform.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("getLogger")) return logger;
+                    if (method.getName().equals("getDataFolder")) return new File(System.getProperty("java.io.tmpdir"));
+                    return defaultValue(method.getReturnType());
+                });
+        final ViaBedrockConfig config = (ViaBedrockConfig) Proxy.newProxyInstance(
+                ViaBedrockConfig.class.getClassLoader(),
+                new Class<?>[]{ViaBedrockConfig.class},
+                (proxy, method, args) -> defaultValue(method.getReturnType()));
+        ViaBedrock.init(platform, config);
+    }
+
+    private static BlockStateRewriter emptyRewriter() throws Exception {
+        final Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
+        unsafeField.setAccessible(true);
+        final Unsafe unsafe = (Unsafe) unsafeField.get(null);
+        return (BlockStateRewriter) unsafe.allocateInstance(BlockStateRewriter.class);
+    }
+
+    private static void setField(Object target, String name, Object value) throws Exception {
+        final Field field = BlockStateRewriter.class.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    public static void main(String[] args) throws Exception {
+        check(BedrockBlockStateCompatibility.aliasCount() == 5765, "alias count");
+        check(BedrockBlockStateCompatibility.localId(1023209031) == 128325399, "stone stair alias");
+        check(BedrockBlockStateCompatibility.localId(-629848190) == 1997655867, "oak fence alias");
+        check(BedrockBlockStateCompatibility.localId(1343894540) == -413905954, "poplar shelf alias");
+        check(BedrockBlockStateCompatibility.localId(1550144044) == 650702320, "poplar door alias");
+        check(BedrockBlockStateCompatibility.localId(1601900097) == 313457523, "straw bed alias");
+        check(BedrockBlockStateCompatibility.localId(123456789) == 123456789, "unknown id passthrough");
+        check(BedrockBlockStateCompatibility.computedAliasDataSha256().equals(
+                "630d18a535900fbfbe6a4ea2bc4aaa11f5313840e83d4364f4cf0c97dc07b8e5"), "alias digest");
+
+        initializeViaBedrock();
+        final Int2IntOpenHashMap javaIds = new Int2IntOpenHashMap();
+        javaIds.defaultReturnValue(-1);
+        javaIds.put(128325399, 9001);
+        javaIds.put(1997655867, 9002);
+        javaIds.put(-413905954, 9003);
+        javaIds.put(650702320, 9004);
+        javaIds.put(313457523, 9005);
+        final Int2ObjectOpenHashMap<String> tags = new Int2ObjectOpenHashMap<>();
+        tags.put(-413905954, "shelf");
+
+        final BlockStateRewriter rewriter = emptyRewriter();
+        setField(rewriter, "blockStateIdMappings", javaIds);
+        setField(rewriter, "blockStateTags", tags);
+        BedrockBlockStateCompatibility.install(rewriter);
+
+        check(rewriter.javaId(1023209031) == 9001, "installed stair mapping");
+        check(rewriter.javaId(-629848190) == 9002, "installed fence mapping");
+        check(rewriter.javaId(1343894540) == 9003, "installed shelf mapping");
+        check(rewriter.javaId(1550144044) == 9004, "installed door mapping");
+        check(rewriter.javaId(1601900097) == 9005, "installed bed mapping");
+        check("shelf".equals(rewriter.tag(1343894540)), "installed shelf tag");
+        check(rewriter.javaId(123456789) == -1, "unknown mapping remains absent");
+        check(rewriter.tag(123456789) == null, "unknown tag remains absent");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, smokeSource])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.BedrockBlockStateCompatibilitySmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
   }
 }
 
@@ -929,6 +1140,8 @@ assertModernMobEquipmentCodec()
 assertModernMobArmorEquipmentCodec()
 assertCanonicalInventoryInteractionState()
 assertChunkLifecycleFixes()
+assertMissingBlockStateWarningDedupe()
+assertBedrockBlockStateCompatibility()
 assertMovementCorrectionRebase()
 assertAssignedLocalPlayerEntityId()
 assertSubChunkRequestWireLayout()
