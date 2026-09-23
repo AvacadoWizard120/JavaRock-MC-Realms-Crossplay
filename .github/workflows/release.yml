@@ -6,6 +6,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   runtime-zip:
     runs-on: windows-latest
@@ -59,22 +63,125 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $zip = Get-ChildItem -LiteralPath dist -Filter '*.zip' | Select-Object -First 1
-          if (-not $zip) { throw 'Release ZIP was not created.' }
+          $repository = $env:GITHUB_REPOSITORY
+          $tag = $env:GITHUB_REF_NAME
+          if ([string]::IsNullOrWhiteSpace($repository) -or [string]::IsNullOrWhiteSpace($tag)) {
+            throw 'GitHub did not provide the repository and release tag.'
+          }
+
+          $zips = @(Get-ChildItem -LiteralPath dist -Filter '*.zip' -File)
+          if ($zips.Length -ne 1) { throw "Expected exactly one release ZIP, found $($zips.Length)." }
+          $zip = $zips[0]
           $checksum = Get-Item -LiteralPath "$($zip.FullName).sha256" -ErrorAction Stop
           $expected = ((Get-Content -LiteralPath $checksum.FullName -Raw).Trim() -split '\s+')[0].ToUpperInvariant()
           $actual = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
           if ($expected -ne $actual) { throw 'Release ZIP does not match its checksum file.' }
           $assets = @($zip.FullName, $checksum.FullName)
 
-          $previousErrorActionPreference = $ErrorActionPreference
-          $ErrorActionPreference = 'SilentlyContinue'
-          gh release view $env:GITHUB_REF_NAME *> $null
-          $releaseExists = $LASTEXITCODE -eq 0
-          $ErrorActionPreference = $previousErrorActionPreference
-
-          if ($releaseExists) {
-            gh release upload $env:GITHUB_REF_NAME @assets --clobber
-          } else {
-            gh release create $env:GITHUB_REF_NAME @assets --generate-notes --title "JavaRock $env:GITHUB_REF_NAME"
+          $localAssets = @($assets | ForEach-Object {
+            $item = Get-Item -LiteralPath $_ -ErrorAction Stop
+            [pscustomobject]@{
+              Path = $item.FullName
+              Name = $item.Name
+              Size = [int64]$item.Length
+              Digest = 'sha256:' + (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+          })
+          $localNames = @($localAssets | ForEach-Object { $_.Name } | Sort-Object -CaseSensitive)
+          if (@($localNames | Select-Object -Unique).Length -ne $localNames.Length) {
+            throw 'Release assets contain duplicate file names.'
           }
+
+          function Assert-ReleaseAssets {
+            param([Parameter(Mandatory = $true)]$Release)
+
+            $remoteAssets = @($Release.assets)
+            $remoteNames = @($remoteAssets | ForEach-Object { [string]$_.name } | Sort-Object -CaseSensitive)
+            $nameDifferences = @(Compare-Object -ReferenceObject $localNames -DifferenceObject $remoteNames -CaseSensitive)
+            if ($nameDifferences.Length -ne 0) {
+              throw "Release asset names do not exactly match the build: $($nameDifferences | Out-String)"
+            }
+
+            foreach ($local in $localAssets) {
+              $matches = @($remoteAssets | Where-Object { [string]$_.name -ceq $local.Name })
+              if ($matches.Length -ne 1) { throw "Release asset is missing or duplicated: $($local.Name)" }
+              $remote = $matches[0]
+              if ([string]$remote.state -ne 'uploaded') { throw "Release asset is not fully uploaded: $($local.Name)" }
+              if ([int64]$remote.size -ne $local.Size) { throw "Release asset size does not match: $($local.Name)" }
+              $remoteDigest = [string]$remote.digest
+              if ($remoteDigest -and -not $remoteDigest.Equals($local.Digest, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Release asset digest does not match: $($local.Name)"
+              }
+            }
+          }
+
+          $existingText = & gh release view $tag --repo $repository --json databaseId,isDraft,tagName 2>$null
+          $viewExitCode = $LASTEXITCODE
+          if ($viewExitCode -eq 0) {
+            $existing = ($existingText | Out-String) | ConvertFrom-Json
+            if ([string]$existing.tagName -cne $tag) { throw 'GitHub returned a release for a different tag.' }
+            if (-not [bool]$existing.isDraft) {
+              throw "Release $tag is already published; refusing to replace its assets."
+            }
+          } else {
+            & gh release create $tag --repo $repository --draft --verify-tag --generate-notes --title "JavaRock $tag"
+            $createExitCode = $LASTEXITCODE
+            if ($createExitCode -ne 0) { throw "Could not create draft release $tag (gh exit $createExitCode)." }
+          }
+
+          $encodedTag = [Uri]::EscapeDataString($tag)
+          $draftText = & gh api "repos/$repository/releases/tags/$encodedTag"
+          $draftExitCode = $LASTEXITCODE
+          if ($draftExitCode -ne 0) { throw "Could not load draft release $tag (gh exit $draftExitCode)." }
+          $draft = ($draftText | Out-String) | ConvertFrom-Json
+          if ([string]$draft.tag_name -cne $tag -or -not [bool]$draft.draft) {
+            throw "Release $tag is not the expected draft; refusing to upload assets."
+          }
+          $releaseId = [int64]$draft.id
+          if ($releaseId -le 0) { throw "Draft release $tag has no valid release ID." }
+
+          foreach ($local in $localAssets) {
+            $matches = @(@($draft.assets) | Where-Object { [string]$_.name -ceq $local.Name })
+            if ($matches.Length -gt 1) { throw "Draft release contains duplicate assets named $($local.Name)." }
+            if ($matches.Length -eq 1) {
+              $remote = $matches[0]
+              if ([string]$remote.state -ne 'uploaded') {
+                $assetId = [int64]$remote.id
+                if ($assetId -le 0) { throw "Incomplete draft asset has no valid ID: $($local.Name)" }
+                & gh api --method DELETE "repos/$repository/releases/assets/$assetId" --silent
+                $deleteExitCode = $LASTEXITCODE
+                if ($deleteExitCode -ne 0) { throw "Could not remove incomplete draft asset $($local.Name) (gh exit $deleteExitCode)." }
+              } else {
+                if ([int64]$remote.size -ne $local.Size) {
+                  throw "Existing draft asset has a different size; refusing to replace it: $($local.Name)"
+                }
+                $remoteDigest = [string]$remote.digest
+                if ($remoteDigest -and -not $remoteDigest.Equals($local.Digest, [StringComparison]::OrdinalIgnoreCase)) {
+                  throw "Existing draft asset has a different digest; refusing to replace it: $($local.Name)"
+                }
+                continue
+              }
+            }
+
+            & gh release upload $tag $local.Path --repo $repository
+            $uploadExitCode = $LASTEXITCODE
+            if ($uploadExitCode -ne 0) { throw "Could not upload $($local.Name); release remains a draft (gh exit $uploadExitCode)." }
+          }
+
+          $verifiedText = & gh api "repos/$repository/releases/$releaseId"
+          $verifyExitCode = $LASTEXITCODE
+          if ($verifyExitCode -ne 0) { throw "Could not verify draft release $tag (gh exit $verifyExitCode)." }
+          $verified = ($verifiedText | Out-String) | ConvertFrom-Json
+          if ([string]$verified.tag_name -cne $tag -or -not [bool]$verified.draft) {
+            throw "Release $tag changed before verification; refusing to publish."
+          }
+          Assert-ReleaseAssets -Release $verified
+
+          $publishedText = & gh api --method PATCH "repos/$repository/releases/$releaseId" -F draft=false -F prerelease=false -f make_latest=true
+          $publishExitCode = $LASTEXITCODE
+          if ($publishExitCode -ne 0) { throw "Could not publish release $tag (gh exit $publishExitCode)." }
+          $published = ($publishedText | Out-String) | ConvertFrom-Json
+          if ([string]$published.tag_name -cne $tag -or [bool]$published.draft) {
+            throw "GitHub did not confirm publication of release $tag."
+          }
+          Assert-ReleaseAssets -Release $published
