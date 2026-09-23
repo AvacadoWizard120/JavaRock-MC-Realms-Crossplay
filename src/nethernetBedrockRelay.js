@@ -211,7 +211,9 @@ function normalizeItemStackRequestResultDescriptorForUpstream (owner, item) {
     // 1.26.40 replaced the numeric ItemLegacy result with the named
     // ItemStackRequestInstanceDescriptor used by CraftResultsDeprecated.
     type: 'name',
-    legacy_type: 0,
+    // The descriptor kind is serialized twice. A named descriptor is 1 in
+    // both the outer varint and the repeated legacy byte.
+    legacy_type: 1,
     name,
     metadata: numberOrDefault(firstNonEmpty(item.metadata, item.meta, item.damage), 0),
     count: numberOrDefault(firstNonEmpty(item.count, item.amount), 1),
@@ -1716,6 +1718,42 @@ function bridgePlaceAction (count, destination, cursorStackId, destinationStackI
   }
 }
 
+const BRIDGE_ITEM_STACK_REQUEST_LEGACY_ACTION_IDS = Object.freeze({
+  take: 0,
+  place: 1,
+  swap: 2,
+  drop: 3,
+  destroy: 4,
+  consume: 5,
+  create: 6,
+  lab_table_combine: 9,
+  beacon_payment: 10,
+  mine_block: 11,
+  craft_recipe: 12,
+  craft_recipe_auto: 13,
+  craft_creative: 14,
+  optional: 15,
+  craft_grindstone_request: 16,
+  craft_loom_request: 17,
+  non_implemented: 18,
+  results_deprecated: 19
+})
+
+function bridgeLegacyItemStackRequestActionTypeId (typeId) {
+  if (typeof typeId === 'number' && Number.isInteger(typeId)) {
+    return typeId >= 0 && typeId <= 17 ? (typeId > 6 ? typeId + 2 : typeId) : null
+  }
+
+  const normalized = String(typeId || '').toLowerCase()
+  if (/^\d+$/.test(normalized)) {
+    const numeric = Number.parseInt(normalized, 10)
+    return numeric >= 0 && numeric <= 17 ? (numeric > 6 ? numeric + 2 : numeric) : null
+  }
+  return Object.prototype.hasOwnProperty.call(BRIDGE_ITEM_STACK_REQUEST_LEGACY_ACTION_IDS, normalized)
+    ? BRIDGE_ITEM_STACK_REQUEST_LEGACY_ACTION_IDS[normalized]
+    : null
+}
+
 function bridgeCloneSlotDescriptor (slotDescriptor) {
   if (!slotDescriptor?.slot_type?.container_id) return null
   return {
@@ -1728,11 +1766,16 @@ function bridgeItemStackRequest (requestId, actions) {
   return {
     requests: [{
       request_id: requestId,
-      actions: actions.map(action => ({
-        ...action,
-        // Required immediately after type_id on the 1.26.40+ wire.
-        legacy_type_id: numberOrDefault(action?.legacy_type_id, 0)
-      })),
+      actions: actions.map(action => {
+        const legacyTypeId = bridgeLegacyItemStackRequestActionTypeId(action?.type_id)
+        if (legacyTypeId == null) throw new Error(`Unsupported 1.26.40+ item stack request action type: ${action?.type_id}`)
+        return {
+          ...action,
+          // Required immediately after the compressed outer type_id. This is
+          // the legacy enum value, so actions after Create skip 7 and 8.
+          legacy_type_id: legacyTypeId
+        }
+      }),
       custom_names: [],
       cause: -1
     }]
@@ -2457,6 +2500,11 @@ function bridgeSanitizedItemStackRequestParams (owner, params = {}) {
     const actions = Array.isArray(request.actions) ? request.actions : []
     for (const action of actions) {
       const actionType = bridgeActionType(action)
+      const expectedLegacyTypeId = bridgeLegacyItemStackRequestActionTypeId(actionType)
+      if (expectedLegacyTypeId != null && numberOrDefault(action.legacy_type_id, -1) !== expectedLegacyTypeId) {
+        action.legacy_type_id = expectedLegacyTypeId
+        changed = true
+      }
       const source = action?.source
       const destination = action?.destination
 
@@ -5159,6 +5207,85 @@ class ViaBedrockRelayPlayer extends Player {
     return sent
   }
 
+  predictServerboundItemUseBlockPlacement (name, params = {}, context = 'live') {
+    if (name !== 'inventory_transaction') return false
+    const transaction = params.transaction || {}
+    const transactionData = transaction.transaction_data || transaction.data || {}
+    if (String(transaction.transaction_type || '').toLowerCase() !== 'item_use') return false
+    if (String(transactionData.action_type || transactionData.actionType || '').toLowerCase() !== 'click_block') return false
+
+    const heldItem = transactionData.held_item || transactionData.heldItem || {}
+    const blockRuntimeId = numberOrDefault(firstNonEmpty(
+      heldItem.block_runtime_id,
+      heldItem.blockRuntimeId,
+      heldItem.block_runtime,
+      heldItem.blockRuntime
+    ), 0)
+    if (blockRuntimeId <= 0) return false
+
+    // A successful block placement consumes at least one held item. Requiring
+    // that delta avoids inventing blocks for ordinary right-click interactions
+    // such as opening a door or container.
+    const actions = Array.isArray(transaction.actions) ? transaction.actions : []
+    const consumedHeldItem = actions.some(action => {
+      const oldItem = action?.old_item || action?.oldItem || action?.from || {}
+      const newItem = action?.new_item || action?.newItem || action?.to || {}
+      return bridgeItemCount(oldItem) > bridgeItemCount(newItem)
+    })
+    if (!consumedHeldItem) return false
+
+    const clicked = transactionData.block_position || transactionData.blockPosition
+    const face = Number(transactionData.face)
+    const faceOffsets = [
+      [0, -1, 0],
+      [0, 1, 0],
+      [0, 0, -1],
+      [0, 0, 1],
+      [-1, 0, 0],
+      [1, 0, 0]
+    ]
+    const offset = faceOffsets[face]
+    if (!clicked || !offset || !Number.isInteger(Number(clicked.x)) || !Number.isInteger(Number(clicked.y)) || !Number.isInteger(Number(clicked.z))) return false
+
+    const packet = {
+      position: {
+        x: Number(clicked.x) + offset[0],
+        y: Number(clicked.y) + offset[1],
+        z: Number(clicked.z) + offset[2]
+      },
+      block_runtime_id: blockRuntimeId,
+      flags: { neighbors: true, network: true },
+      layer: 0
+    }
+    const predictionContext = `serverbound_item_use_block_prediction:${context}`
+    this.recordBridgeToViaBedrock('update_block', packet, 'synthetic', {
+      context: predictionContext,
+      translation_status: 'synthetic_serverbound_item_use_block_prediction'
+    })
+    try {
+      this.queue('update_block', packet)
+      this.recordBridgeToViaBedrock('update_block', packet, 'sent', {
+        context: predictionContext,
+        translation_status: 'sent_synthetic_serverbound_item_use_block_prediction'
+      })
+      return true
+    } catch (error) {
+      this.recordPacketCensusError({
+        lane: 'bridge_to_viabedrock',
+        direction: 'bridge_to_viabedrock',
+        source_version: this.upstreamVersionForCensus(),
+        target_version: this.downstreamVersionForCensus(),
+        name: 'update_block',
+        params: packet,
+        context: predictionContext,
+        phase: 'failed',
+        translation_status: 'synthetic_serverbound_item_use_block_prediction_failed'
+      }, error)
+      console.warn(`[bedrock-relay] Failed to send synthetic placed-block prediction during ${context}: ${error.message || error}`)
+      return false
+    }
+  }
+
   scheduleAuthoritativeInventoryReplay (reason, delayMs = 75) {
     if (!this.downstreamPlayReady || (!this.lastPlayerInventoryContent && !this.lastPlayerUiContent)) return
     if (process.env.NETHERNET_RELAY_REPLAY_INVENTORY === 'false') return
@@ -6121,6 +6248,7 @@ class ViaBedrockRelayPlayer extends Player {
         this.rememberBridgeToRealmItemStackRequest(name, translated, context)
       }
       this.predictServerboundItemUseInventoryDeltas(name, translated, context)
+      this.predictServerboundItemUseBlockPlacement(name, translated, context)
       if (isServerboundRespawnAction(name, translated)) {
         this.markDownstreamEntityTrackerReset('serverbound respawn action')
       }
@@ -6824,6 +6952,7 @@ module.exports = {
   bridgeAliasedItemStackRequestParams,
   bridgeSanitizedItemStackRequestParams,
   bridgeCraftingDrainRequestIds,
+  bridgeLegacyItemStackRequestActionTypeId,
   buildSpawnSupportSubchunkRequest,
   subchunkOriginsMatch,
   bridgeItemStackRequestTouchesOwnInventoryScreen,

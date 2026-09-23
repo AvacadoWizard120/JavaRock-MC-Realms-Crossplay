@@ -1806,7 +1806,7 @@ public class InventoryContainer extends Container {
         // item type and must be written even though all JavaRock results use a
         // named item descriptor.
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1); // descriptor type: name
-        wrapper.write(Types.BYTE, (byte) 0); // legacy descriptor type
+        wrapper.write(Types.BYTE, (byte) 1); // repeated legacy descriptor type: name
         wrapper.write(BedrockTypes.STRING, identifier);
         wrapper.write(BedrockTypes.VAR_INT, (int) item.data());
         wrapper.write(BedrockTypes.SHORT_LE, (short) item.amount());
@@ -1834,12 +1834,18 @@ public class InventoryContainer extends Container {
     }
 
     private void writeItemStackRequestActionType(PacketWrapper wrapper, ItemStackRequestActionType actionType) {
-        // Bedrock 1.26.40 added a legacy action-type byte immediately after
-        // the ordinary varint action type. Omitting it shifts the action
-        // payload by one byte, so the relay cannot decode any request emitted
-        // by this patch. JavaRock targets the 1.26.45 downstream protocol.
-        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, actionType.getValue());
-        wrapper.write(Types.BYTE, (byte) 0);
+        // Bedrock 1.26.40 writes two related action discriminators. The outer
+        // oneOf ID removed the deprecated PlaceInItemContainer and
+        // TakeFromItemContainer entries, while the concrete action still
+        // carries the old enum value as a byte. They are equal only through
+        // Create (0..6).
+        final int legacyActionType = actionType.getValue();
+        if (legacyActionType == 7 || legacyActionType == 8) {
+            throw new IllegalArgumentException("Deprecated item stack request action is not valid on the 1.26.40+ wire: " + actionType);
+        }
+        final int actionTypeId = legacyActionType > 8 ? legacyActionType - 2 : legacyActionType;
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, actionTypeId);
+        wrapper.write(Types.BYTE, (byte) legacyActionType);
     }
 
     private void writeStackRequestSlot(PacketWrapper wrapper, BridgeNativeStackSlot slot) {

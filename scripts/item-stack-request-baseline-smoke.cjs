@@ -622,7 +622,10 @@ const craft = bridgeModernItemStackRequestsForLegacyInventoryTransaction(craftOw
 assert(Array.isArray(craft) && craft.length === 1, '2x2 craft commit should rewrite to a staged craft request')
 const craftActions = craft[0].params.requests[0].actions.map(action => action.type_id)
 assert(craftActions.join(',') === 'craft_recipe,results_deprecated,consume,place', `unexpected craft action sequence: ${craftActions.join(',')}`)
-assert(craft[0].params.requests[0].actions.every(action => action.legacy_type_id === 0), 'every synthetic 1.26.45 craft action must include legacy_type_id=0')
+assert(
+  craft[0].params.requests[0].actions.map(action => action.legacy_type_id).join(',') === '12,19,5,1',
+  'synthetic 1.26.45 craft actions must repeat the correct legacy enum discriminator'
+)
 assert(craft[0].params.requests[0].actions[0].recipe_network_id === 252, 'craft recipe request must preserve live Bedrock recipe network id')
 assert(craft[0].params.requests[0].actions.find(action => action.type_id === 'consume').source.stack_id === 15, 'craft consume must use the server-authoritative crafting-grid stack id')
 const craftPlaceAction = craft[0].params.requests[0].actions.find(action => action.type_id === 'place')
@@ -631,7 +634,7 @@ assert(craftPlaceAction.source.stack_id === craft[0].params.requests[0].request_
 assert(craftPlaceAction.destination.slot_type.container_id === 'hotbar', 'direct craft placement must target the intended hotbar slot')
 assert(craftPlaceAction.destination.stack_id === 0, 'direct craft placement into an empty slot must target destination stack id 0')
 const craftResultItem = craft[0].params.requests[0].actions.find(action => action.type_id === 'results_deprecated').result_items[0]
-assert(craftResultItem.type === 'name' && craftResultItem.legacy_type === 0, 'craft result item must use the 1.26.45 named instance descriptor')
+assert(craftResultItem.type === 'name' && craftResultItem.legacy_type === 1, 'craft result item must repeat the 1.26.45 named instance descriptor')
 assert(craftResultItem.name === 'minecraft:oak_planks', 'craft result descriptor must resolve its name from the live item palette')
 assert(craftResultItem.metadata === 0, 'craft result descriptor must preserve output metadata')
 assert(craftResultItem.count === 4, 'craft result item must preserve the output count')
@@ -892,6 +895,7 @@ const staleDestinationRequest = {
     request_id: -15,
     actions: [{
       type_id: 'place',
+      legacy_type_id: 0,
       count: 1,
       source: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 6269 },
       destination: { slot_type: { container_id: 'hotbar' }, slot: 5, stack_id: 6200 }
@@ -902,7 +906,9 @@ const staleDestinationRequest = {
 }
 const sanitizedDestination = bridgeSanitizedItemStackRequestParams(staleDestinationOwner, staleDestinationRequest)
 assert(sanitizedDestination.requests[0].actions[0].destination.stack_id === 6298, 'native place sanitizer must prefer the last server-authoritative destination stack id')
+assert(sanitizedDestination.requests[0].actions[0].legacy_type_id === 1, 'native place sanitizer must repeat Place, not Take, in the 1.26.40+ inner discriminator')
 assert(staleDestinationRequest.requests[0].actions[0].destination.stack_id === 6200, 'native place sanitizer must not mutate the original request')
+assert(staleDestinationRequest.requests[0].actions[0].legacy_type_id === 0, 'native place sanitizer must repair only its cloned request')
 
 const emptyDestinationWithStalePrediction = {
   requests: [{
@@ -955,6 +961,7 @@ const staleCursorDestinationRequest = {
 }
 const sanitizedCursor = bridgeSanitizedItemStackRequestParams({ bridgePredictedItemStackIds: new Map() }, staleCursorDestinationRequest)
 assert(sanitizedCursor.requests[0].actions[0].destination.stack_id === 0, 'native take sanitizer must use cursor stack id 0 when no cursor stack is server-authoritative')
+assert(sanitizedCursor.requests[0].actions[0].legacy_type_id === 0, 'native take sanitizer must repeat Take in the 1.26.40+ inner discriminator')
 
 const staleTakeSourceRequest = {
   requests: [{

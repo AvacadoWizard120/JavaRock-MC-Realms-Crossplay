@@ -483,6 +483,19 @@ function Trim-LogDisplay {
     $Control.Text = $currentText.Substring($trimAt)
 }
 
+function Clear-LogDisplay {
+    param([Parameter(Mandatory = $true)][System.Windows.Forms.RichTextBox]$Control)
+
+    # Clear only the visible buffer. The file cursors and complete bridge logs
+    # stay untouched, so new output continues from the current position and a
+    # support ZIP still contains everything written before this command.
+    # Assigning Text is also safe for a read-only RichTextBox; editing a
+    # selection would be rejected by the native control and can play a sound.
+    $Control.Text = [string]::Empty
+    $Control.SelectionStart = 0
+    $Control.SelectionLength = 0
+}
+
 function Add-Log {
     param(
         [string]$Source,
@@ -596,7 +609,10 @@ $viewMenu = New-Object System.Windows.Forms.ToolStripMenuItem('View')
 $darkMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Dark mode')
 $darkMenuItem.CheckOnClick = $true
 $darkMenuItem.Checked = $script:DarkMode
+$clearConsoleMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Clear Console Output')
 [void]$viewMenu.DropDownItems.Add($darkMenuItem)
+[void]$viewMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$viewMenu.DropDownItems.Add($clearConsoleMenuItem)
 $diagnosticsMenu = New-Object System.Windows.Forms.ToolStripMenuItem('Diagnostics')
 $createSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Create support ZIP...')
 $configureSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Support upload settings...')
@@ -942,7 +958,7 @@ function Set-DarkTheme {
     $menu.ForeColor = $foreground
     $menuRenderer = [JavaRockNativeWindow]::CreateMenuRenderer($Enabled)
     $menu.Renderer = $menuRenderer
-    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $versionMenuItem)) {
+    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $clearConsoleMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $versionMenuItem)) {
         $menuItem.BackColor = $panel
         $menuItem.ForeColor = $foreground
     }
@@ -1679,6 +1695,7 @@ $logoutButton.Add_Click({ Remove-AccountProfile })
 $logoutMenuItem.Add_Click({ Remove-AccountProfile })
 $refreshButton.Add_Click({ Refresh-Realms })
 $refreshMenuItem.Add_Click({ Refresh-Realms })
+$clearConsoleMenuItem.Add_Click({ Clear-LogDisplay -Control $logBox })
 $startButton.Add_Click({
     if (Test-BridgeActivity) { Stop-BridgeOrRecorder } else { Start-BridgeOrRecorder }
     Update-PrimaryActionButton
@@ -1873,7 +1890,16 @@ if ($SmokeTest) {
     if (-not $logBox.ReadOnly -or $logBox.TextLength -ge $logLengthBeforeTrim -or $logBox.TextLength -gt 300000) {
         throw 'Read-only log display trimming did not silently release old output.'
     }
-    $logBox.Clear()
+    $script:LogOffsets['clear-console-smoke'] = [int64]8675309
+    $logBox.Text = 'output that should disappear'
+    $clearConsoleMenuItem.PerformClick()
+    if (-not $logBox.ReadOnly -or $logBox.TextLength -ne 0) {
+        throw 'View > Clear Console Output did not silently clear the read-only display.'
+    }
+    if ([int64]$script:LogOffsets['clear-console-smoke'] -ne 8675309) {
+        throw 'Clearing the console changed an underlying bridge log cursor.'
+    }
+    [void]$script:LogOffsets.Remove('clear-console-smoke')
     $cursorSmokePath = Join-Path ([IO.Path]::GetTempPath()) "javarock-log-cursor-$([Guid]::NewGuid().ToString('N')).log"
     try {
         [IO.File]::WriteAllText($cursorSmokePath, ('x' * 65536), [Text.UTF8Encoding]::new($false))

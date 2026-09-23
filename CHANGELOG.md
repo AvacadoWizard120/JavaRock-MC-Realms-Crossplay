@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.101 - 2026-09-23
+
+- Fixed the `ItemStackRequest` disconnect seen after picking up the broken oak log. Every 1.26.40+ action now writes the correct compressed outer discriminator and matching legacy inner discriminator, and named crafting-result descriptors repeat the correct tag.
+- Locally predicts a consumed block placement while awaiting the Realm's authoritative update, so an immediate break targets the newly placed block instead of the block underneath it during the round-trip delay.
+- Added **View → Clear Console Output**. It silently clears only the visible read-only console while preserving complete bridge logs and support-ZIP evidence.
+
 ## 0.3.100 - 2026-09-23
 
 - Fixed inventory, chest, and crafting interactions on Bedrock 1.26.45. JavaRock now writes the required legacy action byte and fixed-width stack ids, so native item-stack requests reach the Realm instead of being dropped as malformed.
