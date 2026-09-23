@@ -35,6 +35,7 @@ const scriptFiles = [
   'New-JavaRockSupportBundle.ps1',
   'redact-support-file.cjs',
   'support-envelope.cjs',
+  'support-upload-http.cjs',
   'Start-JavaRock.ps1',
   'Update-JavaRock.ps1',
   'verify-release-integrity.cjs'

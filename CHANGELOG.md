@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.99 - 2026-09-23
+
+- Support uploads now use Node's HTTPS transport instead of Windows PowerShell web requests, avoiding the Schannel failure seen on the release host.
+- The launcher reports an upload as accepted only after the inbox returns a protocol-2 receipt whose upload id, byte count, SHA-256, filename, and version match. Authenticated read-back is advisory: a visible object is marked confirmed, while KV propagation delay is shown as pending without repeating the PUT.
+- Retries reuse one upload id and are idempotent; the inbox rejects conflicting retries, truncated or malformed encrypted envelopes, and mismatched hashes while remaining compatible with older JavaRock clients.
+- Successful sends show and log the inbox receipt plus sanitized request diagnostics, and the private inbox CLI can locate a bundle directly by receipt.
+
 ## 0.3.98 - 2026-09-22
 
 - Fixed the disconnect after picking up or moving a nonempty item. Stack-id presence is now encoded as a real protocol boolean, and cached inventory replays are normalized before they are sent.
