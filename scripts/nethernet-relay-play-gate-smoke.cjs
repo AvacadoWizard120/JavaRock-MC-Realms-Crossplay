@@ -22,10 +22,12 @@ assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('remove_entity'), tru
 assert.strictEqual(isClientboundTransientBeforeDownstreamPlay('add_entity'), false)
 assert.strictEqual(isClientboundTransientBeforeDownstreamPlay('set_entity_data'), false)
 assert.strictEqual(isClientboundTransientBeforeDownstreamPlay('level_sound_event'), true)
-assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('player_list'), false)
-assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('sync_world_clocks'), false)
-assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('jigsaw_structure_data'), false)
-assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('voxel_shapes'), false)
+assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('player_list'), true)
+assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('sync_world_clocks'), true)
+assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('jigsaw_structure_data'), true)
+assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('voxel_shapes'), true)
+assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('unlocked_recipes'), true)
+assert.strictEqual(isClientboundTransientBeforeDownstreamPlay('unlocked_recipes'), false)
 assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('level_chunk'), false)
 assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('start_game'), false)
 assert.strictEqual(isClientboundDelayedUntilDownstreamPlay('resource_packs_info'), false)
@@ -207,8 +209,10 @@ assert.strictEqual(buildSpawnSupportSubchunkRequest({
   relay.queueClientbound('subchunk', { origin: { x: 5, y: 0, z: 42 }, entries: [] }, 'spawn-support-smoke')
   assert.strictEqual(relay.finishSpawnSupportPlayGate(), true)
   assert.deepStrictEqual(sentPackets.map(packet => packet.name), ['play_status', 'subchunk'])
+  assert.strictEqual(relay.downstreamPlayReady, false)
+  relay.markDownstreamPlayReady('downstream set_local_player_as_initialized')
   assert.strictEqual(relay.downstreamPlayReady, true)
-  assert.deepStrictEqual(shimRequests, [{ reason: 'play_ready:spawn support subchunk forwarded', delayMs: 25 }])
+  assert.deepStrictEqual(shimRequests, [{ reason: 'play_ready:downstream set_local_player_as_initialized', delayMs: 25 }])
 }
 
 {
@@ -236,6 +240,9 @@ assert.strictEqual(buildSpawnSupportSubchunkRequest({
   assert.strictEqual(relay.droppedPrePlayTransientCounts.has('update_attributes'), false)
 
   relay.queueClientbound('play_status', { status: 'player_spawn' }, 'movement-baseline-smoke')
+  assert.deepStrictEqual(sentPackets.map(packet => packet.name), ['play_status'])
+  assert.strictEqual(relay.downstreamPlayReady, false)
+  relay.markDownstreamPlayReady('downstream set_local_player_as_initialized')
   assert.deepStrictEqual(sentPackets.map(packet => packet.name), ['play_status', 'update_attributes'])
   assert.strictEqual(sentPackets[1].params.attributes[0].current, 0.1)
   assert.deepStrictEqual(relay.delayedClientboundPlayPackets, [])
@@ -309,16 +316,66 @@ assert.strictEqual(buildSpawnSupportSubchunkRequest({
     relay.delayedClientboundPlayPackets = []
   }
   relay.queueClientbound('play_status', { status: 'player_spawn' }, 'smoke')
-  assert.strictEqual(relay.downstreamPlayReady, true)
-  assert.strictEqual(delayedFlushes, 1)
+  assert.strictEqual(relay.downstreamPlayReady, false)
+  assert.strictEqual(delayedFlushes, 0)
   assert.deepStrictEqual(sentPackets, [{ name: 'play_status', params: { status: 'player_spawn' } }])
-  assert.deepStrictEqual(fallbackRequests, [])
-  assert.deepStrictEqual(shimRequests, [{ reason: 'play_ready:sent play_status.player_spawn:smoke', delayMs: 25 }])
+  assert.deepStrictEqual(fallbackRequests, [{
+    reason: 'sent play_status.player_spawn:smoke; awaiting downstream initialization',
+    delayMs: 7000
+  }])
+  assert.deepStrictEqual(shimRequests, [])
 
   relay.markDownstreamPlayReady('downstream set_local_player_as_initialized')
   assert.strictEqual(relay.downstreamPlayReady, true)
   assert.strictEqual(delayedFlushes, 1)
-  assert.deepStrictEqual(shimRequests, [{ reason: 'play_ready:sent play_status.player_spawn:smoke', delayMs: 25 }])
+  assert.deepStrictEqual(shimRequests, [{ reason: 'play_ready:downstream set_local_player_as_initialized', delayMs: 25 }])
+}
+
+{
+  const { relay, sentPackets } = makeOutboundRelay()
+  const order = []
+  relay.startRelaying = true
+  Object.defineProperty(relay, 'status', { value: 0, writable: true, configurable: true })
+  relay.upstream = {}
+  relay.upQ = []
+  relay.flushUpQueue = () => {}
+  relay.recordLosslessNativePacket = () => {}
+  relay.parseDownstreamPacket = () => ({
+    data: {
+      name: 'set_local_player_as_initialized',
+      params: { runtime_entity_id: 123n }
+    },
+    canceled: false
+  })
+  relay.recordViaBedrockToBridge = () => {}
+  relay.serverboundRawActionCaptureExtra = () => ({})
+  relay.downInLog = () => {}
+  relay.emit = () => {}
+  relay.relayServerboundToUpstream = (name) => {
+    order.push(`upstream:${name}`)
+    return true
+  }
+  relay.queue = (name, params) => {
+    order.push(`downstream:${name}`)
+    sentPackets.push({ name, params })
+  }
+  relay.delayedClientboundPlayPackets = [{
+    name: 'player_list',
+    params: { records: { type: 'add', records: [] } },
+    context: 'preplay-smoke'
+  }]
+  relay.downstreamPlayReadyTimer = setTimeout(() => {}, 60_000)
+  relay.downstreamPlayReadyTimer.unref?.()
+
+  relay.readPacket(Buffer.from([0]))
+
+  assert.deepStrictEqual(order, [
+    'upstream:set_local_player_as_initialized',
+    'downstream:player_list'
+  ])
+  assert.strictEqual(relay.downstreamPlayReady, true)
+  assert.strictEqual(relay.downstreamPlayReadyTimer, null)
+  assert.deepStrictEqual(relay.delayedClientboundPlayPackets, [])
 }
 
 {

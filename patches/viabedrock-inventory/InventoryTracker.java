@@ -142,6 +142,20 @@ public class InventoryTracker extends StoredObject {
             this.pendingCloseContainer = null;
             return;
         }
+        if (container instanceof InventoryContainer inventory
+                && !inventory.bridgeIsCraftingTable()
+                && inventory.type() == ContainerType.INVENTORY) {
+            // The Realm's synthetic INVENTORY open is represented by a facade
+            // around the canonical player inventory. Java still sees window 0,
+            // so closing it must drain the canonical 2x2 grid before the facade's
+            // numeric Bedrock window proceeds through the normal close handshake.
+            try {
+                this.inventoryContainer.bridgeReturnCraftingGridToInventory("player_inventory_close_return_2x2_grid");
+            } catch (Throwable t) {
+                ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
+                        "[BedrockRealmBridge] failed to return 2x2 crafting grid items while closing player inventory facade", t);
+            }
+        }
         if (container instanceof InventoryContainer inventory && inventory.bridgeIsCraftingTable()) {
             try {
                 inventory.bridgeReturnCraftingGridToInventory("crafting_table_close_return_3x3_grid");

@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.104-viaproxy-3.4.13'
+const PATCH_ID = 'v0.3.105-viaproxy-3.4.13'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/packet/UnhandledPackets.class',
   'net/raphimc/viabedrock/protocol/packet/UnhandledPackets$1.class',

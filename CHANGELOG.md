@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.105 - 2026-09-23
+
+- Fixed melee attacks and entity interactions being decoded as empty inventory mismatches. JavaRock now uses ViaBedrock's typed entity-transaction encoder, including the modern presence fields and item format.
+- Closing the player inventory now returns items from the 2x2 crafting grid even when the Realm's synthetic inventory window is active.
+- Join startup now waits for ViaBedrock's real PLAY-ready acknowledgement before releasing queued entities, inventory, player-list, world-clock, structure, voxel-shape, and recipe-unlock state. This prevents the first gameplay systems from being ignored or appearing one at a time.
+
 ## 0.3.104 - 2026-09-23
 
 - Fixed crafting against Bedrock 1.26.40+ recipe data. The recipe book, player 2x2 grid, and crafting-table 3x3 grid now use the Realm's live executable recipe ids instead of an untakeable local preview.

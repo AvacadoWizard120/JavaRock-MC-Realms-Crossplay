@@ -1063,6 +1063,11 @@ function isClientboundDelayedUntilDownstreamPlay (name) {
     isClientboundEntityRemovePacket(name) ||
     isEntityTrackerSensitiveClientboundPacket(name) ||
     name === 'update_attributes' ||
+    name === 'player_list' ||
+    name === 'sync_world_clocks' ||
+    name === 'jigsaw_structure_data' ||
+    name === 'voxel_shapes' ||
+    name === 'unlocked_recipes' ||
     name === 'inventory_slot' ||
     name === 'inventory_content' ||
     name === 'player_hotbar' ||
@@ -1083,8 +1088,7 @@ function isClientboundTransientBeforeDownstreamPlay (name) {
   // Java session into PLAY. Entity lifecycle packets are not disposable: later
   // metadata and movement depend on their original spawn ordering.
   return name === 'clientbound_map_item_data' ||
-    name === 'level_sound_event' ||
-    name === 'unlocked_recipes'
+    name === 'level_sound_event'
 }
 
 function normalizeDownstreamMode (mode) {
@@ -4650,7 +4654,14 @@ class ViaBedrockRelayPlayer extends Player {
   finishSpawnSupportPlayGate () {
     if (!this.awaitingSpawnSupportPacketForPlayReady) return false
     this.awaitingSpawnSupportPacketForPlayReady = false
-    this.markDownstreamPlayReady('spawn support subchunk forwarded')
+    // A support subchunk reaching ViaBedrock does not mean its Java protocol is
+    // in PLAY yet. The real acknowledgement is the downstream
+    // set_local_player_as_initialized packet; keep the gameplay queue closed
+    // until that arrives (with the normal timed fallback as a safety valve).
+    this.scheduleDownstreamPlayReadyFallback(
+      'spawn support subchunk forwarded; awaiting downstream initialization',
+      this.downstreamPlayReadyFallbackMs()
+    )
     return true
   }
 
@@ -5828,9 +5839,14 @@ class ViaBedrockRelayPlayer extends Player {
       this.updateCachedEntitySnapshotFromClientboundPacket(name, translated)
       if (name === 'start_game') this.flushStartGameChunkCache(`start_game_sent:${context}`)
       if (this.usesViaBedrockDownstream() && name === 'play_status' && firstNonEmpty(translated?.status, params?.status) === 'player_spawn') {
-        if (!this.awaitingSpawnSupportPacketForPlayReady) {
-          this.markDownstreamPlayReady(`sent play_status.player_spawn:${context}`)
-        }
+        // Queueing Bedrock player_spawn starts ViaBedrock's CONFIGURATION ->
+        // PLAY transition; it is not proof that the transition has completed.
+        // Wait for ViaBedrock's set_local_player_as_initialized acknowledgement
+        // before flushing entity/inventory packets that PLAY handlers consume.
+        this.scheduleDownstreamPlayReadyFallback(
+          `sent play_status.player_spawn:${context}; awaiting downstream initialization`,
+          this.downstreamPlayReadyFallbackMs()
+        )
       }
       return true
     } catch (error) {
@@ -6505,8 +6521,12 @@ class ViaBedrockRelayPlayer extends Player {
           break
         case 'set_local_player_as_initialized':
           this.status = ClientStatus.Initialized ?? 3
+          // Preserve the Realm-visible initialization ordering before releasing
+          // the queued clientbound gameplay burst.
+          this.downInLog('Relaying', des.data)
+          this.relayServerboundToUpstream(des.data.name, des.data.params, 'live')
           this.markDownstreamPlayReady('downstream set_local_player_as_initialized')
-        // falls through
+          break
         default:
           this.downInLog('Relaying', des.data)
           this.relayServerboundToUpstream(des.data.name, des.data.params, 'live')

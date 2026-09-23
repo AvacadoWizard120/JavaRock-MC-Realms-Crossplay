@@ -477,15 +477,21 @@ public class ClientPlayerPackets {
                 return;
             }
 
-            wrapper.write(BedrockTypes.VAR_INT, 0); // legacy request id
-            wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, ComplexInventoryTransaction_Type.ItemUseOnEntityTransaction.getValue()); // transaction type
-            wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0); // actions count
-            wrapper.write(BedrockTypes.UNSIGNED_VAR_LONG, entity.runtimeId()); // entity runtime id
-            wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, ItemUseOnActorInventoryTransaction_ActionType.Attack.getValue()); // action type
-            wrapper.write(BedrockTypes.VAR_INT, (int) inventoryContainer.getSelectedHotbarSlot()); // hotbar slot
-            wrapper.write(wrapper.user().get(ItemRewriter.class).itemType(), inventoryContainer.getSelectedHotbarItem()); // held item
-            wrapper.write(BedrockTypes.POSITION_3F, entityTracker.getClientPlayer().position()); // player position
-            wrapper.write(BedrockTypes.POSITION_3F, Position3f.ZERO); // click position
+            final BedrockInventoryTransaction transaction = new BedrockInventoryTransaction(
+                    0,
+                    List.of(),
+                    List.of(),
+                    ComplexInventoryTransaction_Type.ItemUseOnEntityTransaction,
+                    new InventoryTransactionData.UseItemOnEntityTransactionData(
+                            entity.runtimeId(),
+                            ItemUseOnActorInventoryTransaction_ActionType.Attack,
+                            inventoryContainer.getSelectedHotbarSlot(),
+                            inventoryContainer.getSelectedHotbarItem(),
+                            entityTracker.getClientPlayer().position(),
+                            Position3f.ZERO
+                    )
+            );
+            wrapper.write(wrapper.user().get(InventoryTransactionRewriter.class).getInventoryTransactionType(), transaction);
 
             entityTracker.getClientPlayer().sendSwingPacketToServer();
             entityTracker.getClientPlayer().cancelNextSwingPacket();
@@ -516,15 +522,21 @@ public class ClientPlayerPackets {
 
             // TODO: Bedrock client sends INTERACT packet when hovered entity changes. Might be used by anticheats
 
-            wrapper.write(BedrockTypes.VAR_INT, 0); // legacy request id
-            wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, ComplexInventoryTransaction_Type.ItemUseOnEntityTransaction.getValue()); // transaction type
-            wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0); // actions count
-            wrapper.write(BedrockTypes.UNSIGNED_VAR_LONG, entity.runtimeId()); // entity runtime id
-            wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, ItemUseOnActorInventoryTransaction_ActionType.Interact.getValue()); // action type
-            wrapper.write(BedrockTypes.VAR_INT, (int) inventoryContainer.getSelectedHotbarSlot()); // hotbar slot
-            wrapper.write(wrapper.user().get(ItemRewriter.class).itemType(), inventoryContainer.getSelectedHotbarItem()); // held item
-            wrapper.write(BedrockTypes.POSITION_3F, entityTracker.getClientPlayer().position()); // player position
-            wrapper.write(BedrockTypes.POSITION_3F, entity.position().add((float) location.x(), (float) location.y(), (float) location.z())); // click position
+            final BedrockInventoryTransaction transaction = new BedrockInventoryTransaction(
+                    0,
+                    List.of(),
+                    List.of(),
+                    ComplexInventoryTransaction_Type.ItemUseOnEntityTransaction,
+                    new InventoryTransactionData.UseItemOnEntityTransactionData(
+                            entity.runtimeId(),
+                            ItemUseOnActorInventoryTransaction_ActionType.Interact,
+                            inventoryContainer.getSelectedHotbarSlot(),
+                            inventoryContainer.getSelectedHotbarItem(),
+                            entityTracker.getClientPlayer().position(),
+                            entity.position().add((float) location.x(), (float) location.y(), (float) location.z())
+                    )
+            );
+            wrapper.write(wrapper.user().get(InventoryTransactionRewriter.class).getInventoryTransactionType(), transaction);
         });
         protocol.registerServerbound(ServerboundPackets26_1.MOVE_PLAYER_STATUS_ONLY, null, wrapper -> {
             wrapper.cancel();
