@@ -289,7 +289,14 @@ withQuietRelayLogs(() => {
 
 const equipmentOwner = {
   upstream: { entityId: 1 },
-  bridgeItemNameByNetworkId: new Map([['5', 'minecraft:oak_planks']])
+  bridgeItemNameByNetworkId: new Map([
+    ['5', 'minecraft:oak_planks'],
+    ['-333', 'minecraft:tuff'],
+    ['-594', 'minecraft:andesite'],
+    ['-592', 'minecraft:diorite'],
+    ['-590', 'minecraft:granite'],
+    ['-875', 'minecraft:stone_brick_slab']
+  ])
 }
 assert.strictEqual(serverboundMobEquipmentDropDiagnosis(equipmentOwner, 'mob_equipment', {
   runtime_entity_id: 1,
@@ -319,23 +326,112 @@ assert.strictEqual(serverboundMobEquipmentDropDiagnosis(equipmentOwner, 'mob_equ
   selected_slot: 0,
   window_id: 'inventory'
 }).reason, 'unknown_item_network_id')
+assert.strictEqual(serverboundMobEquipmentDropDiagnosis(equipmentOwner, 'mob_equipment', {
+  runtime_entity_id: 1,
+  item: { network_id: -999999, count: 1, metadata: 0, has_stack_id: false },
+  slot: 0,
+  selected_slot: 0,
+  window_id: 'inventory'
+}).reason, 'unknown_item_network_id')
+for (const [networkId, name] of [
+  [-333, 'minecraft:tuff'],
+  [-594, 'minecraft:andesite'],
+  [-592, 'minecraft:diorite'],
+  [-590, 'minecraft:granite'],
+  [-875, 'minecraft:stone_brick_slab']
+]) {
+  assert.strictEqual(serverboundMobEquipmentDropDiagnosis(equipmentOwner, 'mob_equipment', {
+    runtime_entity_id: 1,
+    item: { network_id: networkId, count: 64, metadata: 0, has_stack_id: false },
+    slot: 3,
+    selected_slot: 3,
+    window_id: 'inventory'
+  }), null, `captured signed Bedrock runtime ID ${networkId} (${name}) should be valid`)
+}
+assert.strictEqual(serverboundMobEquipmentDropDiagnosis(equipmentOwner, 'mob_equipment', {
+  runtime_entity_id: 1,
+  item: { network_id: 0x80000000, count: 1, metadata: 0, has_stack_id: false },
+  slot: 0,
+  selected_slot: 0,
+  window_id: 'inventory'
+}).reason, 'invalid_item_network_id')
+
+withQuietRelayLogs(() => {
+  const { relayPlayer, queued } = makeRelayPlayerHarness()
+  relayPlayer.upstream.entityId = 1
+  relayPlayer.bridgeItemNameByNetworkId = equipmentOwner.bridgeItemNameByNetworkId
+  let replayCount = 0
+  relayPlayer.scheduleAuthoritativeInventoryReplay = () => { replayCount++ }
+  const capturedTuffEquipment = {
+    runtime_entity_id: 1,
+    item: {
+      network_id: -333,
+      count: 64,
+      metadata: 0,
+      has_stack_id: false,
+      block_runtime_id: -194428816,
+      extra: { has_nbt: 0, can_place_on: [], can_destroy: [] }
+    },
+    slot: 3,
+    selected_slot: 3,
+    window_id: 'inventory'
+  }
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('mob_equipment', capturedTuffEquipment, 'live:captured_tuff_equipment'), true)
+  assert.strictEqual(queued.length, 1)
+  assert.strictEqual(queued[0].name, 'mob_equipment')
+  assert.strictEqual(queued[0].params.item.network_id, -333)
+  assert.strictEqual(replayCount, 0)
+})
 
 withQuietRelayLogs(() => {
   const { relayPlayer, records, queued } = makeRelayPlayerHarness()
   relayPlayer.upstream.entityId = 1
   relayPlayer.bridgeItemNameByNetworkId = equipmentOwner.bridgeItemNameByNetworkId
-  let replayReason
-  relayPlayer.scheduleAuthoritativeInventoryReplay = reason => { replayReason = reason }
-  assert.strictEqual(relayPlayer.relayServerboundToUpstream('mob_equipment', {
+  const replayReasons = []
+  relayPlayer.scheduleAuthoritativeInventoryReplay = reason => { replayReasons.push(reason) }
+  const malformedEquipment = {
     runtime_entity_id: 1,
     item: { network_id: 9498, count: 0, metadata: 0, has_stack_id: true, stack_id: { empty: 23891324, id: 5 } },
     slot: 0,
     selected_slot: 0,
     window_id: 'inventory'
-  }, 'live:captured_corrupt_equipment'), true)
+  }
+  for (let i = 0; i < 32; i++) {
+    assert.strictEqual(relayPlayer.relayServerboundToUpstream(
+      'mob_equipment',
+      malformedEquipment,
+      `live:captured_corrupt_equipment_${i + 1}`
+    ), true)
+  }
   assert.strictEqual(queued.length, 0)
-  assert.strictEqual(replayReason, 'dropped_malformed_mob_equipment:nonzero_item_with_nonpositive_count')
-  assert(records.some(record => record.name === 'mob_equipment' && record.phase === 'dropped' && record.translation_status === replayReason))
+  assert.deepStrictEqual(replayReasons, ['dropped_malformed_mob_equipment:nonzero_item_with_nonpositive_count'])
+  const capturedDrops = records.filter(record => record.name === 'mob_equipment' && record.phase === 'dropped')
+  assert.strictEqual(capturedDrops.length, 32)
+  assert.strictEqual(capturedDrops[0].diagnostic.authoritative_inventory_replay_scheduled, true)
+  assert(capturedDrops.slice(1).every(record => record.diagnostic.authoritative_inventory_replay_scheduled === false))
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('mob_equipment', {
+    runtime_entity_id: 1,
+    item: { network_id: 0, count: 0, metadata: 0, has_stack_id: false },
+    slot: 1,
+    selected_slot: 0,
+    window_id: 'offhand'
+  }, 'live:valid_unrelated_equipment'), true)
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('mob_equipment', malformedEquipment, 'live:captured_corrupt_equipment_after_unrelated_valid'), true)
+  assert.strictEqual(replayReasons.length, 1)
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('mob_equipment', {
+    runtime_entity_id: 1,
+    item: { network_id: 5, count: 1, metadata: 0, has_stack_id: false },
+    slot: 0,
+    selected_slot: 0,
+    window_id: 'inventory'
+  }, 'live:valid_equipment_recovery'), true)
+  assert.strictEqual(queued.length, 2)
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('mob_equipment', malformedEquipment, 'live:captured_corrupt_equipment_after_recovery'), true)
+  assert.strictEqual(replayReasons.length, 2)
+  assert.strictEqual(replayReasons[1], 'dropped_malformed_mob_equipment:nonzero_item_with_nonpositive_count')
 })
 
 withQuietRelayLogs(() => {

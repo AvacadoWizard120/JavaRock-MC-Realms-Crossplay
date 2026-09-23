@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.104 - 2026-09-23
+
+- Fixed crafting against Bedrock 1.26.40+ recipe data. The recipe book, player 2x2 grid, and crafting-table 3x3 grid now use the Realm's live executable recipe ids instead of an untakeable local preview.
+- Bedrock item runtime ids are signed. Valid negative ids such as tuff, andesite, diorite, and granite no longer get rejected as malformed equipment, and repeated malformed equipment packets trigger only one inventory recovery until that slot actually recovers.
+- Ladder and vine detection now checks the blocks at the player's feet and torso instead of eye level. Downward climbing motion also keeps Bedrock's 0.15-block speed cap.
+- Support ZIPs now include a bounded set of referenced, already-redacted packet samples. Entity movement summaries retain coordinates, motion, flags, ground state, and ticks, while storage logs identify the resolved block state and tag behind a double-chest promotion.
+- Fixed the updater failing when a successful GitHub download produced an empty standard-output file.
+
 ## 0.3.103 - 2026-09-23
 
 - The updater now falls back to GitHub's dedicated asset list when tag metadata is still serving its pre-upload cache, preventing a valid new release from being reported as missing its ZIP.

@@ -732,8 +732,8 @@ public class InventoryContainer extends Container {
         if (button != 0 && button != 1) return false;
 
         CraftRecipe recipe = this.bridgeCraftingRecipe();
-        if (recipe == null || isEmpty(recipe.output)) {
-            this.publishJavaInventorySnapshot("craft_output_no_recipe");
+        if (recipe == null || recipe.networkId <= 0 || isEmpty(recipe.output)) {
+            this.publishJavaInventorySnapshot("craft_output_no_executable_recipe");
             return true;
         }
         if (!this.bridgeCraftingRecipeInputsHaveServerNetIds(recipe)) {
@@ -1004,7 +1004,10 @@ public class InventoryContainer extends Container {
 
     private BedrockItem bridgeCraftingOutput() {
         CraftRecipe recipe = this.bridgeCraftingRecipe();
-        if (recipe == null || !this.bridgeCraftingRecipeInputsHaveServerNetIds(recipe)) return BedrockItem.empty();
+        // A fallback without the Realm's live recipe network ID cannot be
+        // committed through ItemStackRequest. Do not render a result that the
+        // player can see but can never take.
+        if (recipe == null || recipe.networkId <= 0 || !this.bridgeCraftingRecipeInputsHaveServerNetIds(recipe)) return BedrockItem.empty();
         return recipe.output.copy();
     }
 

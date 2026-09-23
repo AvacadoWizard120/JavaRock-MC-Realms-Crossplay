@@ -324,9 +324,29 @@ for (let i = 0; i < 2; i++) {
     phase: 'dropped',
     translation_status: 'dropped_transient_until_downstream_play',
     name: 'move_entity_delta',
-    params: { runtime_entity_id: 42, x: i, y: 64, z: 0 }
+    params: {
+      runtime_entity_id: 42,
+      x: i,
+      y: 64,
+      z: 0,
+      on_ground: false,
+      force_move: false,
+      ticks: 900 + i,
+      flags: { has_x: true, has_y: true, has_z: true, teleport: false }
+    }
   })
 }
+
+census.record({
+  lane: 'realm_to_bridge',
+  direction: 'realm_to_bridge',
+  source_version: '1.26.20',
+  target_version: '1.26.10',
+  phase: 'received',
+  translation_status: 'seen_unhandled',
+  name: 'set_entity_motion',
+  params: { runtime_entity_id: 42, velocity: { x: 0, y: -0.0784, z: 0 }, tick: 902 }
+})
 
 census.close('smoke complete')
 
@@ -353,7 +373,7 @@ assert.ok(Object.keys(db.packet_kinds).some(key => key.includes('item_stack_resp
 assert.ok(Object.keys(db.packet_kinds).some(key => key.includes('item_stack_request')), 'item_stack_request error should be indexed')
 
 const events = fs.readFileSync(eventsFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-assert.strictEqual(events.length, 10)
+assert.strictEqual(events.length, 11)
 const metadataEvent = events.find(event => event.name === 'set_entity_data')
 assert.deepStrictEqual(metadataEvent.summary.metadata.highActorDataIds, [139, 140])
 const brokenEvent = events.find(event => event.name === 'item_stack_request')
@@ -400,6 +420,117 @@ const droppedMovementKind = Object.values(db.packet_kinds).find(kind =>
   kind.name === 'move_entity_delta' && kind.direction === 'bridge_to_viabedrock'
 )
 assert.strictEqual(droppedMovementKind.samples.length, 1, 'repeated transient drops should obey the per-kind sample limit')
+assert.strictEqual(droppedMovementKind.last_summary.runtime_entity_id, 42, 'entity movement summaries should retain the runtime id')
+assert.strictEqual(droppedMovementKind.last_summary.x, 1, 'entity movement summaries should retain coordinates')
+assert.strictEqual(droppedMovementKind.last_summary.y, 64, 'entity movement summaries should retain vertical position')
+assert.strictEqual(droppedMovementKind.last_summary.tick, 901, 'entity movement summaries should retain the server tick')
+assert.deepStrictEqual(droppedMovementKind.last_summary.flags, { has_x: true, has_y: true, has_z: true, teleport: false })
+const entityMotionKind = Object.values(db.packet_kinds).find(kind =>
+  kind.name === 'set_entity_motion' && kind.direction === 'realm_to_bridge'
+)
+assert.deepStrictEqual(entityMotionKind.last_summary.velocity, { x: 0, y: -0.0784, z: 0 }, 'entity motion summaries should retain bounded velocity')
+assert.strictEqual(entityMotionKind.last_summary.tick, 902, 'entity motion summaries should retain the server tick')
+
+const secondRun = new PacketCensus({
+  enabled: true,
+  dir,
+  runId: 'smoke-run-2',
+  captureProfile: 'smoke-java-relay',
+  sourceLabel: 'smoke source',
+  targetLabel: 'smoke target',
+  sampleLimitPerKind: 1,
+  sqliteEnabled: false
+})
+secondRun.record({
+  lane: 'realm_to_bridge',
+  direction: 'realm_to_bridge',
+  source_version: '1.26.20',
+  target_version: '1.26.10',
+  phase: 'received',
+  name: 'item_stack_response',
+  params: { responses: [{ request_id: 10, result: 'ok', containers: [] }] }
+})
+secondRun.close('second run sample smoke complete')
+const secondRunDb = JSON.parse(fs.readFileSync(dbFile, 'utf8'))
+const secondRunResponseKind = Object.values(secondRunDb.packet_kinds).find(kind =>
+  kind.name === 'item_stack_response' && kind.direction === 'realm_to_bridge'
+)
+assert.ok(
+  secondRunResponseKind.samples.some(ref => ref.startsWith('samples/smoke-run-2-')),
+  'a prior run that reached its sample cap must not suppress current-run packet samples'
+)
+
+const thirdRun = new PacketCensus({
+  enabled: true,
+  dir,
+  runId: 'smoke-run-3',
+  captureProfile: 'smoke-java-relay',
+  sourceLabel: 'smoke source',
+  targetLabel: 'smoke target',
+  sampleLimitPerKind: 1,
+  sampleRetentionRuns: 2,
+  sqliteEnabled: false
+})
+thirdRun.record({
+  lane: 'realm_to_bridge',
+  direction: 'realm_to_bridge',
+  source_version: '1.26.20',
+  target_version: '1.26.10',
+  phase: 'received',
+  name: 'item_stack_response',
+  params: { responses: [{ request_id: 11, result: 'ok', containers: [] }] }
+})
+thirdRun.close('sample retention smoke complete')
+const thirdRunDb = JSON.parse(fs.readFileSync(dbFile, 'utf8'))
+const retainedResponseKind = Object.values(thirdRunDb.packet_kinds).find(kind =>
+  kind.name === 'item_stack_response' && kind.direction === 'realm_to_bridge'
+)
+assert.ok(retainedResponseKind.samples.some(ref => ref.startsWith('samples/smoke-run-2-')))
+assert.ok(retainedResponseKind.samples.some(ref => ref.startsWith('samples/smoke-run-3-')))
+assert.ok(
+  !retainedResponseKind.samples.some(ref => ref.startsWith('samples/smoke-run-') &&
+    !ref.startsWith('samples/smoke-run-2-') &&
+    !ref.startsWith('samples/smoke-run-3-')),
+  'per-kind packet samples should retain only the configured recent-run window'
+)
+for (const firstRunRef of responseKind.samples) {
+  assert.ok(!fs.existsSync(path.join(dir, firstRunRef)), 'expired packet sample files should be removed with their references')
+}
+
+const boundedDiagnosticRun = new PacketCensus({
+  enabled: true,
+  dir,
+  runId: 'smoke-run-4',
+  captureProfile: 'smoke-java-relay',
+  sourceLabel: 'smoke source',
+  targetLabel: 'smoke target',
+  sampleLimitPerKind: 1,
+  sampleHardLimitPerKindPerRun: 2,
+  sqliteEnabled: false
+})
+for (let requestId = 20; requestId < 25; requestId++) {
+  boundedDiagnosticRun.record({
+    lane: 'realm_to_bridge',
+    direction: 'realm_to_bridge',
+    source_version: '1.26.20',
+    target_version: '1.26.10',
+    phase: 'diagnostic',
+    translation_status: 'diagnostic_bounded_sample',
+    name: 'item_stack_response',
+    forceSample: true,
+    params: { responses: [{ request_id: requestId, result: 'ok', containers: [] }] }
+  })
+}
+boundedDiagnosticRun.close('diagnostic sample bound smoke complete')
+const boundedRunDb = JSON.parse(fs.readFileSync(dbFile, 'utf8'))
+const boundedRunResponseKind = Object.values(boundedRunDb.packet_kinds).find(kind =>
+  kind.name === 'item_stack_response' && kind.direction === 'realm_to_bridge'
+)
+assert.strictEqual(
+  boundedRunResponseKind.samples.filter(ref => ref.startsWith('samples/smoke-run-4-')).length,
+  2,
+  'forced/error samples must still obey the per-kind per-run disk bound'
+)
 
 const DatabaseSync = loadDatabaseSync()
 if (DatabaseSync) {
@@ -410,7 +541,7 @@ if (DatabaseSync) {
   assert.strictEqual(run.capture_profile, 'smoke-java-relay')
   assert.strictEqual(run.source_label, 'smoke source')
   assert.strictEqual(run.target_label, 'smoke target')
-  assert.strictEqual(run.event_count, 10)
+  assert.strictEqual(run.event_count, 11)
 
   const kindCount = sqlite.prepare('SELECT COUNT(*) AS count FROM packet_kinds').get().count
   assert.ok(kindCount >= 2, 'SQLite ledger should index packet kinds')

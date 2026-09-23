@@ -81,7 +81,16 @@ public class ClientPlayerPackets {
         final float gravityAdjusted = levitating
                 ? observedDeltaY + (0.05F * (levitationAmplifier + 1)) * 0.2F
                 : observedDeltaY - ProtocolConstants.PLAYER_GRAVITY;
-        return gravityAdjusted * 0.98F;
+        final float velocity = gravityAdjusted * 0.98F;
+        // Java clamps downward ladder/vine motion to 0.15 blocks per tick.
+        // Applying airborne gravity after observing that clamped displacement
+        // otherwise reports roughly -0.2254 to Bedrock and makes the two
+        // simulations repeatedly pull the player to different heights.
+        return climbing ? Math.max(velocity, -0.15F) : velocity;
+    }
+
+    static int bridgePlayerFeetBlockY(final float bedrockEyeY, final float eyeOffset) {
+        return (int) Math.floor(bedrockEyeY - eyeOffset);
     }
 
     static boolean bridgeIsClimbableBlockIdentifier(final String identifier) {
@@ -99,7 +108,7 @@ public class ClientPlayerPackets {
                 || identifier.equals("minecraft:cave_vines_head_with_berries");
     }
 
-    private static boolean bridgeTouchesClimbableBlock(final UserConnection user, final Position3f... positions) {
+    private static boolean bridgeTouchesClimbableBlock(final UserConnection user, final float eyeOffset, final Position3f... positions) {
         final ChunkTracker chunkTracker = user.get(ChunkTracker.class);
         final BlockStateRewriter blockStateRewriter = user.get(BlockStateRewriter.class);
         if (chunkTracker == null || blockStateRewriter == null) return false;
@@ -108,7 +117,9 @@ public class ClientPlayerPackets {
             if (position == null) continue;
 
             final int x = (int) Math.floor(position.x());
-            final int y = (int) Math.floor(position.y());
+            // ClientPlayerEntity stores Bedrock's eye-height position. Probe
+            // the feet and torso blocks, not the eye and block above it.
+            final int y = bridgePlayerFeetBlockY(position.y(), eyeOffset);
             final int z = (int) Math.floor(position.z());
             for (int offsetY = 0; offsetY <= 1; offsetY++) {
                 final int blockStateId = chunkTracker.getBlockState(new BlockPosition(x, y + offsetY, z));
@@ -631,7 +642,7 @@ public class ClientPlayerPackets {
                 final int levitationAmplifier = levitating ? clientPlayer.effects().get("minecraft:levitation").amplifier() : 0;
                 final boolean climbing = clientPlayer.entityFlags().contains(ActorFlags.WALLCLIMBING)
                         || clientPlayer.entityFlags().contains(ActorFlags.IN_ASCENDABLE_BLOCK)
-                        || bridgeTouchesClimbableBlock(wrapper.user(), prevPosition, clientPlayer.position());
+                        || bridgeTouchesClimbableBlock(wrapper.user(), clientPlayer.eyeOffset(), prevPosition, clientPlayer.position());
                 final float dy = bridgeVerticalVelocity(positionDelta.y(), levitating, levitationAmplifier, climbing);
                 // Slow falling does not change the velocity when standing still
 

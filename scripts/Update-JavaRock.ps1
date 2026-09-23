@@ -523,8 +523,8 @@ function Invoke-GitHubDownload {
         $process.WaitForExit()
         $process.Refresh()
         $exitCode = [int]$process.ExitCode
-        $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { ([string](Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)).Trim() } else { '' }
-        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { ([string](Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)).Trim() } else { '' }
+        $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [IO.File]::ReadAllText($stdoutPath).Trim() } else { '' }
+        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [IO.File]::ReadAllText($stderrPath).Trim() } else { '' }
         $output = (@($stdout, $stderr) | Where-Object { $_ }) -join "`r`n"
         if ($output) {
             foreach ($line in @($output -split '\r?\n')) { Write-UpdateLog "download: $line" }
@@ -958,8 +958,8 @@ function Invoke-MonitoredRestart {
         $process.Dispose()
     }
 
-    $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [string](Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue) } else { '' }
-    $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [string](Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue) } else { '' }
+    $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [IO.File]::ReadAllText($stdoutPath) } else { '' }
+    $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [IO.File]::ReadAllText($stderrPath) } else { '' }
     foreach ($line in @(("$stdout`r`n$stderr" -split '\r?\n') | Where-Object { $_ })) { Write-UpdateLog "restart: $line" }
     if ($exitCode -ne 0) {
         $detail = ($stderr.Trim() -split '\r?\n' | Select-Object -Last 1)

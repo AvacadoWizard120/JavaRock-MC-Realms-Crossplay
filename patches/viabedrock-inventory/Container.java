@@ -48,6 +48,7 @@ public abstract class Container {
     private int[] bridgeAuthoritativeStackIds;
     protected final Set<String> validBlockTags;
     private String bridgeGenericStorageBlockTag;
+    private String bridgeConfiguredStorageBlockTag;
     private boolean bridgeChestStorage;
     protected static final int BRIDGE_QUICK_CRAFT_NONE = -1;
     protected static final int BRIDGE_QUICK_CRAFT_LEFT = 0;
@@ -217,6 +218,8 @@ public abstract class Container {
             ViaBedrock.getPlatform().getLogger().log(Level.INFO,
                     "[BedrockRealmBridge] promoted generic container to double chest" +
                             " containerId=" + (this.containerId & 0xFF) +
+                            " blockTag=" + String.valueOf(this.bridgeConfiguredStorageBlockTag) +
+                            " position=" + this.position +
                             " slots=" + DOUBLE_CHEST_SIZE);
             return true;
         } catch (Throwable t) {
@@ -258,6 +261,7 @@ public abstract class Container {
     public BlockPosition position() { return this.position; }
     public void bridgeConfigureContainerBlockTag(String blockTag) {
         if (this.type != ContainerType.CONTAINER) return;
+        this.bridgeConfiguredStorageBlockTag = blockTag;
         this.bridgeChestStorage = bridgeIsChestStorageBlockTag(blockTag);
         this.bridgeGenericStorageBlockTag = this.bridgeChestStorage ? null : blockTag;
     }

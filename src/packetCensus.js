@@ -53,6 +53,7 @@ const DEFAULT_HIGH_VALUE_PACKET_NAMES = new Set([
 const MOVEMENT_PACKET_NAMES = new Set([
   'player_auth_input',
   'move_player',
+  'move_entity_delta',
   'correct_player_move_prediction',
   'set_entity_motion',
   'set_entity_data',
@@ -466,6 +467,30 @@ function summarizePacketForCensus (name, params = {}) {
     return out
   }
 
+  if (name === 'move_entity_delta') {
+    out.runtime_entity_id = params.runtime_entity_id ?? params.runtimeEntityId ?? params.runtime_id ?? params.runtimeId
+    out.x = params.x
+    out.y = params.y
+    out.z = params.z
+    out.rot_x = params.rot_x ?? params.rotX
+    out.rot_y = params.rot_y ?? params.rotY
+    out.rot_z = params.rot_z ?? params.rotZ
+    out.on_ground = params.on_ground ?? params.onGround
+    out.force_move = params.force_move ?? params.forceMove ?? params.teleport
+    out.force_move_local_entity = params.force_move_local_entity ?? params.forceMoveLocalEntity
+    out.force_completion = params.force_completion ?? params.forceCompletion
+    out.tick = params.ticks ?? params.tick
+    out.flags = normalizeValueForSummary(params.flags)
+    return out
+  }
+
+  if (name === 'set_entity_motion') {
+    out.runtime_entity_id = params.runtime_entity_id ?? params.runtimeEntityId ?? params.runtime_id ?? params.runtimeId
+    out.velocity = params.velocity ?? params.motion
+    out.tick = params.tick
+    return out
+  }
+
   if (name === 'update_attributes') {
     const attributes = Array.isArray(params.attributes) ? params.attributes : []
     out.runtime_entity_id = params.runtime_entity_id ?? params.runtimeEntityId ?? params.runtime_id ?? params.runtimeId
@@ -746,6 +771,13 @@ class PacketCensus {
     this.sourceLabel = firstNonEmpty(options.sourceLabel, process.env.PACKET_CENSUS_SOURCE_LABEL)
     this.targetLabel = firstNonEmpty(options.targetLabel, process.env.PACKET_CENSUS_TARGET_LABEL)
     this.sampleLimitPerKind = Number.isInteger(options.sampleLimitPerKind) ? options.sampleLimitPerKind : 3
+    this.sampleRetentionRuns = Number.isInteger(options.sampleRetentionRuns) && options.sampleRetentionRuns > 0
+      ? options.sampleRetentionRuns
+      : 4
+    this.sampleHardLimitPerKindPerRun = Number.isInteger(options.sampleHardLimitPerKindPerRun) && options.sampleHardLimitPerKindPerRun > 0
+      ? Math.max(options.sampleHardLimitPerKindPerRun, this.sampleLimitPerKind)
+      : Math.max(16, this.sampleLimitPerKind)
+    this.sampleKindsPrunedThisRun = new Set()
     this.eventWindowSize = Number.isInteger(options.eventWindowSize) ? options.eventWindowSize : 240
     this.fullPayload = options.fullPayload === true
     this.eventMode = String(options.eventMode || process.env.PACKET_CENSUS_EVENT_MODE || 'important').toLowerCase()
@@ -1050,13 +1082,67 @@ class PacketCensus {
     this.focusTraceEventsWritten++
   }
 
+  pruneKindSampleHistory (key, kind) {
+    if (this.sampleKindsPrunedThisRun.has(key)) return
+    this.sampleKindsPrunedThisRun.add(key)
+    if (!Array.isArray(kind.samples)) kind.samples = []
+    if (kind.samples.length === 0) return
+
+    const runs = Object.values(this.db.runs || {})
+      .filter(run => run && typeof run.run_id === 'string')
+      .sort((left, right) => String(right.started_at || '').localeCompare(String(left.started_at || '')))
+    const retainedRunIds = new Set([this.runId])
+    for (const run of runs) {
+      if (retainedRunIds.size >= this.sampleRetentionRuns) break
+      retainedRunIds.add(run.run_id)
+    }
+    const knownRunIds = runs.map(run => run.run_id).sort((left, right) => right.length - left.length)
+    const retained = []
+
+    for (const reference of kind.samples) {
+      const normalized = String(reference || '').replace(/\\/g, '/')
+      const sampleRunId = knownRunIds.find(runId => normalized.startsWith(`samples/${runId}-`))
+      if (!sampleRunId || retainedRunIds.has(sampleRunId)) {
+        retained.push(reference)
+        continue
+      }
+
+      // Only unlink PacketCensus-owned filenames that resolve beneath the
+      // samples directory. Unknown/legacy references are retained untouched.
+      if (!/^samples\/[A-Za-z0-9][A-Za-z0-9._-]*\.json$/i.test(normalized)) {
+        retained.push(reference)
+        continue
+      }
+      const file = path.resolve(this.dir, ...normalized.split('/'))
+      const samplesRoot = path.resolve(this.samplesDir) + path.sep
+      if (!file.startsWith(samplesRoot)) {
+        retained.push(reference)
+        continue
+      }
+      try {
+        fs.unlinkSync(file)
+      } catch (error) {
+        if (error?.code !== 'ENOENT') retained.push(reference)
+      }
+    }
+
+    kind.samples = retained
+  }
+
   writeSample (key, event, params) {
     const forceSample = event.force_sample === true
     if (!this.shouldSample(event.name, event.phase, event.error, forceSample)) return undefined
 
     const kind = this.db.packet_kinds[key]
     if (!kind) return undefined
-    if (kind.samples.length >= this.sampleLimitPerKind && !forceSample && !event.error && event.phase !== 'failed') return undefined
+    this.pruneKindSampleHistory(key, kind)
+    // `kind.samples` persists across bridge runs. Apply the ordinary sample
+    // limit to this run only, otherwise an older run permanently exhausts the
+    // cap and future support bundles have no current packet payload to include.
+    const currentRunSamplePrefix = `samples/${this.runId}-`
+    const currentRunSampleCount = kind.samples.filter(ref => String(ref).startsWith(currentRunSamplePrefix)).length
+    if (currentRunSampleCount >= this.sampleHardLimitPerKindPerRun) return undefined
+    if (currentRunSampleCount >= this.sampleLimitPerKind && !forceSample && !event.error && event.phase !== 'failed') return undefined
 
     const redacted = redactSensitiveFields(params)
     const hash = packetHash(redacted).slice(0, 16)

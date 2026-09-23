@@ -16,6 +16,7 @@ const minecraftData = require('minecraft-data')
 const options = require('bedrock-protocol/src/options')
 const { createDeserializer, createSerializer } = require('bedrock-protocol/src/transforms/serializer')
 const { makeBedrockPlayerAuthInputPacket } = require('../src/bedrockPuppetController')
+const { simplifyCraftingDataForBridge2x2 } = require('../src/bridgeCraftingRecipes')
 const {
   normalizeClientboundForLocalViaBedrock,
   normalizeServerboundForUpstreamRealm
@@ -140,6 +141,66 @@ const transaction = roundTrip('inventory_transaction', {
 })
 assert.strictEqual(transaction.transaction.transaction_type, 'normal')
 assert.deepStrictEqual(transaction.transaction.actions, [])
+
+const emptyLegacyItemExtra = {
+  has_nbt: 'false',
+  can_place_on: [],
+  can_destroy: []
+}
+const splitCraftingData = roundTrip('crafting_data', {
+  shaped_recipes: [{
+    recipe_id: 'minecraft:protocol_round_trip_planks',
+    width: 2,
+    height: 1,
+    input: [{
+      type: 'valid',
+      descriptor_type: 'name',
+      name: 'minecraft:oak_log',
+      metadata: 32767,
+      count: 1
+    }, {
+      type: 'valid',
+      descriptor_type: 'empty',
+      metadata: 32767,
+      count: 0
+    }],
+    output: [{
+      network_id: -742,
+      count: 4,
+      metadata: 0,
+      block_runtime_id: 1921718966,
+      extra: emptyLegacyItemExtra
+    }],
+    uuid: '00000000-0000-0000-0000-000000000001',
+    block: 'crafting_table',
+    priority: 0,
+    assume_symmetry: false,
+    unlocking_requirement: undefined,
+    network_id: 2501
+  }],
+  shapeless_recipes: [],
+  multi_recipes: [],
+  shulker_box_recipes: [],
+  shapeless_chemistry_recipes: [],
+  shaped_chemistry_recipes: [],
+  smithing_transform_recipes: [],
+  smithing_trim_recipes: [],
+  potion_type_recipes: [],
+  potion_container_recipes: [],
+  material_reducers: [],
+  clear_recipes: true
+})
+assert.strictEqual(splitCraftingData.shaped_recipes.length, 1)
+assert.strictEqual(splitCraftingData.shaped_recipes[0].input[0].descriptor_type, 'name')
+assert.strictEqual(splitCraftingData.shaped_recipes[0].input[1].descriptor_type, 'empty')
+assert.strictEqual(splitCraftingData.shaped_recipes[0].output[0].network_id, -742)
+const decodedCraftingDb = simplifyCraftingDataForBridge2x2(splitCraftingData, {
+  networkIdByItemName: new Map([['minecraft:oak_log', 17]])
+})
+assert.strictEqual(decodedCraftingDb.recipe_count, 1)
+assert.strictEqual(decodedCraftingDb.recipes[0].network_id, 2501)
+assert.strictEqual(decodedCraftingDb.recipes[0].pattern[0].network_id, 17)
+assert.strictEqual(decodedCraftingDb.recipes[0].pattern[1], null)
 
 const stackResponse = roundTrip('item_stack_response', {
   responses: [{

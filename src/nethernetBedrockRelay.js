@@ -2888,7 +2888,11 @@ function serverboundMobEquipmentDropDiagnosis (owner, name, params = {}) {
   const rawNetworkId = bridgeItemNetworkIdForRecipeMatch(item)
   const networkId = Number(rawNetworkId)
   const count = Number(firstNonNull(item.count, item.amount))
-  if (!Number.isInteger(networkId) || networkId < 0) {
+  // Bedrock item runtime IDs are signed 32-bit values. Block items commonly
+  // use negative IDs (the support capture reports tuff as -333), so the sign
+  // alone does not make an equipment packet malformed. The palette lookup
+  // below still rejects non-zero IDs that are unknown to this session.
+  if (!Number.isInteger(networkId) || networkId < -0x80000000 || networkId > 0x7fffffff) {
     return { reason: 'invalid_item_network_id', network_id: rawNetworkId }
   }
   if (!Number.isInteger(count) || count < 0 || count > 255) {
@@ -2920,6 +2924,14 @@ function serverboundMobEquipmentDropDiagnosis (owner, name, params = {}) {
   }
 
   return null
+}
+
+function mobEquipmentRecoveryRouteKey (params = {}) {
+  return [
+    firstNonNull(params.window_id, params.windowId, 'unknown'),
+    firstNonNull(params.slot, params.hotbar_slot, params.hotbarSlot, 'unknown'),
+    firstNonNull(params.selected_slot, params.selectedSlot, 'unknown')
+  ].map(value => String(value)).join('|')
 }
 
 function bridgeEnrichCensusSummaryItemNames (owner, value) {
@@ -3811,6 +3823,7 @@ class ViaBedrockRelayPlayer extends Player {
     this.lastPlayerInventoryContent = null
     this.lastPlayerUiContent = null
     this.authoritativeInventoryReplayTimer = null
+    this.malformedMobEquipmentRecoveryRoutes = new Set()
     this.localInventoryScreenShimTimer = null
     this.localInventoryScreenShimArmed = false
     this.localInventoryScreenShimAutoCloseTimer = null
@@ -5949,9 +5962,13 @@ class ViaBedrockRelayPlayer extends Player {
         return
       }
 
-      const result = writeBridgeCraftingRecipesForViaProxy(projectRootPath, runDir, params)
+      const result = writeBridgeCraftingRecipesForViaProxy(projectRootPath, runDir, params, {
+        networkIdByItemName: this.bridgeNetworkIdByItemName
+      })
       if (result.written) {
-        console.log(`[bedrock-relay] Exported ${result.recipeCount} live Bedrock crafting_table 2x2 recipe(s) for ViaBedrock: ${result.targets[0]}`)
+        console.log(`[bedrock-relay] Exported ${result.recipeCount} live Bedrock crafting_table 2x2 recipe(s) and ${result.craftingTableRecipeCount} 3x3 recipe(s) for ViaBedrock from ${result.sourceSchema}: ${result.targets[0]}`)
+      } else {
+        console.warn(`[bedrock-relay] Bedrock crafting_data exported no executable crafting-table recipes from ${result.sourceSchema} (${result.sourceRecipeCount} source recipe(s), counts=${safeStringify(result.sourceRecipeCounts, 0)}); cleared stale 2x2/3x3 recipe catalogs instead of retaining obsolete network IDs.`)
       }
       if (result.recipeBookCount) {
         console.log(`[bedrock-relay] Exported ${result.recipeBookCount} Bedrock crafting recipe display(s) for the Java recipe book: ${result.recipeBookTargets[0]}`)
@@ -6076,14 +6093,23 @@ class ViaBedrockRelayPlayer extends Player {
     const equipmentDropDiagnosis = serverboundMobEquipmentDropDiagnosis(this, name, params)
     if (equipmentDropDiagnosis) {
       const reason = `dropped_malformed_mob_equipment:${equipmentDropDiagnosis.reason}`
+      if (!(this.malformedMobEquipmentRecoveryRoutes instanceof Set)) this.malformedMobEquipmentRecoveryRoutes = new Set()
+      const recoveryRouteKey = mobEquipmentRecoveryRouteKey(params)
+      const shouldScheduleRecoveryReplay = !this.malformedMobEquipmentRecoveryRoutes.has(recoveryRouteKey)
+      this.malformedMobEquipmentRecoveryRoutes.add(recoveryRouteKey)
       this.recordBridgeToRealm(name, params, 'dropped', {
         context: `${context}:${reason}`,
         translation_status: reason,
-        diagnostic: equipmentDropDiagnosis,
+        diagnostic: {
+          ...equipmentDropDiagnosis,
+          authoritative_inventory_replay_scheduled: shouldScheduleRecoveryReplay
+        },
         forceSample: true
       })
-      this.scheduleAuthoritativeInventoryReplay(reason, 10)
-      console.warn(`[bedrock-relay] Dropping malformed ViaBedrock mob_equipment before Realm send: ${safeStringify(equipmentDropDiagnosis, 0)}`)
+      if (shouldScheduleRecoveryReplay) {
+        this.scheduleAuthoritativeInventoryReplay(reason, 10)
+        console.warn(`[bedrock-relay] Dropping malformed ViaBedrock mob_equipment before Realm send: ${safeStringify(equipmentDropDiagnosis, 0)}`)
+      }
       return true
     }
 
@@ -6222,6 +6248,7 @@ class ViaBedrockRelayPlayer extends Player {
 
     try {
       this.upstream.queue(name, translated)
+      if (name === 'mob_equipment') this.malformedMobEquipmentRecoveryRoutes?.delete?.(mobEquipmentRecoveryRouteKey(translated))
       if (isServerboundOpenInventoryInteract(name, translated)) {
         this.realmInventoryOpenInFlight = true
       } else if (name === 'container_close') {

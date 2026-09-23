@@ -53,7 +53,16 @@ public class UnhandledPackets {
             }
 
             final BedrockBlockEntity blockEntity = chunkTracker.getBlockEntity(position);
-            final String blockTag = blockStateRewriter.tag(chunkTracker.getBlockState(position));
+            final int blockStateId = chunkTracker.getBlockState(position);
+            final String blockTag = blockStateRewriter.tag(blockStateId);
+            if (type == ContainerType.CONTAINER) {
+                ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                        "[BedrockRealmBridge] opened generic storage" +
+                                " containerId=" + (containerId & 0xFF) +
+                                " blockStateId=" + blockStateId +
+                                " blockTag=" + String.valueOf(blockTag) +
+                                " position=" + position);
+            }
             final String titleKey;
             if (type == ContainerType.WORKBENCH) {
                 titleKey = "container.crafting";
