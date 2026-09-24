@@ -6,8 +6,13 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.106-viaproxy-3.4.13'
+const PATCH_ID = 'v0.3.107-viaproxy-3.4.13-source-accurate-initial-join'
 const CLASS_RELATIVE_PATHS = [
+  'net/raphimc/viabedrock/protocol/rewriter/BlockStateRewriter.class',
+  'net/raphimc/viabedrock/protocol/packet/JoinPackets.class',
+  'net/raphimc/viabedrock/protocol/packet/JoinPackets$1.class',
+  'net/raphimc/viabedrock/protocol/packet/JoinPackets$2.class',
+  'net/raphimc/viabedrock/protocol/packet/JoinPackets$3.class',
   'net/raphimc/viabedrock/protocol/packet/UnhandledPackets.class',
   'net/raphimc/viabedrock/protocol/packet/UnhandledPackets$1.class',
   'net/raphimc/viabedrock/protocol/packet/EntityPackets.class',
@@ -55,9 +60,11 @@ const CLASS_RELATIVE_PATHS = [
 ]
 const CLASS_RELATIVE_PATH = CLASS_RELATIVE_PATHS[0]
 const PATCH_SOURCE_RELATIVE_PATHS = [
+  'BlockStateRewriter.java',
   'BridgeBlockRenderingData.java',
   'BridgeBlockRendering.java',
   'BedrockBlockStateCompatibility.java',
+  'JoinPackets.java',
   'ChunkTracker.java',
   'ClientPlayerEntity.java',
   'ClientPlayerPackets.java',

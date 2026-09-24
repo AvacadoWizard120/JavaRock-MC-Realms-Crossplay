@@ -426,7 +426,7 @@ function assertChunkLifecycleFixes () {
   for (const marker of [
     'private final Set<SubChunkPosition> loadedSubChunks',
     'this.loadedSubChunks.add(position)',
-    'this.loadedSubChunks.contains(new SubChunkPosition',
+    'return isResolvedInitialJoinSection(chunkSection)',
     'private final Set<BlockPosition> spawnedItemFrames',
     'this.syncItemFramesAfterChunkSend(chunkKey',
     'itemFrames.add(position)',
@@ -540,6 +540,36 @@ function assertMissingBlockStateWarningDedupe () {
   const bytecode = run('javap', ['-c', '-p', chunkTrackerClass]).stdout
   for (const marker of ['IntOpenHashSet', 'warnedMissingBlockStates', 'warnedMissingWaterloggedBlockStates', 'warnedMissingPersistentBlockStates', 'warnMissingBlockState', 'warnMissingWaterloggedBlockState']) {
     if (!bytecode.includes(marker)) throw new Error(`compiled ChunkTracker.class is missing warning-dedupe bytecode: ${marker}`)
+  }
+}
+
+function assertAggregatedStartupBlockStateMappingWarnings () {
+  const sourceName = 'BlockStateRewriter.java'
+  const className = 'net/raphimc/viabedrock/protocol/rewriter/BlockStateRewriter.class'
+  if (!PATCH_SOURCE_RELATIVE_PATHS.includes(sourceName)) {
+    throw new Error(`${sourceName} is not registered in the ViaProxy patch`)
+  }
+  if (!CLASS_RELATIVE_PATHS.includes(className)) {
+    throw new Error(`${className} is not registered in the ViaProxy patch`)
+  }
+
+  const source = fs.readFileSync(path.join(patchRoot, sourceName), 'utf8')
+  for (const marker of [
+    'private static final int MISSING_MAPPING_SAMPLE_LIMIT = 8',
+    'int missingMappingCount = 0',
+    'missingMappingSamples.size() < MISSING_MAPPING_SAMPLE_LIMIT',
+    'Missing " + missingMappingCount + " bedrock -> java block state mapping(s)',
+    'applied the INFO_UPDATE fallback for each'
+  ]) {
+    if (!source.includes(marker)) throw new Error(`BlockStateRewriter warning aggregation is missing marker: ${marker}`)
+  }
+  if ((source.match(/Missing block state mapping: /g) || []).length !== 0) {
+    throw new Error('BlockStateRewriter still logs every missing startup mapping separately')
+  }
+
+  const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(className)]).stdout
+  for (const marker of ['MISSING_MAPPING_SAMPLE_LIMIT', 'toBlockStateString', 'java/util/logging/Logger.log']) {
+    if (!bytecode.includes(marker)) throw new Error(`compiled BlockStateRewriter.class is missing aggregation bytecode: ${marker}`)
   }
 }
 
@@ -775,6 +805,167 @@ function assertSubChunkRequestWireLayout () {
     'subChunkRequest.write(BedrockTypes.INT_LE, group.size())'
   ]) {
     if (tick.includes(staleWrite)) throw new Error(`stale subchunk request serializer write remains: ${staleWrite}`)
+  }
+}
+
+function assertInitialJoinReadinessLifecycle () {
+  const joinSource = fs.readFileSync(path.join(patchRoot, 'JoinPackets.java'), 'utf8')
+  const playerSpawnStart = joinSource.indexOf('} else if (status == PlayStatus.PlayerSpawn) {')
+  const playerSpawnEnd = joinSource.indexOf('                    } else {', playerSpawnStart + 1)
+  if (playerSpawnStart < 0 || playerSpawnEnd < 0) throw new Error('could not isolate JoinPackets PlayerSpawn handler')
+  const playerSpawn = joinSource.slice(playerSpawnStart, playerSpawnEnd)
+  for (const marker of [
+    'clientPlayer.setInitiallySpawned()',
+    'GameEventType.LEVEL_CHUNKS_LOAD_START',
+    'clientPlayer.tryFinishInitialWorldJoin()'
+  ]) {
+    if (!playerSpawn.includes(marker)) throw new Error(`JoinPackets PlayerSpawn is missing readiness marker: ${marker}`)
+  }
+  if (playerSpawn.indexOf('clientPlayer.setInitiallySpawned()') > playerSpawn.indexOf('GameEventType.LEVEL_CHUNKS_LOAD_START') ||
+      playerSpawn.indexOf('GameEventType.LEVEL_CHUNKS_LOAD_START') > playerSpawn.indexOf('clientPlayer.tryFinishInitialWorldJoin()')) {
+    throw new Error('JoinPackets must start ViaBedrock, then Java LevelLoadTracker, before completing an already-pending join')
+  }
+  for (const eagerMarker of ['ServerboundLoadingScreenPacketType.EndLoadingScreen', 'SET_LOCAL_PLAYER_AS_INITIALIZED']) {
+    if (playerSpawn.includes(eagerMarker)) throw new Error(`JoinPackets still exposes the Realm before Java terrain readiness: ${eagerMarker}`)
+  }
+
+  const unhandledSource = fs.readFileSync(path.join(patchRoot, 'UnhandledPackets.java'), 'utf8')
+  for (const marker of [
+    'registerServerbound(ServerboundPackets26_1.PLAYER_LOADED, null',
+    'clientPlayer.handleInitialJavaPlayerLoaded()'
+  ]) {
+    if (!unhandledSource.includes(marker)) throw new Error(`UnhandledPackets is missing guarded PLAYER_LOADED marker: ${marker}`)
+  }
+  if (unhandledSource.includes('cancelServerbound(ServerboundPackets26_1.PLAYER_LOADED)')) {
+    throw new Error('UnhandledPackets still overrides the guarded PLAYER_LOADED handler with a cancellation')
+  }
+
+  const playerSource = fs.readFileSync(path.join(patchRoot, 'ClientPlayerEntity.java'), 'utf8')
+  for (const marker of [
+    'private boolean initialJavaPlayerLoadedReceived',
+    'private boolean initialWorldJoinFinished',
+    'public void handleInitialJavaPlayerLoaded()',
+    'public void tryFinishInitialWorldJoin()',
+    'this.javaGameMode == GameMode.SPECTATOR',
+    'this.isDead()',
+    'chunkTracker.isOutsideWorldHeight(this.position)',
+    'chunkTracker.isInitialPlayerJoinTerrainReady(this.position)',
+    'ServerboundLoadingScreenPacketType.EndLoadingScreen',
+    'ServerboundBedrockPackets.SET_LOCAL_PLAYER_AS_INITIALIZED'
+  ]) {
+    if (!playerSource.includes(marker)) throw new Error(`ClientPlayerEntity is missing initial-join marker: ${marker}`)
+  }
+  if ((playerSource.match(/ServerboundBedrockPackets\.SET_LOCAL_PLAYER_AS_INITIALIZED/g) || []).length !== 1) {
+    throw new Error('ClientPlayerEntity must have exactly one initial-world initialization send site')
+  }
+  const latchIndex = playerSource.indexOf('this.initialWorldJoinFinished = true')
+  const ackIndex = playerSource.indexOf('ServerboundBedrockPackets.SET_LOCAL_PLAYER_AS_INITIALIZED')
+  if (latchIndex < 0 || ackIndex < 0 || latchIndex > ackIndex) {
+    throw new Error('ClientPlayerEntity must latch exact-once completion before sending the Bedrock acknowledgement')
+  }
+
+  const chunkSource = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
+  for (const marker of [
+    'private static final int SUB_CHUNK_REQUESTS_PER_TICK = 64',
+    'private static final int MAX_PENDING_SUB_CHUNKS = 256',
+    'private final Long2ObjectMap<int[]> deferredInitialChunkSections',
+    'return chunkSection != null && !chunkSection.hasPendingBlockUpdates()',
+    'this.sentChunks.contains(chunkKey)',
+    'initialPlayerSectionYs(playerPosition)',
+    'if (!entityTracker.getClientPlayer().isInitiallySpawned()) return true',
+    'if (entityTracker.getClientPlayer().isInitialWorldJoinFinished())',
+    'MAX_PENDING_SUB_CHUNKS - this.pendingSubChunks.size()',
+    'this.pendingSubChunks.remove(position)',
+    'this.pendingSubChunks.removeIf(position -> position.chunkX == chunkPos.chunkX()',
+    'entityTracker.getClientPlayer().tryFinishInitialWorldJoin()'
+  ]) {
+    if (!chunkSource.includes(marker)) throw new Error(`ChunkTracker is missing initial-join marker: ${marker}`)
+  }
+  const createStart = chunkSource.indexOf('public BedrockChunk createChunk')
+  const createEnd = chunkSource.indexOf('public void unloadChunk', createStart)
+  if (chunkSource.slice(createStart, createEnd).includes('loadedSubChunks.add')) {
+    throw new Error('ChunkTracker still marks preallocated placeholder sections as loaded')
+  }
+  const mergeStart = chunkSource.indexOf('public boolean mergeSubChunk')
+  const mergeEnd = chunkSource.indexOf('public IntObjectPair<BlockEntity> handleBlockChange', mergeStart)
+  const mergeSource = chunkSource.slice(mergeStart, mergeEnd)
+  if (mergeSource.indexOf('section.applyPendingBlockUpdates') > mergeSource.indexOf('this.loadedSubChunks.add(position)')) {
+    throw new Error('ChunkTracker marks a subchunk loaded before its successful merge is resolved')
+  }
+  const tickStart = chunkSource.indexOf('public void tick()')
+  const tickEnd = chunkSource.indexOf('private Chunk remapChunk', tickStart)
+  if (chunkSource.slice(tickStart, tickEnd).includes('while (!this.subChunkRequests.isEmpty())')) {
+    throw new Error('ChunkTracker still drains the entire requested terrain set in one tick')
+  }
+
+  const entitySource = fs.readFileSync(path.join(patchRoot, 'EntityPackets.java'), 'utf8')
+  const deltaStart = entitySource.indexOf('ClientboundBedrockPackets.MOVE_ENTITY_DELTA')
+  const deltaEnd = entitySource.indexOf('ClientboundBedrockPackets.SET_ENTITY_MOTION', deltaStart)
+  const deltaSource = entitySource.slice(deltaStart, deltaEnd)
+  if ((deltaSource.match(/BedrockTypes\.UNSIGNED_VAR_LONG/g) || []).length !== 1) {
+    throw new Error('Pinned Bedrock 1.26.45 MOVE_ENTITY_DELTA must read only its runtime id, not a newer trailing tick')
+  }
+  for (const marker of ['final boolean hasX', 'final boolean hasY', 'final boolean hasZ', '// force completion']) {
+    if (!deltaSource.includes(marker)) throw new Error(`MOVE_ENTITY_DELTA is missing pinned-schema marker: ${marker}`)
+  }
+
+  for (const classPath of [
+    'net/raphimc/viabedrock/protocol/packet/JoinPackets.class',
+    'net/raphimc/viabedrock/protocol/packet/JoinPackets$1.class',
+    'net/raphimc/viabedrock/protocol/packet/JoinPackets$2.class',
+    'net/raphimc/viabedrock/protocol/packet/JoinPackets$3.class'
+  ]) {
+    if (!CLASS_RELATIVE_PATHS.includes(classPath)) throw new Error(`initial-join patch class is not registered: ${classPath}`)
+  }
+  if (!PATCH_SOURCE_RELATIVE_PATHS.includes('JoinPackets.java')) {
+    throw new Error('JoinPackets.java is not registered in the ViaBedrock patch source set')
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-initial-join-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const smokeSource = path.join(packageDir, 'InitialJoinSectionSmoke.java')
+    fs.writeFileSync(smokeSource, `
+package net.raphimc.viabedrock.protocol.storage;
+
+import net.raphimc.viabedrock.api.chunk.section.BedrockChunkSection;
+import net.raphimc.viabedrock.api.chunk.section.BedrockChunkSectionImpl;
+
+public final class InitialJoinSectionSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        final BedrockChunkSection placeholder = new BedrockChunkSectionImpl();
+        check(!ChunkTracker.isResolvedInitialJoinSection(placeholder),
+                "a preallocated request placeholder must not unlock the join");
+
+        final BedrockChunkSection omittedKnownAir = new BedrockChunkSectionImpl(true);
+        check(ChunkTracker.isResolvedInitialJoinSection(omittedKnownAir),
+                "an omitted known-air section must be considered resolved");
+
+        final BedrockChunkSection successAllAir = new BedrockChunkSectionImpl();
+        successAllAir.mergeWith(new BedrockChunkSectionImpl());
+        successAllAir.applyPendingBlockUpdates(0);
+        check(ChunkTracker.isResolvedInitialJoinSection(successAllAir),
+                "a successful all-air subchunk response must unlock readiness");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, smokeSource])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.InitialJoinSectionSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+
+  const playerBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/api/model/entity/ClientPlayerEntity.class'
+  )]).stdout
+  for (const marker of ['handleInitialJavaPlayerLoaded', 'tryFinishInitialWorldJoin', 'isInitialPlayerJoinTerrainReady']) {
+    if (!playerBytecode.includes(marker)) throw new Error(`compiled initial-join lifecycle is missing bytecode marker: ${marker}`)
   }
 }
 
@@ -1377,10 +1568,12 @@ assertModernMobArmorEquipmentCodec()
 assertCanonicalInventoryInteractionState()
 assertChunkLifecycleFixes()
 assertMissingBlockStateWarningDedupe()
+assertAggregatedStartupBlockStateMappingWarnings()
 assertBedrockBlockStateCompatibility()
 assertMovementCorrectionRebase()
 assertAssignedLocalPlayerEntityId()
 assertSubChunkRequestWireLayout()
+assertInitialJoinReadinessLifecycle()
 assertDoubleChestUpgrade()
 assertGenericStorageLifecycle()
 assertAuthoritativeContainerSlotCodec()

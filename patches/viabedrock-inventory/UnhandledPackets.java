@@ -12,6 +12,7 @@ import com.viaversion.viaversion.protocols.v1_21_7to1_21_9.packet.ServerboundCon
 import java.util.logging.Level;
 import net.raphimc.viabedrock.ViaBedrock;
 import net.raphimc.viabedrock.api.chunk.BedrockBlockEntity;
+import net.raphimc.viabedrock.api.model.entity.ClientPlayerEntity;
 import net.raphimc.viabedrock.api.model.container.ChestContainer;
 import net.raphimc.viabedrock.api.model.container.Container;
 import net.raphimc.viabedrock.api.model.container.player.InventoryContainer;
@@ -22,6 +23,7 @@ import net.raphimc.viabedrock.protocol.ClientboundBedrockPackets;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
 import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
 import net.raphimc.viabedrock.protocol.storage.ChunkTracker;
+import net.raphimc.viabedrock.protocol.storage.EntityTracker;
 import net.raphimc.viabedrock.protocol.storage.InventoryTracker;
 import net.raphimc.viabedrock.protocol.storage.RecipeBookTracker;
 import net.raphimc.viabedrock.protocol.storage.ResourcePackStorage;
@@ -136,6 +138,14 @@ public class UnhandledPackets {
             RecipeBookTracker.get(wrapper.user()).handlePlaceRecipe(containerId, displayId, useMaxItems);
         });
 
+        protocol.registerServerbound(ServerboundPackets26_1.PLAYER_LOADED, null, wrapper -> {
+            wrapper.cancel();
+            final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
+            if (entityTracker == null) return;
+            final ClientPlayerEntity clientPlayer = entityTracker.getClientPlayer();
+            if (clientPlayer != null) clientPlayer.handleInitialJavaPlayerLoaded();
+        });
+
         protocol.cancelClientbound(ClientboundBedrockPackets.SET_HEALTH);
         protocol.cancelClientbound(ClientboundBedrockPackets.CAMERA);
         protocol.cancelClientbound(ClientboundBedrockPackets.PHOTO_TRANSFER);
@@ -165,7 +175,6 @@ public class UnhandledPackets {
         protocol.cancelServerbound(ServerboundPackets26_1.COOKIE_RESPONSE);
         protocol.cancelServerbound(ServerboundPackets26_1.DEBUG_SUBSCRIPTION_REQUEST);
         protocol.cancelServerbound(ServerboundPackets26_1.KEEP_ALIVE);
-        protocol.cancelServerbound(ServerboundPackets26_1.PLAYER_LOADED);
         protocol.cancelServerbound(ServerboundPackets26_1.RECIPE_BOOK_CHANGE_SETTINGS);
         protocol.cancelServerbound(ServerboundPackets26_1.RECIPE_BOOK_SEEN_RECIPE);
         protocol.cancelServerbound(ServerboundPackets26_1.SET_TEST_BLOCK);

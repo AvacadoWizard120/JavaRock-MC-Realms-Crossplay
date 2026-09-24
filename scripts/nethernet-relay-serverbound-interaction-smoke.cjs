@@ -202,6 +202,9 @@ function makeRelayPlayerHarness (queueImpl) {
       queued.push({ name, params })
     })
   }
+  // These interaction fixtures exercise the steady-state PLAY path. Initial
+  // join movement buffering has its own lifecycle smoke coverage.
+  relayPlayer.upstreamPlayerInitializedSent = true
   relayPlayer.pendingBridgeToRealmItemStackRequests = new Map()
   relayPlayer.pendingBridgeSyntheticItemStackPlaces = new Map()
   relayPlayer.pendingBridgeCursorDependentTakeRequests = new Map()

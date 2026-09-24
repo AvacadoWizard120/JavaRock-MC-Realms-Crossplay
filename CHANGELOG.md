@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.107 - 2026-09-24
+
+- Initial joins now follow Minecraft Java Edition's own terrain-readiness lifecycle. Loading Terrain remains active until the current player chunk has resolved sections at the camera, feet, and floor, and JavaRock acknowledges the Realm only after Java reports that terrain ready. A failed join closes cleanly before Java's 30-second fallback can expose the void.
+- Spawn terrain requests are paced and prioritized around the player, stale requests are cleared, pre-spawn chunks are rebuilt after the final spawn position is known, and queued entity movement is compacted without crossing absolute-motion boundaries. This prevents startup translation stalls from freezing animals or suppressing their derived walking animation.
+- Missing block-state mappings now produce one bounded startup summary instead of hundreds of synchronous warning lines.
+- Support uploads now include the active profile name and may include an optional note entered in the launcher. Sample-limit messages report the exact file or byte cap reached and make clear that omitted captures remain in the local packet-census folder.
+
 ## 0.3.106 - 2026-09-23
 
 - Respawning now rebuilds every cached mob immediately, including idle animals, and duplicate entity refreshes no longer remove their own replacement tracker entry.

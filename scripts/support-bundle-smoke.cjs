@@ -14,6 +14,10 @@ const census = path.join(fixture, 'packet-census')
 const output = path.join(runtime, 'support-bundles')
 const resultFile = path.join(runtime, 'result.json')
 const extracted = path.join(fixture, 'extracted')
+const rawProfileName = `Creative\u0007Test Profile ${'P'.repeat(300)}`
+const expectedProfileName = `Creative Test Profile ${'P'.repeat(300)}`.slice(0, 256)
+const rawSupportNote = `DO-NOT-LOG\u0007 Oak log broke, returned, then the client disconnected.\n${'N'.repeat(4100)}`
+const expectedSupportNote = `DO-NOT-LOG Oak log broke, returned, then the client disconnected.\n${'N'.repeat(4100)}`.slice(0, 4000)
 
 function write (file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -92,9 +96,18 @@ try {
   ], {
     cwd: root,
     encoding: 'utf8',
-    windowsHide: true
+    windowsHide: true,
+    env: {
+      ...process.env,
+      JAVAROCK_SUPPORT_PROFILE_NAME: rawProfileName,
+      JAVAROCK_SUPPORT_NOTE: rawSupportNote
+    }
   })
   assert.strictEqual(run.status, 0, `${run.stdout || ''}${run.stderr || ''}`)
+  assert.match(run.stdout, /Selected 3 of 4 referenced redacted packet sample\(s\) for this support ZIP/)
+  assert.match(run.stdout, /Omitted 1 from this bounded ZIP copy \(1 after the 3-file ZIP cap\); the original captures remain in packet-census/)
+  assert(!run.stdout.includes('DO-NOT-LOG'))
+  assert(!run.stderr.includes('DO-NOT-LOG'))
 
   const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'))
   assert.strictEqual(result.success, true)
@@ -109,6 +122,8 @@ try {
   assert.strictEqual(result.uploadConfirmed, false)
   assert.match(result.uploadId, /^[0-9a-f-]{36}$/)
   assert(fs.existsSync(result.bundlePath))
+  assert(!path.basename(result.bundlePath).includes('Creative Test Profile'))
+  assert(!JSON.stringify(result).includes('DO-NOT-LOG'))
 
   const expand = spawnSync('powershell.exe', [
     '-NoLogo',
@@ -129,6 +144,7 @@ try {
 
   const expected = [
     'manifest.json',
+    'support-report.json',
     'system-info.json',
     'packet-census/run-summary-run-1.json',
     'packet-census/events-run-1.jsonl',
@@ -184,12 +200,96 @@ try {
   assert(!activeEvents.includes('PrivateName'))
   assert(activeEvents.includes('resource_packs_info'))
 
+  const supportReport = JSON.parse(fs.readFileSync(path.join(extracted, 'support-report.json'), 'utf8'))
+  assert.strictEqual(supportReport.format, 1)
+  assert.strictEqual(supportReport.active_profile_name, expectedProfileName)
+  assert.strictEqual(supportReport.active_profile_name.length, 256)
+  assert.strictEqual(supportReport.note, expectedSupportNote)
+  assert.strictEqual(supportReport.note.length, 4000)
+  assert(!/[\u0000-\u001f\u007f]/.test(supportReport.active_profile_name))
+  assert(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(supportReport.note))
+
+  const manifestText = fs.readFileSync(path.join(extracted, 'manifest.json'), 'utf8')
+  assert(!manifestText.includes('Creative Test Profile'))
+  assert(!manifestText.includes('DO-NOT-LOG'))
+
+  const blankResultFile = path.join(runtime, 'blank-result.json')
+  const blankOutput = path.join(runtime, 'blank-support-bundles')
+  const blankExtracted = path.join(fixture, 'blank-extracted')
+  const blankRun = spawnSync('powershell.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    script,
+    '-ProjectRoot',
+    fixture,
+    '-RuntimeDirectory',
+    runtime,
+    '-OutputDirectory',
+    blankOutput,
+    '-ResultFile',
+    blankResultFile,
+    '-MaxPacketSampleFiles',
+    '10',
+    '-MaxPacketSampleBytes',
+    '100',
+    '-MaxPacketSampleFileBytes',
+    '75',
+    '-NoUpload'
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+    env: {
+      ...process.env,
+      JAVAROCK_SUPPORT_PROFILE_NAME: 'Blank Note Profile',
+      JAVAROCK_SUPPORT_NOTE: '   '
+    }
+  })
+  assert.strictEqual(blankRun.status, 0, `${blankRun.stdout || ''}${blankRun.stderr || ''}`)
+  assert.match(blankRun.stdout, /Selected 1 of 4 referenced redacted packet sample\(s\) for this support ZIP/)
+  assert.match(blankRun.stdout, /Omitted 3 from this bounded ZIP copy \(2 over the 75-byte per-file cap; 1 beyond the 100-byte total sample budget\)/)
+  const blankResult = JSON.parse(fs.readFileSync(blankResultFile, 'utf8'))
+  const blankExpand = spawnSync('powershell.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-Command',
+    'Expand-Archive -LiteralPath $env:JAVAROCK_TEST_ZIP -DestinationPath $env:JAVAROCK_TEST_EXTRACT -Force'
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+    env: {
+      ...process.env,
+      JAVAROCK_TEST_ZIP: blankResult.bundlePath,
+      JAVAROCK_TEST_EXTRACT: blankExtracted
+    }
+  })
+  assert.strictEqual(blankExpand.status, 0, `${blankExpand.stdout || ''}${blankExpand.stderr || ''}`)
+  const blankSupportReport = JSON.parse(fs.readFileSync(path.join(blankExtracted, 'support-report.json'), 'utf8'))
+  assert.strictEqual(blankSupportReport.active_profile_name, 'Blank Note Profile')
+  assert.strictEqual(Object.hasOwn(blankSupportReport, 'note'), false, 'a blank upload note should be omitted')
+  const blankSystemInfo = JSON.parse(fs.readFileSync(path.join(blankExtracted, 'system-info.json'), 'utf8'))
+  assert.strictEqual(blankSystemInfo.redacted_packet_samples_included, 1)
+  assert.strictEqual(blankSystemInfo.redacted_packet_samples_skipped, 3)
+  assert.strictEqual(blankSystemInfo.redacted_packet_samples_omitted_by_file_limit, 0)
+  assert.strictEqual(blankSystemInfo.redacted_packet_samples_omitted_by_per_file_limit, 2)
+  assert.strictEqual(blankSystemInfo.redacted_packet_samples_omitted_by_total_byte_limit, 1)
+
   const systemInfo = JSON.parse(fs.readFileSync(path.join(extracted, 'system-info.json'), 'utf8'))
   assert.strictEqual(systemInfo.redacted_packet_sample_candidates, 4)
   assert.strictEqual(systemInfo.redacted_packet_samples_included, 3)
   assert(systemInfo.redacted_packet_sample_bytes_included > 0)
   assert(systemInfo.redacted_packet_sample_bytes_included <= 1024)
   assert.strictEqual(systemInfo.redacted_packet_samples_skipped, 1)
+  assert.strictEqual(systemInfo.redacted_packet_samples_omitted_by_file_limit, 1)
+  assert.strictEqual(systemInfo.redacted_packet_samples_omitted_by_per_file_limit, 0)
+  assert.strictEqual(systemInfo.redacted_packet_samples_omitted_by_total_byte_limit, 0)
+  assert.strictEqual(systemInfo.redacted_packet_sample_file_limit, 3)
+  assert.strictEqual(systemInfo.redacted_packet_sample_per_file_byte_limit, 512)
+  assert.strictEqual(systemInfo.redacted_packet_sample_total_byte_limit, 1024)
   assert.strictEqual(systemInfo.raw_packet_journals_included, false)
   const localJava = spawnSync('java.exe', ['-version'], { encoding: 'utf8', windowsHide: true })
   if (localJava.status === 0) assert(!String(systemInfo.java).startsWith('unavailable:'), 'java -version stderr should still be captured')
