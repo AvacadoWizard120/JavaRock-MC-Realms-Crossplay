@@ -568,6 +568,7 @@ $script:Profiles = @()
 $script:SelectedProfileId = ''
 $script:Realms = @()
 $script:BridgeProcess = $null
+$script:LastBridgeProfileName = ''
 $script:RealmProcess = $null
 $script:RealmRefreshStartedAt = $null
 $script:RealmRefreshTimeoutMs = 130000
@@ -1202,6 +1203,7 @@ function Start-BridgeOrRecorder {
     Reset-LogCursor 'bridge-err'
     try {
         $script:BridgeProcess = Start-RedirectedProcess -FilePath 'powershell.exe' -Arguments $arguments -StdoutPath $StdoutLog -StderrPath $StderrLog -Environment $environment
+        $script:LastBridgeProfileName = [string]$profile.Name
         Add-Log 'gui' "Started $(if ($recorder) { 'Bedrock packet recorder' } else { 'ViaBedrock relay' }) with $(Get-ProfileLabel $profile)."
         Add-Log 'gui' "powershell.exe $(Join-NativeArguments $arguments)"
         Update-TopStatus 'starting'
@@ -1627,6 +1629,102 @@ function Set-SupportUploadDestination {
     }
 }
 
+function Show-SupportBundlePrompt {
+    param([bool]$UploadConfigured)
+
+    $descriptionText = "This creates a ZIP containing JavaRock logs, the active packet census run, and up to three completed packet census runs.`r`n`r`nMicrosoft sign-in caches, .env files, raw packet journals, and the binary packet ledger are excluded. The JavaRock profile name for this session is included. Packet census data can still describe player and world activity."
+    if (-not $UploadConfigured) {
+        $answer = [Windows.Forms.MessageBox]::Show(
+            "$descriptionText`r`n`r`nCreate the support ZIP?",
+            'Create JavaRock support ZIP',
+            [Windows.Forms.MessageBoxButtons]::YesNo,
+            [Windows.Forms.MessageBoxIcon]::Information,
+            [Windows.Forms.MessageBoxDefaultButton]::Button1
+        )
+        return [pscustomobject]@{
+            Confirmed = $answer -eq [Windows.Forms.DialogResult]::Yes
+            Note = ''
+        }
+    }
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = 'Create and upload JavaRock support ZIP'
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = [Windows.Forms.FormBorderStyle]::FixedDialog
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ClientSize = New-Object Drawing.Size(610, 390)
+    $dialog.Font = $form.Font
+
+    $description = New-Object System.Windows.Forms.Label
+    $description.Text = $descriptionText
+    $description.Location = New-Object Drawing.Point(16, 15)
+    $description.Size = New-Object Drawing.Size(575, 118)
+    $dialog.Controls.Add($description)
+
+    $noteLabel = New-Object System.Windows.Forms.Label
+    $noteLabel.Text = 'Optional note for this upload'
+    $noteLabel.Location = New-Object Drawing.Point(16, 140)
+    $noteLabel.AutoSize = $true
+    $dialog.Controls.Add($noteLabel)
+
+    $noteHint = New-Object System.Windows.Forms.Label
+    $noteHint.Text = 'Describe what happened or what you were doing. Leave this blank to send no note.'
+    $noteHint.Location = New-Object Drawing.Point(16, 163)
+    $noteHint.Size = New-Object Drawing.Size(575, 34)
+    $dialog.Controls.Add($noteHint)
+
+    $noteField = New-Object System.Windows.Forms.TextBox
+    $noteField.Location = New-Object Drawing.Point(16, 198)
+    $noteField.Size = New-Object Drawing.Size(575, 125)
+    $noteField.Multiline = $true
+    $noteField.AcceptsReturn = $true
+    $noteField.ScrollBars = [Windows.Forms.ScrollBars]::Vertical
+    $noteField.MaxLength = 4000
+    $dialog.Controls.Add($noteField)
+
+    $createButton = New-Object System.Windows.Forms.Button
+    $createButton.Text = 'Create && Upload'
+    $createButton.Location = New-Object Drawing.Point(380, 340)
+    $createButton.Size = New-Object Drawing.Size(120, 31)
+    $createButton.DialogResult = [Windows.Forms.DialogResult]::OK
+    $dialog.Controls.Add($createButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = 'Cancel'
+    $cancelButton.Location = New-Object Drawing.Point(506, 340)
+    $cancelButton.Size = New-Object Drawing.Size(85, 31)
+    $cancelButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
+    $dialog.Controls.Add($cancelButton)
+    $dialog.AcceptButton = $createButton
+    $dialog.CancelButton = $cancelButton
+
+    if ($script:DarkMode) {
+        $dialog.BackColor = [Drawing.Color]::FromArgb(32, 35, 40)
+        foreach ($label in @($description, $noteLabel, $noteHint)) {
+            $label.ForeColor = [Drawing.Color]::FromArgb(230, 232, 235)
+        }
+        $noteField.BackColor = [Drawing.Color]::FromArgb(51, 55, 61)
+        $noteField.ForeColor = [Drawing.Color]::FromArgb(198, 203, 211)
+        [void][JavaRockNativeWindow]::SetWindowTheme($noteField.Handle, 'DarkMode_Explorer', $null)
+        foreach ($button in @($createButton, $cancelButton)) {
+            $button.FlatStyle = [Windows.Forms.FlatStyle]::Flat
+            $button.BackColor = [Drawing.Color]::FromArgb(43, 47, 53)
+            $button.ForeColor = [Drawing.Color]::FromArgb(230, 232, 235)
+            $button.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(76, 82, 91)
+        }
+        [JavaRockNativeWindow]::SetImmersiveDarkMode($dialog.Handle, $true)
+    }
+
+    $result = $dialog.ShowDialog($form)
+    $note = if ($result -eq [Windows.Forms.DialogResult]::OK) { $noteField.Text.Trim() } else { '' }
+    $dialog.Dispose()
+    return [pscustomobject]@{
+        Confirmed = $result -eq [Windows.Forms.DialogResult]::OK
+        Note = $note
+    }
+}
+
 function Start-SupportBundle {
     if ($null -ne $script:SupportProcess -and -not $script:SupportProcess.HasExited) {
         Add-Log 'support' 'A support ZIP is already being created.'
@@ -1642,14 +1740,11 @@ function Start-SupportBundle {
         return
     }
 
-    $answer = [Windows.Forms.MessageBox]::Show(
-        "This creates a ZIP containing JavaRock logs, the active packet census run, and up to three completed packet census runs.`r`n`r`nMicrosoft sign-in caches, .env files, raw packet journals, and the binary packet ledger are excluded. Packet census data can still describe player and world activity.`r`n`r`nCreate the support ZIP?",
-        'Create JavaRock support ZIP',
-        [Windows.Forms.MessageBoxButtons]::YesNo,
-        [Windows.Forms.MessageBoxIcon]::Information,
-        [Windows.Forms.MessageBoxDefaultButton]::Button1
-    )
-    if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+    $httpDestination = $script:SupportUploadDestination -match '^https?://'
+    $uploadConfigured = $script:SupportUploadDestination -and (-not $httpDestination -or $script:SupportUploadToken)
+    $prompt = Show-SupportBundlePrompt -UploadConfigured ([bool]$uploadConfigured)
+    if (-not $prompt.Confirmed) { return }
+    $supportNote = [string]$prompt.Note
 
     if (Test-Path -LiteralPath $SupportResultFile -PathType Leaf) { Remove-Item -LiteralPath $SupportResultFile -Force }
     Reset-LogCursor 'support-out'
@@ -1661,12 +1756,24 @@ function Start-SupportBundle {
         '-RuntimeDirectory', $RuntimeDir,
         '-ResultFile', $SupportResultFile
     )
-    $supportEnvironment = @{}
-    $httpDestination = $script:SupportUploadDestination -match '^https?://'
-    $uploadConfigured = $script:SupportUploadDestination -and (-not $httpDestination -or $script:SupportUploadToken)
+    # Always override these reserved variables, including with an empty value,
+    # so a value inherited by the GUI cannot silently enter a later bundle.
+    $supportEnvironment = @{
+        JAVAROCK_SUPPORT_PROFILE_NAME = ''
+        JAVAROCK_SUPPORT_NOTE = ''
+    }
+    $supportProfileName = [string]$script:LastBridgeProfileName
+    if (-not $supportProfileName) {
+        $profile = Get-CurrentProfile
+        if ($null -ne $profile) { $supportProfileName = [string]$profile.Name }
+    }
+    if ($supportProfileName) {
+        $supportEnvironment['JAVAROCK_SUPPORT_PROFILE_NAME'] = $supportProfileName
+    }
     if ($uploadConfigured) {
         $arguments += @('-UploadDestination', $script:SupportUploadDestination)
         if ($script:SupportUploadToken) { $supportEnvironment['JAVAROCK_SUPPORT_UPLOAD_TOKEN'] = $script:SupportUploadToken }
+        if ($supportNote) { $supportEnvironment['JAVAROCK_SUPPORT_NOTE'] = $supportNote }
     } elseif ($httpDestination) {
         Add-Log 'support' 'No support access code is saved. This ZIP will stay on this computer; open Diagnostics > Support upload settings to connect the inbox.'
     }
@@ -1793,6 +1900,7 @@ $accountCombo.Add_SelectedIndexChanged({
     if ($accountCombo.SelectedIndex -ge 0 -and $accountCombo.SelectedIndex -lt $script:Profiles.Count) {
         $selected = $script:Profiles[$accountCombo.SelectedIndex].Id
         if ($selected -ne $script:SelectedProfileId) {
+            if (-not (Test-BridgeActivity)) { $script:LastBridgeProfileName = '' }
             $script:SelectedProfileId = $selected
             Save-ProfileStore
             Set-RealmChoices @()

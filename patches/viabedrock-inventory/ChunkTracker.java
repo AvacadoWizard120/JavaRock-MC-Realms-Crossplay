@@ -53,6 +53,7 @@ import net.raphimc.viabedrock.api.chunk.datapalette.BedrockBlockArray;
 import net.raphimc.viabedrock.api.chunk.datapalette.BedrockDataPalette;
 import net.raphimc.viabedrock.api.chunk.section.BedrockChunkSection;
 import net.raphimc.viabedrock.api.chunk.section.BedrockChunkSectionImpl;
+import net.raphimc.viabedrock.api.model.entity.ClientPlayerEntity;
 import net.raphimc.viabedrock.api.model.BedrockBlockState;
 import net.raphimc.viabedrock.api.model.BlockState;
 import net.raphimc.viabedrock.api.util.PacketFactory;
@@ -70,7 +71,6 @@ import net.raphimc.viabedrock.protocol.types.BedrockTypes;
 
 import java.util.*;
 import java.util.logging.Level;
-import java.util.stream.Collectors;
 
 public class ChunkTracker extends StoredObject {
 
@@ -79,6 +79,8 @@ public class ChunkTracker extends StoredObject {
     private static final int SKY_LIGHT_DOMAIN_MARGIN = 1;
     private static final int SKY_LIGHT_DOMAIN_WIDTH = 16 + (SKY_LIGHT_DOMAIN_MARGIN * 2);
     private static final float PLAYER_EYE_HEIGHT = 1.62F;
+    private static final int SUB_CHUNK_REQUESTS_PER_TICK = 64;
+    private static final int MAX_PENDING_SUB_CHUNKS = 256;
     private static final String[] HORIZONTAL_DIRECTIONS = {"north", "east", "south", "west"};
     private static final int[] HORIZONTAL_X = {0, 1, 0, -1};
     private static final int[] HORIZONTAL_Z = {-1, 0, 1, 0};
@@ -95,6 +97,7 @@ public class ChunkTracker extends StoredObject {
     private final Long2ObjectMap<BedrockChunk> chunks = new Long2ObjectOpenHashMap<>();
     private final LongSet dirtyChunks = new LongOpenHashSet();
     private final LongSet sentChunks = new LongOpenHashSet();
+    private final Long2ObjectMap<int[]> deferredInitialChunkSections = new Long2ObjectOpenHashMap<>();
     private final Long2ObjectMap<BlockLightData> blockLightCache = new Long2ObjectOpenHashMap<>();
     private final Long2ObjectMap<BlockLightData> skyLightCache = new Long2ObjectOpenHashMap<>();
     private final Long2ObjectMap<Set<BlockPosition>> pendingItemFramesByChunk = new Long2ObjectOpenHashMap<>();
@@ -164,7 +167,6 @@ public class ChunkTracker extends StoredObject {
         final BedrockChunk chunk = new BedrockChunk(chunkX, chunkZ, new BedrockChunkSection[this.worldHeight >> 4]);
         for (int i = 0; i < nonNullSectionCount && i < chunk.getSections().length; i++) {
             chunk.getSections()[i] = new BedrockChunkSectionImpl();
-            this.loadedSubChunks.add(new SubChunkPosition(chunkX, (this.minY >> 4) + i, chunkZ));
         }
         for (int i = 0; i < chunk.getSections().length; i++) {
             if (chunk.getSections()[i] == null) {
@@ -179,9 +181,12 @@ public class ChunkTracker extends StoredObject {
     public void unloadChunk(final ChunkPosition chunkPos) {
         this.chunks.remove(chunkPos.chunkKey());
         this.sentChunks.remove(chunkPos.chunkKey());
+        this.deferredInitialChunkSections.remove(chunkPos.chunkKey());
         this.invalidateBlockLightAround(chunkPos.chunkX(), chunkPos.chunkZ());
         this.markLoadedChunksDirtyAround(chunkPos.chunkX(), chunkPos.chunkZ(), false);
         this.user().get(EntityTracker.class).removeItemFrame(chunkPos);
+        this.subChunkRequests.removeIf(position -> position.chunkX == chunkPos.chunkX() && position.chunkZ == chunkPos.chunkZ());
+        this.pendingSubChunks.removeIf(position -> position.chunkX == chunkPos.chunkX() && position.chunkZ == chunkPos.chunkZ());
         this.loadedSubChunks.removeIf(position -> position.chunkX == chunkPos.chunkX() && position.chunkZ == chunkPos.chunkZ());
         this.pendingItemFramesByChunk.remove(chunkPos.chunkKey());
         this.spawnedItemFrames.removeIf(position -> (position.x() >> 4) == chunkPos.chunkX() && (position.z() >> 4) == chunkPos.chunkZ());
@@ -325,10 +330,35 @@ public class ChunkTracker extends StoredObject {
     }
 
     private boolean isSubChunkReady(final int chunkX, final int subChunkY, final int chunkZ) {
+        final BedrockChunk chunk = this.getChunk(chunkX, chunkZ);
+        if (chunk == null) return false;
         final BedrockChunkSection chunkSection = this.getChunkSection(chunkX, subChunkY, chunkZ);
         if (chunkSection == null) return false;
-        return this.loadedSubChunks.contains(new SubChunkPosition(chunkX, subChunkY, chunkZ))
-                && !chunkSection.hasPendingBlockUpdates();
+
+        // createChunk uses a section with pending updates as the unresolved
+        // placeholder for both full-chunk parsing and requested subchunks. A
+        // section constructed with no pending updates is a resolved, omitted
+        // (known-air) section. This distinction is what lets all-air responses
+        // become ready without mistaking request placeholders for terrain.
+        return isResolvedInitialJoinSection(chunkSection);
+    }
+
+    static boolean isResolvedInitialJoinSection(final BedrockChunkSection chunkSection) {
+        return chunkSection != null && !chunkSection.hasPendingBlockUpdates();
+    }
+
+    public boolean isInitialPlayerJoinTerrainReady(final Position3f playerPosition) {
+        if (this.isOutsideWorldHeight(playerPosition)) return true;
+        final int chunkX = (int) Math.floor(playerPosition.x()) >> 4;
+        final int chunkZ = (int) Math.floor(playerPosition.z()) >> 4;
+        final long chunkKey = ChunkPosition.chunkKey(chunkX, chunkZ);
+        return this.sentChunks.contains(chunkKey)
+                && this.areInitialPlayerSectionsReady(chunkX, chunkZ, initialPlayerSectionYs(playerPosition));
+    }
+
+    public boolean isOutsideWorldHeight(final Position3f playerPosition) {
+        final int eyeY = (int) Math.floor(playerPosition.y());
+        return eyeY < this.minY || eyeY >= this.minY + this.worldHeight;
     }
 
     public boolean isInLoadDistance(final int chunkX, final int chunkZ) {
@@ -368,7 +398,12 @@ public class ChunkTracker extends StoredObject {
 
     public void requestSubChunk(final int chunkX, final int subChunkY, final int chunkZ) {
         if (!this.isInLoadDistance(chunkX, chunkZ)) return;
-        this.subChunkRequests.add(new SubChunkPosition(chunkX, subChunkY, chunkZ));
+        final SubChunkPosition position = new SubChunkPosition(chunkX, subChunkY, chunkZ);
+        // This method is also the WorldPackets retry path for unavailable/error
+        // responses. Free the old in-flight slot before requeueing it so the
+        // bounded pending window cannot deadlock after 256 failures.
+        this.pendingSubChunks.remove(position);
+        this.subChunkRequests.add(position);
     }
 
     public boolean mergeSubChunk(final int chunkX, final int subChunkY, final int chunkZ, final BedrockChunkSection other, final List<BedrockBlockEntity> blockEntities) {
@@ -501,6 +536,20 @@ public class ChunkTracker extends StoredObject {
         }
         final long chunkKey = ChunkPosition.chunkKey(chunkX, chunkZ);
         final boolean firstSend = !this.sentChunks.contains(chunkKey);
+        if (firstSend && this.shouldDeferInitialPlayerChunkSend(chunkX, chunkZ)) {
+            // Vanilla only leaves LevelLoadTracker after the player's compiled
+            // section callback. Never let a request-mode placeholder (or a
+            // pre-PlayerSpawn full chunk) become that first compiled section.
+            // A later successful subchunk merge marks the chunk dirty again;
+            // tick() also schedules an already-complete full chunk immediately
+            // after PlayerSpawn has emitted LEVEL_CHUNKS_LOAD_START.
+            final ClientPlayerEntity clientPlayer = this.user().get(EntityTracker.class).getClientPlayer();
+            final int[] requiredSections = clientPlayer.isInitiallySpawned()
+                    ? initialPlayerSectionYs(clientPlayer.position())
+                    : new int[0];
+            this.deferredInitialChunkSections.put(chunkKey, requiredSections);
+            return;
+        }
         if (firstSend) this.invalidateBlockLightAround(chunkX, chunkZ);
 
         final Chunk remappedChunk = this.remapChunk(chunk);
@@ -525,7 +574,12 @@ public class ChunkTracker extends StoredObject {
         this.syncItemFramesAfterChunkSend(chunkKey, this.pendingItemFramesByChunk.remove(chunkKey));
         if (firstSend) {
             this.sentChunks.add(chunkKey);
+            this.deferredInitialChunkSections.remove(chunkKey);
             this.markLoadedChunksDirtyAround(chunkX, chunkZ, false);
+        }
+        final EntityTracker entityTracker = this.user().get(EntityTracker.class);
+        if (entityTracker != null && entityTracker.getClientPlayer() != null) {
+            entityTracker.getClientPlayer().tryFinishInitialWorldJoin();
         }
     }
 
@@ -558,6 +612,7 @@ public class ChunkTracker extends StoredObject {
 
     public void tick() {
         this.flushPendingDoorUpdates();
+        this.scheduleInitialPlayerChunkAfterSpawn();
 
         final long[] dirtyChunks = this.dirtyChunks.toLongArray();
         this.dirtyChunks.clear();
@@ -571,24 +626,112 @@ public class ChunkTracker extends StoredObject {
         }
 
         this.subChunkRequests.removeIf(s -> !this.isInLoadDistance(s.chunkX, s.chunkZ));
-        final BlockPosition basePosition = new BlockPosition(this.centerX, 0, this.centerZ);
-        while (!this.subChunkRequests.isEmpty()) {
-            final Set<SubChunkPosition> group = this.subChunkRequests.stream().limit(256).collect(Collectors.toSet());
-            this.subChunkRequests.removeAll(group);
-            this.pendingSubChunks.addAll(group);
+        final int availableRequestBudget = MAX_PENDING_SUB_CHUNKS - this.pendingSubChunks.size();
+        if (this.subChunkRequests.isEmpty() || availableRequestBudget <= 0) return;
 
-            final PacketWrapper subChunkRequest = PacketWrapper.create(ServerboundBedrockPackets.SUB_CHUNK_REQUEST, this.user());
-            subChunkRequest.write(BedrockTypes.VAR_INT, this.dimension.ordinal()); // dimension id
-            subChunkRequest.write(BedrockTypes.UNSIGNED_VAR_INT, group.size()); // sub chunk offset count
-            for (SubChunkPosition subChunkPosition : group) {
-                final BlockPosition offset = new BlockPosition(subChunkPosition.chunkX - basePosition.x(), subChunkPosition.subChunkY, subChunkPosition.chunkZ - basePosition.z());
-                subChunkRequest.write(BedrockTypes.SUB_CHUNK_OFFSET, offset); // offset
-            }
-            subChunkRequest.write(BedrockTypes.INT_LE, basePosition.x());
-            subChunkRequest.write(BedrockTypes.INT_LE, basePosition.y());
-            subChunkRequest.write(BedrockTypes.INT_LE, basePosition.z());
-            subChunkRequest.sendToServer(BedrockProtocol.class);
+        final BlockPosition basePosition = new BlockPosition(this.centerX, 0, this.centerZ);
+        final Position3f playerPosition = this.user().get(EntityTracker.class).getClientPlayer().position();
+        final int playerChunkX = (int) Math.floor(playerPosition.x()) >> 4;
+        final int playerChunkZ = (int) Math.floor(playerPosition.z()) >> 4;
+        final int playerFeetSectionY = (int) Math.floor(playerPosition.y() - PLAYER_EYE_HEIGHT) >> 4;
+        final List<SubChunkPosition> prioritized = new ArrayList<>(this.subChunkRequests);
+        prioritized.sort(Comparator
+                .comparingInt((SubChunkPosition position) -> Math.max(
+                        Math.abs(position.chunkX - playerChunkX),
+                        Math.abs(position.chunkZ - playerChunkZ)))
+                .thenComparingInt(position -> subChunkVerticalPriority(position.subChunkY, playerFeetSectionY))
+                .thenComparingInt(position -> Math.abs(position.chunkX - playerChunkX) + Math.abs(position.chunkZ - playerChunkZ))
+                .thenComparingInt(SubChunkPosition::chunkX)
+                .thenComparingInt(SubChunkPosition::subChunkY)
+                .thenComparingInt(SubChunkPosition::chunkZ));
+
+        final Set<SubChunkPosition> group = new LinkedHashSet<>(prioritized.subList(
+                0, Math.min(Math.min(SUB_CHUNK_REQUESTS_PER_TICK, availableRequestBudget), prioritized.size())));
+        this.subChunkRequests.removeAll(group);
+        this.pendingSubChunks.addAll(group);
+
+        final PacketWrapper subChunkRequest = PacketWrapper.create(ServerboundBedrockPackets.SUB_CHUNK_REQUEST, this.user());
+        subChunkRequest.write(BedrockTypes.VAR_INT, this.dimension.ordinal()); // dimension id
+        subChunkRequest.write(BedrockTypes.UNSIGNED_VAR_INT, group.size()); // sub chunk offset count
+        for (SubChunkPosition subChunkPosition : group) {
+            final BlockPosition offset = new BlockPosition(subChunkPosition.chunkX - basePosition.x(), subChunkPosition.subChunkY, subChunkPosition.chunkZ - basePosition.z());
+            subChunkRequest.write(BedrockTypes.SUB_CHUNK_OFFSET, offset); // offset
         }
+        subChunkRequest.write(BedrockTypes.INT_LE, basePosition.x());
+        subChunkRequest.write(BedrockTypes.INT_LE, basePosition.y());
+        subChunkRequest.write(BedrockTypes.INT_LE, basePosition.z());
+        subChunkRequest.sendToServer(BedrockProtocol.class);
+    }
+
+    private boolean shouldDeferInitialPlayerChunkSend(final int chunkX, final int chunkZ) {
+        final EntityTracker entityTracker = this.user().get(EntityTracker.class);
+        if (entityTracker == null || entityTracker.getClientPlayer() == null) return false;
+        if (entityTracker.getClientPlayer().isInitialWorldJoinFinished()) return false;
+        // Before PlayerSpawn, Java's LevelLoadTracker is still waiting for
+        // LEVEL_CHUNKS_LOAD_START. Defer every first chunk so none can become a
+        // stale already-compiled candidate if the player position changes.
+        if (!entityTracker.getClientPlayer().isInitiallySpawned()) return true;
+        final Position3f position = entityTracker.getClientPlayer().position();
+        final int playerChunkX = (int) Math.floor(position.x()) >> 4;
+        final int playerChunkZ = (int) Math.floor(position.z()) >> 4;
+        if (chunkX != playerChunkX || chunkZ != playerChunkZ) return false;
+        return !this.areInitialPlayerSectionsReady(chunkX, chunkZ, initialPlayerSectionYs(position));
+    }
+
+    private void scheduleInitialPlayerChunkAfterSpawn() {
+        final EntityTracker entityTracker = this.user().get(EntityTracker.class);
+        if (entityTracker == null || entityTracker.getClientPlayer() == null
+                || !entityTracker.getClientPlayer().isInitiallySpawned()) return;
+        if (entityTracker.getClientPlayer().isInitialWorldJoinFinished()) {
+            for (long chunkKey : this.deferredInitialChunkSections.keySet()) {
+                if (this.chunks.containsKey(chunkKey) && !this.sentChunks.contains(chunkKey)) {
+                    this.dirtyChunks.add(chunkKey);
+                }
+            }
+            this.deferredInitialChunkSections.clear();
+            return;
+        }
+        final Position3f playerPosition = entityTracker.getClientPlayer().position();
+        final long currentPlayerChunkKey = ChunkPosition.chunkKey(
+                (int) Math.floor(playerPosition.x()) >> 4,
+                (int) Math.floor(playerPosition.z()) >> 4);
+        final LongSet staleDeferredChunks = new LongOpenHashSet();
+        for (Long2ObjectMap.Entry<int[]> entry : this.deferredInitialChunkSections.long2ObjectEntrySet()) {
+            final long chunkKey = entry.getLongKey();
+            if (this.sentChunks.contains(chunkKey) || !this.chunks.containsKey(chunkKey)) {
+                staleDeferredChunks.add(chunkKey);
+                continue;
+            }
+            final ChunkPosition chunkPosition = new ChunkPosition(chunkKey);
+            final int[] requiredSections = chunkKey == currentPlayerChunkKey
+                    ? initialPlayerSectionYs(playerPosition)
+                    : entry.getValue();
+            if (this.areInitialPlayerSectionsReady(
+                    chunkPosition.chunkX(), chunkPosition.chunkZ(), requiredSections)) {
+                this.dirtyChunks.add(chunkKey);
+            }
+        }
+        this.deferredInitialChunkSections.keySet().removeAll(staleDeferredChunks);
+    }
+
+    private boolean areInitialPlayerSectionsReady(final int chunkX, final int chunkZ, final int[] sectionYs) {
+        for (int sectionY : sectionYs) {
+            if (!this.isSubChunkReady(chunkX, sectionY, chunkZ)) return false;
+        }
+        return true;
+    }
+
+    private static int[] initialPlayerSectionYs(final Position3f position) {
+        final int eyeSectionY = (int) Math.floor(position.y()) >> 4;
+        final int feetY = (int) Math.floor(position.y() - PLAYER_EYE_HEIGHT);
+        return new int[]{feetY >> 4, (feetY - 1) >> 4, eyeSectionY};
+    }
+
+    private static int subChunkVerticalPriority(final int sectionY, final int feetSectionY) {
+        if (sectionY == feetSectionY) return 0;
+        if (sectionY == feetSectionY - 1) return 1;
+        if (sectionY == feetSectionY + 1) return 2;
+        return 3 + Math.min(Math.abs(sectionY - feetSectionY), Math.abs(sectionY - (feetSectionY - 1)));
     }
 
     private Chunk remapChunk(final BedrockChunk chunk) {

@@ -59,6 +59,8 @@ public class ClientPlayerEntity extends PlayerEntity {
 
     // Initial spawn and respawning
     private boolean initiallySpawned;
+    private boolean initialJavaPlayerLoadedReceived;
+    private boolean initialWorldJoinFinished;
     private DimensionChangeInfo dimensionChangeInfo;
     private boolean wasInsideUnloadedChunk;
 
@@ -353,6 +355,39 @@ public class ClientPlayerEntity extends PlayerEntity {
 
     public void setInitiallySpawned() {
         this.initiallySpawned = true;
+    }
+
+    public void handleInitialJavaPlayerLoaded() {
+        this.initialJavaPlayerLoadedReceived = true;
+        this.tryFinishInitialWorldJoin();
+    }
+
+    public boolean isInitialWorldJoinFinished() {
+        return this.initialWorldJoinFinished;
+    }
+
+    public void tryFinishInitialWorldJoin() {
+        if (this.initialWorldJoinFinished || !this.initialJavaPlayerLoadedReceived
+                || !this.initiallySpawned || this.dimensionChangeInfo != null) return;
+
+        final ChunkTracker chunkTracker = this.user.get(ChunkTracker.class);
+        if (chunkTracker == null) return;
+        final boolean vanillaLoadBypass = this.javaGameMode == GameMode.SPECTATOR
+                || this.isDead()
+                || chunkTracker.isOutsideWorldHeight(this.position);
+        if (!vanillaLoadBypass && !chunkTracker.isInitialPlayerJoinTerrainReady(this.position)) return;
+
+        // Vanilla reports PLAYER_LOADED after LEVEL_CHUNKS_LOAD_START and its
+        // camera-section render callback (or one of the explicit bypasses
+        // above). Only now may Bedrock end its loading screen and activate the
+        // player on the Realm. Set the latch before sending so re-entrant chunk
+        // work cannot produce a duplicate initialization acknowledgement.
+        this.initialWorldJoinFinished = true;
+        PacketFactory.sendBedrockLoadingScreen(this.user, ServerboundLoadingScreenPacketType.EndLoadingScreen, null);
+        final PacketWrapper setLocalPlayerAsInitialized = PacketWrapper.create(
+                ServerboundBedrockPackets.SET_LOCAL_PLAYER_AS_INITIALIZED, this.user);
+        setLocalPlayerAsInitialized.write(BedrockTypes.UNSIGNED_VAR_LONG, this.runtimeId()); // entity runtime id
+        setLocalPlayerAsInitialized.sendToServer(BedrockProtocol.class);
     }
 
     public DimensionChangeInfo dimensionChangeInfo() {

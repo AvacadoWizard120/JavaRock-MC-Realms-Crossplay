@@ -1091,6 +1091,26 @@ function isClientboundTransientBeforeDownstreamPlay (name) {
     name === 'level_sound_event'
 }
 
+function delayedClientboundEntityStateKey (name, params = {}) {
+  if (name !== 'move_entity_delta' &&
+    name !== 'move_entity' &&
+    name !== 'move_player' &&
+    name !== 'set_entity_motion') return undefined
+  const runtimeId = firstClientboundReferencedRuntimeId(name, params)
+  if (!runtimeId) return undefined
+  return `${name === 'set_entity_motion' ? 'motion' : 'position'}:${runtimeId}`
+}
+
+function mergeDelayedClientboundEntityState (existing, incoming) {
+  if (!existing || existing.name !== incoming.name || incoming.name !== 'move_entity_delta') return incoming
+  const params = { ...existing.params, ...incoming.params }
+  // The local-version normalizer rebuilds flags from the merged optional
+  // coordinates. Retaining an earlier packet's presence bits would make the
+  // newly merged coordinates invisible to ViaBedrock.
+  delete params.flags
+  return { ...incoming, params }
+}
+
 function normalizeDownstreamMode (mode) {
   return mode === 'native-bedrock-recorder' ? 'native-bedrock-recorder' : 'viabedrock'
 }
@@ -2376,56 +2396,6 @@ function bridgeCraftingDrainRequestIds (params = {}) {
     if (returnsCraftingInput && requestId != null) requestIds.push(requestId)
   }
   return requestIds
-}
-
-function buildSpawnSupportSubchunkRequest (startGameData = {}, partialChunkOrigin = {}) {
-  if (!startGameData || typeof startGameData !== 'object') return null
-  if (!partialChunkOrigin || typeof partialChunkOrigin !== 'object') return null
-
-  const position = firstNonNull(startGameData.player_position, startGameData.playerPosition)
-  if (!position || typeof position !== 'object') return null
-
-  const playerX = Number(position.x)
-  const playerY = Number(position.y)
-  const playerZ = Number(position.z)
-  const originY = Number(firstNonNull(partialChunkOrigin.y, 0))
-  const dimension = Number(firstNonNull(partialChunkOrigin.dimension, 0))
-  if (![playerX, playerY, playerZ, originY, dimension].every(Number.isFinite)) return null
-
-  const spawnChunkX = Math.floor(playerX / 16)
-  const spawnChunkZ = Math.floor(playerZ / 16)
-  const supportSectionY = Math.floor((playerY - 1) / 16)
-  const origin = { x: spawnChunkX, y: originY, z: spawnChunkZ }
-  const requests = []
-  for (let x = -1; x <= 1; x++) {
-    for (let z = -1; z <= 1; z++) {
-      for (let y = supportSectionY - 1; y <= supportSectionY + 1; y++) {
-        requests.push({ x, y: y - originY, z })
-      }
-    }
-  }
-  requests.sort((left, right) => {
-    const leftHorizontal = Math.max(Math.abs(left.x), Math.abs(left.z))
-    const rightHorizontal = Math.max(Math.abs(right.x), Math.abs(right.z))
-    if (leftHorizontal !== rightHorizontal) return leftHorizontal - rightHorizontal
-    const leftVertical = Math.abs((left.y + originY) - supportSectionY)
-    const rightVertical = Math.abs((right.y + originY) - supportSectionY)
-    if (leftVertical !== rightVertical) return leftVertical - rightVertical
-    const leftDistance = Math.abs(left.x) + Math.abs(left.z)
-    const rightDistance = Math.abs(right.x) + Math.abs(right.z)
-    if (leftDistance !== rightDistance) return leftDistance - rightDistance
-    if (left.y !== right.y) return left.y - right.y
-    if (left.x !== right.x) return left.x - right.x
-    return left.z - right.z
-  })
-
-  return { dimension, origin, requests }
-}
-
-function subchunkOriginsMatch (left = {}, right = {}) {
-  return Number(left.x) === Number(right.x) &&
-    Number(left.y) === Number(right.y) &&
-    Number(left.z) === Number(right.z)
 }
 
 function bridgeAcceptedResponseCursorStackId (response = {}) {
@@ -3803,6 +3773,7 @@ class ViaBedrockRelayPlayer extends Player {
     this.downstreamPlayReady = !this.usesViaBedrockDownstream()
     this.downstreamPlayReadyTimer = null
     this.delayedClientboundPlayPackets = []
+    this.delayedClientboundEntityStateIndexes = new Map()
     this.warnedDelayedClientboundPlayPackets = false
     this.droppedPrePlayTransientCounts = new Map()
     this.localPlayerSpawnPrewarmTimer = null
@@ -3812,10 +3783,7 @@ class ViaBedrockRelayPlayer extends Player {
     this.syntheticChunkRadiusRequested = false
     this.syntheticSubchunkRequested = false
     this.latestSyntheticSubchunkOrigin = null
-    this.spawnSupportTerrainAttempted = false
-    this.pendingLocalPlayerSpawnSupport = null
-    this.localPlayerSpawnSupportTimer = null
-    this.awaitingSpawnSupportPacketForPlayReady = false
+    this.pendingInitialJoinAuthInput = null
     this.downstreamKnownEntityRuntimeIds = new Set()
     this.downstreamEntitySpawnCache = new Map()
     this.downstreamEntityUniqueToRuntime = new Map()
@@ -4564,104 +4532,15 @@ class ViaBedrockRelayPlayer extends Player {
     return numberOrDefault(process.env.NETHERNET_RELAY_TERRAIN_SPAWN_DELAY_MS, 0)
   }
 
-  spawnSupportTerrainEnabled () {
-    if (!this.usesViaBedrockDownstream()) return false
-    return String(process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TERRAIN || 'true').trim().toLowerCase() !== 'false'
-  }
-
-  spawnSupportTerrainTimeoutMs () {
-    return Math.max(100, numberOrDefault(process.env.NETHERNET_RELAY_SPAWN_SUPPORT_TIMEOUT_MS, 2000))
-  }
-
-  delayLocalPlayerSpawnUntilSupportTerrain (name, params = {}, context = 'live') {
-    if (name !== 'play_status' || params.status !== 'player_spawn') return false
-    if (String(context).startsWith('spawn_support_')) return false
-    if (!this.spawnSupportTerrainEnabled() || this.spawnSupportTerrainAttempted || this.pendingLocalPlayerSpawnSupport) return false
-
-    const startGameData = this.upstream?.startGameData
-    const partialOrigin = this.latestSyntheticSubchunkOrigin
-    if (!partialOrigin) return false
-    const supportRequest = buildSpawnSupportSubchunkRequest(startGameData, partialOrigin)
-    if (!supportRequest) return false
-
-    const partialDistance = Math.max(
-      Math.abs(Number(partialOrigin.x) - supportRequest.origin.x),
-      Math.abs(Number(partialOrigin.z) - supportRequest.origin.z)
-    )
-    if (!Number.isFinite(partialDistance) || partialDistance > 2) return false
-
-    this.spawnSupportTerrainAttempted = true
-    this.pendingLocalPlayerSpawnSupport = {
-      name,
-      params,
-      context,
-      origin: supportRequest.origin
-    }
-    this.recordBridgeToViaBedrock(name, params, 'delayed', {
-      context,
-      translation_status: 'delayed_until_spawn_support_subchunks',
-      diagnostic: {
-        origin: supportRequest.origin,
-        requestCount: supportRequest.requests.length
-      }
+  abortInitialJoinReadiness (reason) {
+    if (!this.usesViaBedrockDownstream() || this.downstreamPlayReady) return false
+    this.recordBridgeToViaBedrock('play_status', { status: 'player_spawn' }, 'diagnostic', {
+      context: 'initial_join_readiness',
+      translation_status: 'initial_join_readiness_failed',
+      diagnostic: { reason }
     })
-
-    const sent = this.relayServerboundToUpstream(
-      'subchunk_request',
-      supportRequest,
-      'spawn_support_prewarm'
-    )
-    if (!sent) {
-      this.pendingLocalPlayerSpawnSupport = null
-      return false
-    }
-
-    const timeoutMs = this.spawnSupportTerrainTimeoutMs()
-    this.localPlayerSpawnSupportTimer = setTimeout(() => {
-      this.localPlayerSpawnSupportTimer = null
-      this.releaseLocalPlayerSpawnAfterSupport('spawn_support_timeout', false)
-    }, timeoutMs)
-    this.localPlayerSpawnSupportTimer.unref?.()
-    console.log(`[bedrock-relay] Requested ${supportRequest.requests.length} spawn-support subchunks around (${supportRequest.origin.x},${supportRequest.origin.z}); holding player_spawn for at most ${timeoutMs}ms.`)
-    return true
-  }
-
-  releaseLocalPlayerSpawnAfterSupport (reason, supportPacketFollows) {
-    const pending = this.pendingLocalPlayerSpawnSupport
-    if (!pending) return false
-    this.pendingLocalPlayerSpawnSupport = null
-    if (this.localPlayerSpawnSupportTimer) {
-      clearTimeout(this.localPlayerSpawnSupportTimer)
-      this.localPlayerSpawnSupportTimer = null
-    }
-    this.awaitingSpawnSupportPacketForPlayReady = Boolean(supportPacketFollows)
-    console.log(`[bedrock-relay] Releasing local player_spawn (${reason}); supportPacketFollows=${Boolean(supportPacketFollows)}.`)
-    return this.queueClientbound(
-      pending.name,
-      pending.params,
-      `spawn_support_release:${reason}:${pending.context || 'live'}`
-    )
-  }
-
-  releaseLocalPlayerSpawnForSubchunkResponse (params = {}) {
-    const pending = this.pendingLocalPlayerSpawnSupport
-    if (!pending) return false
-    const origin = firstNonNull(params.origin, params.subchunk_origin, params.subchunkOrigin)
-    if (!origin || !subchunkOriginsMatch(origin, pending.origin)) return false
-    return this.releaseLocalPlayerSpawnAfterSupport('support_subchunk_response', true)
-  }
-
-  finishSpawnSupportPlayGate () {
-    if (!this.awaitingSpawnSupportPacketForPlayReady) return false
-    this.awaitingSpawnSupportPacketForPlayReady = false
-    // A support subchunk reaching ViaBedrock does not mean its Java protocol is
-    // in PLAY yet. The real acknowledgement is the downstream
-    // set_local_player_as_initialized packet; keep the gameplay queue closed
-    // until that arrives (with the normal timed fallback as a safety valve).
-    this.scheduleDownstreamPlayReadyFallback(
-      'spawn support subchunk forwarded; awaiting downstream initialization',
-      this.downstreamPlayReadyFallbackMs()
-    )
+    console.warn(`[bedrock-relay] Refusing to expose an unsafe initial world (${reason}). Closing this join instead of letting the Java player fall or move only client-side.`)
+    this.disconnect?.('JavaRock could not finish loading safe spawn terrain. Please reconnect and try again.')
     return true
   }
 
@@ -4728,7 +4607,13 @@ class ViaBedrockRelayPlayer extends Player {
   }
 
   downstreamPlayReadyFallbackMs () {
-    return Math.max(0, numberOrDefault(process.env.NETHERNET_RELAY_DOWNSTREAM_PLAY_FALLBACK_MS, 7000))
+    // PLAYER_LOADED is independently guarded by the patched ChunkTracker, so
+    // vanilla's own timeout cannot force this gate open. Keep a bounded hang
+    // guard and fail closed if the genuine initialization ack never arrives.
+    // StartGame begins Mojang's 30-second client deadline before PlayerSpawn,
+    // so disconnect first rather than letting that UI timeout expose the void.
+    return Math.max(1000, Math.min(28000,
+      numberOrDefault(process.env.NETHERNET_RELAY_DOWNSTREAM_PLAY_FALLBACK_MS, 25000)))
   }
 
   syntheticChunkRadius () {
@@ -4912,6 +4797,7 @@ class ViaBedrockRelayPlayer extends Player {
     if (!this.usesViaBedrockDownstream()) {
       this.downstreamPlayReady = true
       this.delayedClientboundPlayPackets = []
+      this.delayedClientboundEntityStateIndexes?.clear?.()
       return
     }
     if (this.downstreamPlayReady) return
@@ -4935,19 +4821,47 @@ class ViaBedrockRelayPlayer extends Player {
     }
     this.downstreamPlayReadyTimer = setTimeout(() => {
       this.downstreamPlayReadyTimer = null
-      this.markDownstreamPlayReady(`${reason}; timed fallback after ${delayMs}ms`)
+      this.abortInitialJoinReadiness(`${reason}; still waiting for the guarded downstream initialization acknowledgement after ${delayMs}ms`)
     }, delayMs)
     this.downstreamPlayReadyTimer.unref?.()
   }
 
   delayClientboundUntilDownstreamPlay (name, params, context) {
     const limit = numberOrDefault(process.env.NETHERNET_RELAY_PREPLAY_QUEUE_LIMIT, 2048)
+    const coalesceKey = delayedClientboundEntityStateKey(name, params)
+    if (!(this.delayedClientboundEntityStateIndexes instanceof Map)) {
+      this.delayedClientboundEntityStateIndexes = new Map()
+    }
+    if (name !== 'move_entity_delta') {
+      // Metadata, animation, motion, teleport, and lifecycle packets are
+      // ordering boundaries. A later delta must remain after that boundary so
+      // ViaBedrock sees the same movement/limb-animation stream as Bedrock.
+      for (const runtimeId of clientboundReferencedRuntimeIds(name, params)) {
+        this.delayedClientboundEntityStateIndexes.delete(`position:${runtimeId}`)
+      }
+    }
+    if (coalesceKey && this.delayedClientboundEntityStateIndexes.has(coalesceKey)) {
+      const index = this.delayedClientboundEntityStateIndexes.get(coalesceKey)
+      const existing = this.delayedClientboundPlayPackets[index]
+      if (name === 'move_entity_delta' && existing?.name === name) {
+        this.delayedClientboundPlayPackets[index] = mergeDelayedClientboundEntityState(existing, { name, params, context })
+        this.recordBridgeToViaBedrock(name, params, 'delayed', {
+          context,
+          translation_status: 'coalesced_until_downstream_play'
+        })
+        return true
+      }
+      // Absolute moves and motion packets are temporal boundaries. Append
+      // them, then point later deltas at the new boundary instead of replacing
+      // an older packet in-place and silently reordering entity movement.
+    }
     if (this.delayedClientboundPlayPackets.length >= limit) {
       console.warn(`[bedrock-relay] Dropping pre-PLAY ${name}; delayed gameplay queue exceeded ${limit} packet(s).`)
       return false
     }
 
     this.delayedClientboundPlayPackets.push({ name, params, context })
+    if (coalesceKey) this.delayedClientboundEntityStateIndexes.set(coalesceKey, this.delayedClientboundPlayPackets.length - 1)
     this.recordBridgeToViaBedrock(name, params, 'delayed', {
       context,
       translation_status: 'delayed_until_downstream_play'
@@ -4963,6 +4877,7 @@ class ViaBedrockRelayPlayer extends Player {
     if (!this.delayedClientboundPlayPackets.length) return
     const queued = this.delayedClientboundPlayPackets
     this.delayedClientboundPlayPackets = []
+    this.delayedClientboundEntityStateIndexes?.clear?.()
     for (const entry of queued) {
       this.queueClientbound(entry.name, entry.params, `delayed_play_flush:${entry.context || 'unknown'}`)
     }
@@ -5800,10 +5715,6 @@ class ViaBedrockRelayPlayer extends Player {
   }
 
   queueClientbound (name, params, context = 'live') {
-    if (this.delayLocalPlayerSpawnUntilSupportTerrain(name, params, context)) {
-      return true
-    }
-
     if (this.shouldPrewarmLocalPlayerSpawn(name, params, context)) {
       return this.delayLocalPlayerSpawnUntilTerrainPrewarm(name, params, context)
     }
@@ -5884,14 +5795,22 @@ class ViaBedrockRelayPlayer extends Player {
       this.rememberAuthoritativeInventoryPacket(name, authoritativeTranslated, context)
       this.rememberClientboundEntityPacket(name, translated)
       this.updateCachedEntitySnapshotFromClientboundPacket(name, translated)
-      if (name === 'start_game') this.flushStartGameChunkCache(`start_game_sent:${context}`)
-      if (this.usesViaBedrockDownstream() && name === 'play_status' && firstNonEmpty(translated?.status, params?.status) === 'player_spawn') {
-        // Queueing Bedrock player_spawn starts ViaBedrock's CONFIGURATION ->
-        // PLAY transition; it is not proof that the transition has completed.
-        // Wait for ViaBedrock's set_local_player_as_initialized acknowledgement
-        // before flushing entity/inventory packets that PLAY handlers consume.
+      if (name === 'start_game') {
+        this.flushStartGameChunkCache(`start_game_sent:${context}`)
+        // Mojang starts its fixed 30-second LevelLoadTracker deadline from the
+        // Java LOGIN produced by this packet, not from the later PlayerSpawn.
+        // Start our fail-closed guard at the same causal point so it always wins.
         this.scheduleDownstreamPlayReadyFallback(
-          `sent play_status.player_spawn:${context}; awaiting downstream initialization`,
+          `sent start_game:${context}; awaiting guarded initial-world readiness`,
+          this.downstreamPlayReadyFallbackMs()
+        )
+      }
+      if (this.usesViaBedrockDownstream() && name === 'play_status' && firstNonEmpty(translated?.status, params?.status) === 'player_spawn') {
+        // PlayerSpawn starts ViaBedrock's own subchunk request lifecycle and
+        // Java's LevelLoadTracker. The patched PLAYER_LOADED acknowledgement is
+        // the proof that real feet/floor terrain was rendered; never time-open.
+        this.scheduleDownstreamPlayReadyFallback(
+          `sent play_status.player_spawn:${context}; awaiting Java player-loaded terrain readiness`,
           this.downstreamPlayReadyFallbackMs()
         )
       }
@@ -6000,13 +5919,29 @@ class ViaBedrockRelayPlayer extends Player {
   }
 
   relayDownstreamPlayerInitialized (params = {}, context = 'live') {
+    this.status = ClientStatus.Initialized ?? 3
     if (!this.upstreamPlayerInitializedSent) {
+      // The patched ViaBedrock emits exactly one acknowledgement, after Java's
+      // PLAYER_LOADED and an independent current-chunk readiness check.
       const forwarded = this.relayServerboundToUpstream('set_local_player_as_initialized', params, context)
       if (!forwarded) return false
-      this.status = ClientStatus.Initialized ?? 3
       this.markUpstreamPlayerInitializedFromDownstream(context)
     }
-    this.markDownstreamPlayReady('downstream set_local_player_as_initialized')
+
+    const authInput = this.pendingInitialJoinAuthInput
+    this.pendingInitialJoinAuthInput = null
+    if (authInput) {
+      const authForwarded = this.relayServerboundToUpstream(
+        'player_auth_input',
+        authInput.params,
+        `initial_join_ready:${authInput.context || context}`
+      )
+      if (!authForwarded) {
+        console.warn('[bedrock-relay] The saved initial player_auth_input could not be forwarded; opening PLAY after the guarded initialization anyway and waiting for the next client tick.')
+      }
+    }
+
+    this.markDownstreamPlayReady('guarded Java player-loaded terrain acknowledgement forwarded to Realm')
     return true
   }
 
@@ -6073,7 +6008,7 @@ class ViaBedrockRelayPlayer extends Player {
   }
 
   viaBedrockSubchunkRequestBatchSize () {
-    return Math.max(1, Math.min(64, numberOrDefault(process.env.NETHERNET_RELAY_SUBCHUNK_REQUEST_BATCH_SIZE, 32)))
+    return Math.max(1, Math.min(64, numberOrDefault(process.env.NETHERNET_RELAY_SUBCHUNK_REQUEST_BATCH_SIZE, 64)))
   }
 
   splitViaBedrockSubchunkRequest (params = {}) {
@@ -6225,6 +6160,18 @@ class ViaBedrockRelayPlayer extends Player {
 
     if (!this.usesViaBedrockDownstream()) {
       return this.relayNativeBedrockServerboundToUpstream(name, params, context)
+    }
+
+    if (!this.upstreamPlayerInitializedSent && name === 'player_auth_input') {
+      // CLIENT_TICK_END exists while vanilla's loading screen is still open.
+      // Preserve only the latest heartbeat and release it after the real
+      // PLAYER_LOADED acknowledgement and Realm initialization, in that order.
+      this.pendingInitialJoinAuthInput = { params, context }
+      this.recordBridgeToRealm(name, params, 'delayed', {
+        context,
+        translation_status: 'coalesced_until_java_player_loaded'
+      })
+      return true
     }
 
     this.rememberServerboundTerrainRequest(name)
@@ -6510,11 +6457,7 @@ class ViaBedrockRelayPlayer extends Player {
         return
       }
 
-      const releasedSpawnForSupport = name === 'subchunk'
-        ? this.releaseLocalPlayerSpawnForSubchunkResponse(params)
-        : false
       this.queueClientbound(name, params, 'live')
-      if (releasedSpawnForSupport) this.finishSpawnSupportPlayGate()
     }
 
     if (this.chunkSendCache.length > 0 && this.sentStartGame) this.flushStartGameChunkCache('read_upstream')
@@ -6549,11 +6492,7 @@ class ViaBedrockRelayPlayer extends Player {
         }
         continue
       }
-      const releasedSpawnForSupport = des.data.name === 'subchunk'
-        ? this.releaseLocalPlayerSpawnForSubchunkResponse(des.data.params)
-        : false
       this.queueClientbound(des.data.name, des.data.params, 'downstream_queue_flush')
-      if (releasedSpawnForSupport) this.finishSpawnSupportPlayGate()
     }
     this.downQ = []
   }
@@ -6685,10 +6624,6 @@ class ViaBedrockRelayPlayer extends Player {
       clearTimeout(this.syntheticSubchunkRequestTimer)
       this.syntheticSubchunkRequestTimer = null
     }
-    if (this.localPlayerSpawnSupportTimer) {
-      clearTimeout(this.localPlayerSpawnSupportTimer)
-      this.localPlayerSpawnSupportTimer = null
-    }
     if (this.entityTrackerRespawnReplayTimer) {
       clearTimeout(this.entityTrackerRespawnReplayTimer)
       this.entityTrackerRespawnReplayTimer = null
@@ -6703,7 +6638,8 @@ class ViaBedrockRelayPlayer extends Player {
     }
     this.clearLocalInventoryScreenShimTimers()
     this.delayedClientboundPlayPackets = []
-    this.pendingLocalPlayerSpawnSupport = null
+    this.delayedClientboundEntityStateIndexes?.clear?.()
+    this.pendingInitialJoinAuthInput = null
     this.deferredCraftingContainerClose = null
     this.pendingCraftingDrainRequestIds?.clear?.()
     this.upstream?.close(reason)
@@ -7136,8 +7072,6 @@ module.exports = {
   bridgeSanitizedItemStackRequestParams,
   bridgeCraftingDrainRequestIds,
   bridgeLegacyItemStackRequestActionTypeId,
-  buildSpawnSupportSubchunkRequest,
-  subchunkOriginsMatch,
   bridgeItemStackRequestTouchesOwnInventoryScreen,
   bridgeItemStackRequestSourcePreflightDropDiagnosis,
   serverboundMobEquipmentDropDiagnosis,

@@ -17,6 +17,10 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+$SupportProfileName = [string]$env:JAVAROCK_SUPPORT_PROFILE_NAME
+$SupportNote = [string]$env:JAVAROCK_SUPPORT_NOTE
+[Environment]::SetEnvironmentVariable('JAVAROCK_SUPPORT_PROFILE_NAME', $null, 'Process')
+[Environment]::SetEnvironmentVariable('JAVAROCK_SUPPORT_NOTE', $null, 'Process')
 
 if (-not $ProjectRoot) { $ProjectRoot = Join-Path $PSScriptRoot '..' }
 $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
@@ -141,11 +145,16 @@ function Add-PacketSampleReferencesFromFile {
 function Add-SelectedPacketSample {
     param([Parameter(Mandatory = $true)][IO.FileInfo]$File)
 
-    if ($script:PacketSampleCount -ge $MaxPacketSampleFiles) { return }
+    if ($script:PacketSampleCount -ge $MaxPacketSampleFiles) {
+        $script:PacketSamplesOmittedByFileLimit++
+        return
+    }
     if ($File.Length -gt $MaxPacketSampleFileBytes) {
+        $script:PacketSamplesOmittedByPerFileLimit++
         return
     }
     if (($script:PacketSampleBytes + $File.Length) -gt $MaxPacketSampleBytes) {
+        $script:PacketSamplesOmittedByTotalByteLimit++
         return
     }
 
@@ -164,14 +173,13 @@ function Add-PacketSampleCandidatePass {
     )
 
     $index = 0
-    while ($script:PacketSampleCount -lt $MaxPacketSampleFiles) {
+    while ($true) {
         $sawCandidate = $false
         foreach ($run in $Runs) {
             $files = @($run.$Property)
             if ($index -ge $files.Count) { continue }
             $sawCandidate = $true
             Add-SelectedPacketSample -File $files[$index]
-            if ($script:PacketSampleCount -ge $MaxPacketSampleFiles) { break }
         }
         if (-not $sawCandidate) { break }
         $index++
@@ -196,6 +204,9 @@ $script:PacketSampleCount = 0
 $script:PacketSampleBytes = [long]0
 $script:PacketSampleCandidateCount = 0
 $script:PacketSamplesSkipped = 0
+$script:PacketSamplesOmittedByFileLimit = 0
+$script:PacketSamplesOmittedByPerFileLimit = 0
+$script:PacketSamplesOmittedByTotalByteLimit = 0
 $uploaded = $false
 $uploadFailed = $false
 $uploadMessage = ''
@@ -330,10 +341,34 @@ try {
                 Add-PacketSampleCandidatePass -Runs $candidatesByRun -Property 'Coverage'
                 Add-PacketSampleCandidatePass -Runs $candidatesByRun -Property 'Remaining'
                 $script:PacketSamplesSkipped = [Math]::Max(0, $script:PacketSampleCandidateCount - $script:PacketSampleCount)
-                Write-Host "[JavaRock] Included $($script:PacketSampleCount) redacted packet sample(s) ($($script:PacketSampleBytes) bytes); skipped $($script:PacketSamplesSkipped) due to sample limits."
+                $omissionReasons = @()
+                if ($script:PacketSamplesOmittedByFileLimit -gt 0) {
+                    $omissionReasons += "$($script:PacketSamplesOmittedByFileLimit) after the $MaxPacketSampleFiles-file ZIP cap"
+                }
+                if ($script:PacketSamplesOmittedByPerFileLimit -gt 0) {
+                    $omissionReasons += "$($script:PacketSamplesOmittedByPerFileLimit) over the $MaxPacketSampleFileBytes-byte per-file cap"
+                }
+                if ($script:PacketSamplesOmittedByTotalByteLimit -gt 0) {
+                    $omissionReasons += "$($script:PacketSamplesOmittedByTotalByteLimit) beyond the $MaxPacketSampleBytes-byte total sample budget"
+                }
+                $omissionDetail = if ($omissionReasons.Count -gt 0) { ' (' + ($omissionReasons -join '; ') + ')' } else { '' }
+                Write-Host "[JavaRock] Selected $($script:PacketSampleCount) of $($script:PacketSampleCandidateCount) referenced redacted packet sample(s) for this support ZIP ($($script:PacketSampleBytes) bytes). Omitted $($script:PacketSamplesSkipped) from this bounded ZIP copy$omissionDetail; the original captures remain in packet-census."
             }
         }
     }
+
+    $activeProfileName = [regex]::Replace(([string]$SupportProfileName), '[\u0000-\u001f\u007f]+', ' ').Trim()
+    if ($activeProfileName.Length -gt 256) { $activeProfileName = $activeProfileName.Substring(0, 256) }
+    $supportNoteText = [regex]::Replace(([string]$SupportNote), '[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]', '').Trim()
+    if ($supportNoteText.Length -gt 4000) { $supportNoteText = $supportNoteText.Substring(0, 4000) }
+    $supportReport = [ordered]@{
+        format = 1
+        active_profile_name = $activeProfileName
+    }
+    if ($supportNoteText) { $supportReport['note'] = $supportNoteText }
+    $supportReportPath = Join-Path $script:StageDirectory 'support-report.json'
+    [IO.File]::WriteAllText($supportReportPath, (($supportReport | ConvertTo-Json -Depth 4) + "`r`n"), [Text.UTF8Encoding]::new($false))
+    $script:IncludedFiles.Add('support-report.json')
 
     $systemInfo = [ordered]@{
         format = 1
@@ -349,6 +384,12 @@ try {
         redacted_packet_samples_included = $script:PacketSampleCount
         redacted_packet_sample_bytes_included = $script:PacketSampleBytes
         redacted_packet_samples_skipped = $script:PacketSamplesSkipped
+        redacted_packet_samples_omitted_by_file_limit = $script:PacketSamplesOmittedByFileLimit
+        redacted_packet_samples_omitted_by_per_file_limit = $script:PacketSamplesOmittedByPerFileLimit
+        redacted_packet_samples_omitted_by_total_byte_limit = $script:PacketSamplesOmittedByTotalByteLimit
+        redacted_packet_sample_file_limit = $MaxPacketSampleFiles
+        redacted_packet_sample_per_file_byte_limit = $MaxPacketSampleFileBytes
+        redacted_packet_sample_total_byte_limit = $MaxPacketSampleBytes
         raw_packet_journals_included = [bool]$IncludeRawPackets
         auth_files_included = $false
     }
