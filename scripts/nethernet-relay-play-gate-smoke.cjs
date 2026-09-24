@@ -195,6 +195,23 @@ function makeOutboundRelay (downstreamMode = 'viabedrock') {
 }
 
 {
+  const { relay, sentPackets } = makeOutboundRelay()
+  const records = []
+  relay.downstreamProtocolPlayReady = true
+  relay.downstreamPlayReady = true
+  relay.recordBridgeToViaBedrock = (name, params, phase, extra) => records.push({ name, params, phase, extra })
+
+  assert.strictEqual(relay.queueClientbound('camera_spline', {
+    instruction_set: 'clear'
+  }, 'captured-modern-camera-packet'), false)
+  assert.deepStrictEqual(sentPackets, [])
+  assert.strictEqual(records.length, 1)
+  assert.strictEqual(records[0].name, 'camera_spline')
+  assert.strictEqual(records[0].phase, 'dropped')
+  assert.strictEqual(records[0].extra.translation_status, 'dropped_unsupported_local_viabedrock_packet')
+}
+
+{
   const { relay } = makeOutboundRelay()
   const earlyInitialization = []
   relay.upstream = {

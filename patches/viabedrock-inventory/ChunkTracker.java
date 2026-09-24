@@ -81,6 +81,9 @@ public class ChunkTracker extends StoredObject {
     private static final float PLAYER_EYE_HEIGHT = 1.62F;
     private static final int SUB_CHUNK_REQUESTS_PER_TICK = 64;
     private static final int MAX_PENDING_SUB_CHUNKS = 256;
+    // ChunkTrackerTickTask runs every two Java ticks. Six tracker ticks keep the
+    // prediction alive for up to roughly 600 ms if Bedrock never changes the door.
+    private static final int DOOR_INTERACTION_ACK_FALLBACK_TICKS = 6;
     private static final String[] HORIZONTAL_DIRECTIONS = {"north", "east", "south", "west"};
     private static final int[] HORIZONTAL_X = {0, 1, 0, -1};
     private static final int[] HORIZONTAL_Z = {-1, 0, 1, 0};
@@ -114,10 +117,14 @@ public class ChunkTracker extends StoredObject {
     private final Set<SubChunkPosition> loadedSubChunks = new HashSet<>();
     private final Set<BlockPosition> spawnedItemFrames = new HashSet<>();
     private final Set<BlockPosition> pendingDoorUpdates = new HashSet<>();
+    private final NavigableSet<Integer> readyBlockInteractionAcks = new TreeSet<>();
+    private final NavigableMap<Integer, BlockPosition> pendingDoorInteractionAcks = new TreeMap<>();
+    private final Map<Integer, Integer> pendingDoorInteractionAckTicks = new HashMap<>();
 
     private int centerX = 0;
     private int centerZ = 0;
     private int radius;
+    private int doorInteractionAckTick;
 
     public ChunkTracker(final UserConnection user, final Dimension dimension) {
         super(user);
@@ -228,6 +235,21 @@ public class ChunkTracker extends StoredObject {
 
     public int getJavaBlockState(final BlockPosition blockPosition) {
         return this.resolveDerivedJavaBlockState(blockPosition, this.getRawJavaBlockState(blockPosition));
+    }
+
+    public boolean shouldDeferDoorInteractionAck(final BlockPosition blockPosition) {
+        return BridgeBlockRendering.isDoor(this.javaBlockState(this.getRawJavaBlockState(blockPosition)));
+    }
+
+    public void acknowledgeBlockInteraction(final int sequence) {
+        this.readyBlockInteractionAcks.add(sequence);
+        this.flushReadyBlockInteractionAcks();
+    }
+
+    public void deferDoorInteractionAck(final BlockPosition blockPosition, final int sequence) {
+        this.readyBlockInteractionAcks.remove(sequence);
+        this.pendingDoorInteractionAcks.put(sequence, blockPosition);
+        this.pendingDoorInteractionAckTicks.put(sequence, this.doorInteractionAckTick);
     }
 
     private int getRawJavaBlockState(final BlockPosition blockPosition) {
@@ -611,7 +633,9 @@ public class ChunkTracker extends StoredObject {
     }
 
     public void tick() {
+        this.doorInteractionAckTick++;
         this.flushPendingDoorUpdates();
+        this.flushExpiredDoorInteractionAcks();
         this.scheduleInitialPlayerChunkAfterSpawn();
 
         final long[] dirtyChunks = this.dirtyChunks.toLongArray();
@@ -1170,7 +1194,59 @@ public class ChunkTracker extends StoredObject {
 
         PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition, lowerJavaBlockState);
         PacketFactory.sendJavaBlockUpdate(this.user(), upperPosition, upperJavaBlockState);
+        this.acknowledgeDoorInteraction(lowerPosition, upperPosition);
         return true;
+    }
+
+    private void acknowledgeDoorInteraction(final BlockPosition lowerPosition, final BlockPosition upperPosition) {
+        boolean resolvedInteraction = false;
+        final Iterator<Map.Entry<Integer, BlockPosition>> iterator = this.pendingDoorInteractionAcks.entrySet().iterator();
+        while (iterator.hasNext()) {
+            final Map.Entry<Integer, BlockPosition> entry = iterator.next();
+            if (lowerPosition.equals(entry.getValue()) || upperPosition.equals(entry.getValue())) {
+                this.readyBlockInteractionAcks.add(entry.getKey());
+                this.pendingDoorInteractionAckTicks.remove(entry.getKey());
+                iterator.remove();
+                resolvedInteraction = true;
+            }
+        }
+        if (resolvedInteraction) this.flushReadyBlockInteractionAcks();
+    }
+
+    private void flushExpiredDoorInteractionAcks() {
+        boolean expiredInteraction = false;
+        final Iterator<Map.Entry<Integer, BlockPosition>> iterator = this.pendingDoorInteractionAcks.entrySet().iterator();
+        while (iterator.hasNext()) {
+            final Map.Entry<Integer, BlockPosition> entry = iterator.next();
+            final int queuedTick = this.pendingDoorInteractionAckTicks.getOrDefault(entry.getKey(), this.doorInteractionAckTick);
+            if (this.doorInteractionAckTick - queuedTick >= DOOR_INTERACTION_ACK_FALLBACK_TICKS) {
+                this.readyBlockInteractionAcks.add(entry.getKey());
+                this.pendingDoorInteractionAckTicks.remove(entry.getKey());
+                iterator.remove();
+                expiredInteraction = true;
+            }
+        }
+        if (expiredInteraction) this.flushReadyBlockInteractionAcks();
+    }
+
+    private void flushReadyBlockInteractionAcks() {
+        final Integer sequence = highestReadyBlockInteractionAck(
+                this.readyBlockInteractionAcks,
+                this.pendingDoorInteractionAcks.navigableKeySet()
+        );
+        if (sequence == null) return;
+
+        // Java's acknowledgement is cumulative. Never send through the first
+        // unresolved door sequence, even when a newer non-door action or a
+        // different door has already become ready.
+        PacketFactory.sendJavaBlockChangedAck(this.user(), sequence);
+        this.readyBlockInteractionAcks.headSet(sequence, true).clear();
+    }
+
+    static Integer highestReadyBlockInteractionAck(final NavigableSet<Integer> readySequences, final NavigableSet<Integer> deferredSequences) {
+        if (readySequences.isEmpty()) return null;
+        if (deferredSequences.isEmpty()) return readySequences.last();
+        return readySequences.lower(deferredSequences.first());
     }
 
     private void syncItemFramesAfterChunkSend(final long chunkKey, final Set<BlockPosition> currentFrames) {

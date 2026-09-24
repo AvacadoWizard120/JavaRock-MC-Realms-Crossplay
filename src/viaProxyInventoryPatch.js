@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.109-viaproxy-3.4.13-join-swap-entity-link-fix'
+const PATCH_ID = 'v0.3.110-viaproxy-3.4.13-door-ack-fix'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/rewriter/BlockStateRewriter.class',
   'net/raphimc/viabedrock/protocol/packet/JoinPackets.class',
@@ -41,6 +41,8 @@ const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$BlockLightData.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$SubChunkPosition.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$BiomeAggregator.class',
+  'net/raphimc/viabedrock/experimental/ExperimentalFeatures.class',
+  'net/raphimc/viabedrock/experimental/ExperimentalFeatures$1.class',
   'net/raphimc/viabedrock/protocol/storage/BedrockBlockStateCompatibility.class',
   'net/raphimc/viabedrock/protocol/storage/BridgeBlockRendering.class',
   'net/raphimc/viabedrock/protocol/storage/BridgeBlockRenderingData.class',
@@ -76,7 +78,8 @@ const PATCH_SOURCE_RELATIVE_PATHS = [
   'InventoryTracker.java',
   'RecipeBookTracker.java',
   'UnhandledPackets.java',
-  'WorldEffectPackets.java'
+  'WorldEffectPackets.java',
+  'ExperimentalFeatures.java'
 ]
 
 function sha1File (filePath) {
