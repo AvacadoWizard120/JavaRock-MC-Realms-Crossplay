@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.111 - 2026-09-24
+
+- Chest and inventory takes now preserve ViaBedrock's explicit empty-cursor stack id while an earlier place is still awaiting its Realm reply. The captured take/place/take chain no longer poisons every move that follows.
+- Realm packets now cross the bridge in short, strict-FIFO slices, while packet-census files and SQLite diagnostics are written in the background. Large recipe data is captured as a bounded preview instead of freezing animals, doors, inventory, and movement for seconds at a time.
+- Stop Bridge now requests a clean shutdown first, drains queued diagnostic captures, and force-stops only processes that outlive the timeout.
+- Help now includes Changelog directly below Check for updates. It shows the installed and latest notes when an update exists, or only the latest notes when JavaRock is current.
+
 ## 0.3.110 - 2026-09-24
 
 - Door interaction acknowledgements now wait for the Realm's authoritative paired-half update, preventing the predicted open state from snapping closed and then opening again.

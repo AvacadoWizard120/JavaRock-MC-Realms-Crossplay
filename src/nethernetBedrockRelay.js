@@ -2023,6 +2023,29 @@ function bridgePendingCursorPlaceForCursorStackId (owner, cursorStackId) {
   return latest
 }
 
+function bridgePendingCursorPlaceEmptiesTrackedCursor (owner, cursorStackId, followingRequestId) {
+  const trackedCursorCount = bridgeItemCount(owner?.bridgePredictedCursorItem)
+  if (cursorStackId <= 0 || trackedCursorCount <= 0) return false
+
+  const pendingPlace = bridgePendingCursorPlaceForCursorStackId(owner, cursorStackId)
+  if (!pendingPlace) return false
+  const pendingRequestId = Number(pendingPlace.requestId)
+  const nextRequestId = Number(followingRequestId)
+  // Bedrock request ids are negative and descend (-3, -5, -7). Prove that
+  // the cursor place is ahead of this Take rather than accepting any unrelated
+  // pending cursor action as permission to discard an authoritative stack id.
+  if (!Number.isFinite(pendingRequestId) || !Number.isFinite(nextRequestId) ||
+      pendingRequestId >= 0 || nextRequestId >= 0 || pendingRequestId <= nextRequestId) return false
+
+  const actions = Array.isArray(pendingPlace.pending?.request?.actions)
+    ? pendingPlace.pending.request.actions
+    : []
+  const placedCount = actions
+    .filter(bridgeActionPlacesFromCursor)
+    .reduce((total, action) => total + Math.max(0, numberOrDefault(action.count, 0)), 0)
+  return placedCount >= trackedCursorCount
+}
+
 function bridgeAttachItemStackRequestToPlayerAuthInput (params = {}, itemStackRequestParams = {}) {
   if (params.item_stack_request || params.input_data?.item_stack_request) return params
 
@@ -2615,9 +2638,20 @@ function bridgeSanitizedItemStackRequestParams (owner, params = {}) {
       if (actionType === 'take' && bridgeSlotContainerId(destination) === 'cursor') {
         if (bridgeRewriteSlotStackIdFromTrackedState(owner, source)) changed = true
 
+        const sentCursorStackId = numberOrDefault(destination.stack_id, 0)
         const trustedCursorStackId = numberOrDefault(bridgeTrackedStackIdForLocation(owner, destination), 0)
-        const desiredCursorStackId = trustedCursorStackId && trustedCursorStackId !== requestId ? trustedCursorStackId : 0
-        if (numberOrDefault(destination.stack_id, 0) !== desiredCursorStackId) {
+        // A zero supplied by ViaBedrock is an explicit empty-cursor state. It
+        // can legitimately follow a still-unacknowledged full Place request:
+        // Bedrock pipelines those requests in order, while our last accepted
+        // cursor stack id still describes the pre-Place stack. Replacing that
+        // zero with the old positive id makes the following Take fail with
+        // FailedToValidateDstSlot. Only repair a non-zero cursor reference.
+        const pendingPlaceEmptiesCursor = sentCursorStackId === 0 &&
+          bridgePendingCursorPlaceEmptiesTrackedCursor(owner, trustedCursorStackId, requestId)
+        const desiredCursorStackId = pendingPlaceEmptiesCursor
+          ? 0
+          : (trustedCursorStackId && trustedCursorStackId !== requestId ? trustedCursorStackId : 0)
+        if (sentCursorStackId !== desiredCursorStackId) {
           destination.stack_id = desiredCursorStackId
           changed = true
         }
@@ -3927,12 +3961,21 @@ class ViaBedrockRelayPlayer extends Player {
 
     this.startRelaying = false
     this.once('join', () => {
-      this.flushDownQueue()
       this.startRelaying = true
+      this.flushDownQueue()
     })
 
     this.downQ = []
     this.upQ = []
+    this.realmClientboundQueue = []
+    this.realmClientboundQueueHead = 0
+    this.realmClientboundDrainScheduled = false
+    this.realmClientboundDrainActive = false
+    this.realmClientboundDrainGeneration = 0
+    this.realmClientboundDrainClosed = false
+    this.realmClientboundTerminalQueued = false
+    this.realmClientboundPrejoinQueuedAt = new WeakMap()
+    this.realmClientboundBacklogTelemetry = null
     this.upInLog = (...msg) => console.debug('* Backend -> Proxy', ...msg)
     this.upOutLog = (...msg) => console.debug('* Proxy -> Backend', ...msg)
     this.downInLog = (...msg) => console.debug('* Client -> Proxy', ...msg)
@@ -6928,6 +6971,249 @@ class ViaBedrockRelayPlayer extends Player {
     }
   }
 
+  realmClientboundSlicePacketLimit () {
+    return Math.max(1, Math.min(512, intEnv('NETHERNET_RELAY_CLIENTBOUND_SLICE_PACKETS', 64)))
+  }
+
+  realmClientboundSliceTimeLimitMs () {
+    return Math.max(1, Math.min(16, intEnv('NETHERNET_RELAY_CLIENTBOUND_SLICE_MS', 4)))
+  }
+
+  realmClientboundNowMs () {
+    return Number(process.hrtime.bigint()) / 1e6
+  }
+
+  scheduleRealmClientboundDrain (callback) {
+    return setImmediate(callback)
+  }
+
+  ensureRealmClientboundDrainState () {
+    if (!Array.isArray(this.realmClientboundQueue)) this.realmClientboundQueue = []
+    if (!Number.isInteger(this.realmClientboundQueueHead) || this.realmClientboundQueueHead < 0) {
+      this.realmClientboundQueueHead = 0
+    }
+    if (typeof this.realmClientboundDrainScheduled !== 'boolean') this.realmClientboundDrainScheduled = false
+    if (typeof this.realmClientboundDrainActive !== 'boolean') this.realmClientboundDrainActive = false
+    if (!Number.isInteger(this.realmClientboundDrainGeneration)) this.realmClientboundDrainGeneration = 0
+    if (typeof this.realmClientboundDrainClosed !== 'boolean') this.realmClientboundDrainClosed = false
+    if (typeof this.realmClientboundTerminalQueued !== 'boolean') this.realmClientboundTerminalQueued = false
+    if (!this.realmClientboundPrejoinQueuedAt || typeof this.realmClientboundPrejoinQueuedAt.get !== 'function') {
+      this.realmClientboundPrejoinQueuedAt = new WeakMap()
+    }
+  }
+
+  noteRealmClientboundQueueDepth (queuedAtMs = this.realmClientboundNowMs()) {
+    const pendingPackets = Math.max(0, this.realmClientboundQueue.length - this.realmClientboundQueueHead)
+    if (!this.realmClientboundBacklogTelemetry) {
+      this.realmClientboundBacklogTelemetry = {
+        startedAtMs: queuedAtMs,
+        packets: 0,
+        livePackets: 0,
+        prejoinPackets: 0,
+        maxQueued: pendingPackets,
+        yields: 0,
+        maxSliceMs: 0,
+        oldestWaitMs: 0,
+        lastSustainedReportAtMs: Number.NEGATIVE_INFINITY
+      }
+      return
+    }
+    this.realmClientboundBacklogTelemetry.startedAtMs = Math.min(
+      this.realmClientboundBacklogTelemetry.startedAtMs,
+      queuedAtMs
+    )
+    this.realmClientboundBacklogTelemetry.maxQueued = Math.max(
+      this.realmClientboundBacklogTelemetry.maxQueued,
+      pendingPackets
+    )
+  }
+
+  recordRealmClientboundBacklogTelemetry (event) {
+    const source = event.prejoinPackets > 0 && event.livePackets > 0
+      ? 'mixed'
+      : (event.prejoinPackets > 0 ? 'prejoin' : 'live')
+    console.log(`[bedrock-relay] Realm clientbound backlog ${event.state}: packets=${event.packets} source=${source} prejoin=${event.prejoinPackets} live=${event.livePackets} maxQueued=${event.maxQueued} yields=${event.yields} totalMs=${event.totalMs.toFixed(1)} maxSliceMs=${event.maxSliceMs.toFixed(1)} oldestWaitMs=${event.oldestWaitMs.toFixed(1)}`)
+  }
+
+  maybeReportRealmClientboundBacklog (state, nowMs = this.realmClientboundNowMs()) {
+    const telemetry = this.realmClientboundBacklogTelemetry
+    if (!telemetry) return false
+    const totalMs = Math.max(0, nowMs - telemetry.startedAtMs)
+    if (telemetry.packets === 0 || totalMs < 20) {
+      if (state === 'completed') this.realmClientboundBacklogTelemetry = null
+      return false
+    }
+    if (state === 'active') {
+      if (nowMs - telemetry.lastSustainedReportAtMs < 1000) return false
+      telemetry.lastSustainedReportAtMs = nowMs
+    }
+    this.recordRealmClientboundBacklogTelemetry({
+      state,
+      packets: telemetry.packets,
+      livePackets: telemetry.livePackets,
+      prejoinPackets: telemetry.prejoinPackets,
+      maxQueued: telemetry.maxQueued,
+      yields: telemetry.yields,
+      totalMs,
+      maxSliceMs: telemetry.maxSliceMs,
+      oldestWaitMs: telemetry.oldestWaitMs
+    })
+    if (state === 'completed') this.realmClientboundBacklogTelemetry = null
+    return true
+  }
+
+  requestRealmClientboundDrain () {
+    this.ensureRealmClientboundDrainState()
+    if (this.realmClientboundDrainClosed) return false
+    if (this.realmClientboundDrainScheduled || this.realmClientboundDrainActive) return false
+    if (this.realmClientboundQueueHead >= this.realmClientboundQueue.length) return false
+
+    this.realmClientboundDrainScheduled = true
+    const generation = this.realmClientboundDrainGeneration
+    this.scheduleRealmClientboundDrain(() => {
+      if (generation !== this.realmClientboundDrainGeneration) return
+      this.realmClientboundDrainScheduled = false
+      this.drainRealmClientboundQueue()
+    })
+    return true
+  }
+
+  enqueueRealmClientboundPacket (packet, sourceUpstream = this.upstream) {
+    this.ensureRealmClientboundDrainState()
+    if (this.realmClientboundDrainClosed) return false
+    if (this.realmClientboundTerminalQueued) return false
+    if (sourceUpstream && this.upstream && sourceUpstream !== this.upstream) return false
+
+    const queuedAtMs = this.realmClientboundNowMs()
+    this.realmClientboundQueue.push({
+      packet,
+      context: this.startRelaying === false ? 'prejoin_capture' : 'live',
+      queuedAtMs
+    })
+    this.noteRealmClientboundQueueDepth(queuedAtMs)
+    // Never drain inline here. bedrock-protocol calls readPacket once per packet
+    // while decoding a compressed batch; inline work would still monopolize the
+    // event loop for the whole batch even if each call observed an empty queue.
+    this.requestRealmClientboundDrain()
+    return true
+  }
+
+  enqueueRealmClientboundTerminal (callback, sourceUpstream = this.upstream) {
+    this.ensureRealmClientboundDrainState()
+    if (this.realmClientboundDrainClosed || this.realmClientboundTerminalQueued) return false
+    if (sourceUpstream && this.upstream && sourceUpstream !== this.upstream) return false
+
+    this.realmClientboundTerminalQueued = true
+    this.realmClientboundQueue.push({ context: 'terminal', callback })
+    if (this.realmClientboundBacklogTelemetry) this.noteRealmClientboundQueueDepth()
+    this.requestRealmClientboundDrain()
+    return true
+  }
+
+  capturePrejoinRealmPacket (entry) {
+    const packet = entry.packet
+    this.recordLosslessNativePacket('realm_to_native_bedrock', packet, 'queued_until_downstream_ready')
+    this.upInLog('Client not ready, queueing packet until join')
+    this.realmClientboundPrejoinQueuedAt.set(packet, entry.queuedAtMs)
+    this.downQ.push(packet)
+  }
+
+  processDownstreamQueuedRealmPacket (packet, recordLossless = false) {
+    if (recordLossless) this.recordLosslessNativePacket('realm_to_native_bedrock', packet, 'queued_until_downstream_ready')
+    let des
+    try {
+      des = this.parseUpstreamPacket(packet)
+    } catch (e) {
+      this.recordUpstreamParseFailure(packet, 'downstream_queue_flush', e)
+      if (!this.options.omitParseErrors) this.disconnect('Server packet parse error')
+      return
+    }
+    this.recordRealmToBridge(des.data.name, des.data.params, 'received', { context: 'downstream_queue_flush', bytes: Buffer.isBuffer(packet) ? packet.length : undefined })
+    if (des.data.name === 'item_stack_response') {
+      this.resolveCraftingDrainResponses(des.data.params, 'downstream_queue_flush')
+      this.recordRejectedItemStackRequestDiagnostics(des.data.params, 'downstream_queue_flush')
+    }
+    this.upstreamState?.recordPacket?.(des.data.name, des.data.params)
+    this.exportCraftingDataForPatchedViaBedrock(des.data.name, des.data.params)
+    this.mirrorUpstreamClientStateFromPacket(des.data.name, des.data.params)
+    if (des.data.name === 'item_stack_response') {
+      this.flushBridgeSyntheticFollowUpPlacesFromResponse(des.data.params, 'downstream_queue_flush')
+      this.flushBridgeCursorDependentTakesFromResponse(des.data.params, 'downstream_queue_flush')
+      this.flushDeferredExternalContainerClose('item_stack_response')
+    }
+    if (this.isNativeBedrockRecorderDownstream()) {
+      if (des.data.name !== 'play_status' || des.data.params.status !== 'login_success') {
+        this.relayNativeBedrockClientboundRaw(packet, des, 'downstream_queue_flush')
+      }
+      return
+    }
+    this.queueClientbound(des.data.name, des.data.params, 'downstream_queue_flush')
+  }
+
+  drainRealmClientboundQueue () {
+    this.ensureRealmClientboundDrainState()
+    if (this.realmClientboundDrainActive) return 0
+    if (this.realmClientboundQueueHead >= this.realmClientboundQueue.length) {
+      this.realmClientboundQueue = []
+      this.realmClientboundQueueHead = 0
+      return 0
+    }
+
+    this.realmClientboundDrainActive = true
+    const startedAt = this.realmClientboundNowMs()
+    const packetLimit = this.realmClientboundSlicePacketLimit()
+    const timeLimitMs = this.realmClientboundSliceTimeLimitMs()
+    let processed = 0
+
+    try {
+      while (this.realmClientboundQueueHead < this.realmClientboundQueue.length && processed < packetLimit) {
+        const entry = this.realmClientboundQueue[this.realmClientboundQueueHead++]
+        if (entry.context === 'live' || entry.context === 'downstream_queue_flush') {
+          if (!this.realmClientboundBacklogTelemetry) this.noteRealmClientboundQueueDepth(entry.queuedAtMs)
+          const telemetry = this.realmClientboundBacklogTelemetry
+          const entryStartedAt = this.realmClientboundNowMs()
+          telemetry.packets++
+          if (entry.context === 'live') telemetry.livePackets++
+          else telemetry.prejoinPackets++
+          telemetry.oldestWaitMs = Math.max(
+            telemetry.oldestWaitMs,
+            Math.max(0, entryStartedAt - entry.queuedAtMs)
+          )
+        }
+        if (entry.context === 'terminal') entry.callback()
+        else if (entry.context === 'prejoin_capture') this.capturePrejoinRealmPacket(entry)
+        else if (entry.context === 'downstream_queue_flush') this.processDownstreamQueuedRealmPacket(entry.packet, entry.recordLossless)
+        else this.readUpstream(entry.packet)
+        processed++
+        if (this.realmClientboundNowMs() - startedAt >= timeLimitMs) break
+      }
+    } finally {
+      const finishedAt = this.realmClientboundNowMs()
+      if (this.realmClientboundBacklogTelemetry) {
+        this.realmClientboundBacklogTelemetry.maxSliceMs = Math.max(
+          this.realmClientboundBacklogTelemetry.maxSliceMs,
+          Math.max(0, finishedAt - startedAt)
+        )
+      }
+      this.realmClientboundDrainActive = false
+      if (this.realmClientboundQueueHead >= this.realmClientboundQueue.length) {
+        this.realmClientboundQueue = []
+        this.realmClientboundQueueHead = 0
+        this.maybeReportRealmClientboundBacklog('completed', finishedAt)
+      } else if (this.realmClientboundQueueHead >= 4096 && this.realmClientboundQueueHead * 2 >= this.realmClientboundQueue.length) {
+        this.realmClientboundQueue = this.realmClientboundQueue.slice(this.realmClientboundQueueHead)
+        this.realmClientboundQueueHead = 0
+      }
+      if (this.realmClientboundQueueHead < this.realmClientboundQueue.length && this.realmClientboundBacklogTelemetry) {
+        this.realmClientboundBacklogTelemetry.yields++
+        this.maybeReportRealmClientboundBacklog('active', finishedAt)
+      }
+      this.requestRealmClientboundDrain()
+    }
+
+    return processed
+  }
+
   readUpstream (packet) {
     this.recordLosslessNativePacket('realm_to_native_bedrock', packet, this.startRelaying ? 'live' : 'queued_until_downstream_ready')
     if (!this.startRelaying) {
@@ -6986,37 +7272,38 @@ class ViaBedrockRelayPlayer extends Player {
 
   flushDownQueue () {
     this.downOutLog('Flushing downstream queue')
-    for (const packet of this.downQ) {
-      let des
-      try {
-        des = this.parseUpstreamPacket(packet)
-      } catch (e) {
-        this.recordUpstreamParseFailure(packet, 'downstream_queue_flush', e)
-        if (!this.options.omitParseErrors) this.disconnect('Server packet parse error')
-        continue
-      }
-      this.recordRealmToBridge(des.data.name, des.data.params, 'received', { context: 'downstream_queue_flush', bytes: Buffer.isBuffer(packet) ? packet.length : undefined })
-      if (des.data.name === 'item_stack_response') {
-        this.resolveCraftingDrainResponses(des.data.params, 'downstream_queue_flush')
-        this.recordRejectedItemStackRequestDiagnostics(des.data.params, 'downstream_queue_flush')
-      }
-      this.upstreamState?.recordPacket?.(des.data.name, des.data.params)
-      this.exportCraftingDataForPatchedViaBedrock(des.data.name, des.data.params)
-      this.mirrorUpstreamClientStateFromPacket(des.data.name, des.data.params)
-      if (des.data.name === 'item_stack_response') {
-        this.flushBridgeSyntheticFollowUpPlacesFromResponse(des.data.params, 'downstream_queue_flush')
-        this.flushBridgeCursorDependentTakesFromResponse(des.data.params, 'downstream_queue_flush')
-        this.flushDeferredExternalContainerClose('item_stack_response')
-      }
-      if (this.isNativeBedrockRecorderDownstream()) {
-        if (des.data.name !== 'play_status' || des.data.params.status !== 'login_success') {
-          this.relayNativeBedrockClientboundRaw(packet, des, 'downstream_queue_flush')
-        }
-        continue
-      }
-      this.queueClientbound(des.data.name, des.data.params, 'downstream_queue_flush')
-    }
+    this.ensureRealmClientboundDrainState()
+    const nowMs = this.realmClientboundNowMs()
+    const queuedBeforeReady = this.downQ.map(packet => {
+      const queuedAtMs = this.realmClientboundPrejoinQueuedAt.get(packet) ?? nowMs
+      this.realmClientboundPrejoinQueuedAt.delete(packet)
+      return { packet, context: 'downstream_queue_flush', queuedAtMs, recordLossless: false }
+    })
     this.downQ = []
+
+    // These packets were received before any still-pending live entries, so
+    // splice them ahead of the unconsumed tail rather than appending them. A
+    // packet accepted before join keeps prejoin semantics even if the join
+    // event wins the race with its first scheduled drain.
+    const pending = this.realmClientboundQueue.slice(this.realmClientboundQueueHead).map(entry => {
+      if (entry.context !== 'prejoin_capture') return entry
+      return {
+        ...entry,
+        context: 'downstream_queue_flush',
+        recordLossless: true
+      }
+    })
+    this.realmClientboundQueue = queuedBeforeReady.concat(pending)
+    this.realmClientboundQueueHead = 0
+    if (this.realmClientboundQueue.length === 0) return 0
+    const oldestQueuedAtMs = this.realmClientboundQueue.reduce((oldest, entry) => (
+      Number.isFinite(entry.queuedAtMs) ? Math.min(oldest, entry.queuedAtMs) : oldest
+    ), nowMs)
+    this.noteRealmClientboundQueueDepth(oldestQueuedAtMs)
+
+    // A bounded first slice avoids adding a full extra turn to the small,
+    // common join backlog. Large backlogs always yield before the next slice.
+    return this.drainRealmClientboundQueue()
   }
 
   flushUpQueue () {
@@ -7171,6 +7458,15 @@ class ViaBedrockRelayPlayer extends Player {
     this.deferredCraftingContainerClose = null
     this.deferredExternalContainerClose = null
     this.pendingCraftingDrainRequestIds?.clear?.()
+    this.realmClientboundDrainGeneration = (this.realmClientboundDrainGeneration || 0) + 1
+    this.realmClientboundDrainClosed = true
+    this.realmClientboundTerminalQueued = true
+    this.realmClientboundQueue = []
+    this.realmClientboundQueueHead = 0
+    this.realmClientboundDrainScheduled = false
+    this.realmClientboundDrainActive = false
+    this.realmClientboundPrejoinQueuedAt = new WeakMap()
+    this.realmClientboundBacklogTelemetry = null
     this.upstream?.close(reason)
     super.close(reason)
   }
@@ -7461,7 +7757,7 @@ class NetherNetRealmRelay extends Relay {
       context.finished = true
       ds.upstream = upstream
       ds.upstreamState = upstreamState
-      upstream.readPacket = packet => ds.readUpstream(packet)
+      upstream.readPacket = packet => ds.enqueueRealmClientboundPacket(packet, upstream)
       if (!this.isNativeBedrockRecorderDownstream()) {
         const cacheParams = { enabled: this.enableChunkCaching === true }
         upstream.write('client_cache_status', cacheParams)
@@ -7541,34 +7837,44 @@ class NetherNetRealmRelay extends Relay {
         return
       }
 
-      context.finished = true
-      if (kind === 'error') {
-        console.error(`[bedrock-relay] Upstream Realm error: ${failure?.stack || reason}`)
-        this.runtimeStatus?.event?.('bedrock_relay_upstream_error', {
-          state: 'bedrock_relay_error',
+      const finishUpstreamEnd = () => {
+        context.finished = true
+        if (kind === 'error') {
+          console.error(`[bedrock-relay] Upstream Realm error: ${failure?.stack || reason}`)
+          this.runtimeStatus?.event?.('bedrock_relay_upstream_error', {
+            state: 'bedrock_relay_error',
+            bedrockRelay: {
+              downstream: label,
+              error: failure?.stack || String(reason),
+              upstreamAttempt: context.attempt,
+              upstreamMaxAttempts: context.retryOptions.maxAttempts
+            }
+          })
+          if (isRelayDownstreamOpen(ds)) ds.disconnect(`Realm relay upstream error: ${reason}`)
+          try { upstream.close?.('upstream_error') } catch {}
+          return
+        }
+
+        console.log(`[bedrock-relay] Upstream Realm connection closed: ${reason}`)
+        this.runtimeStatus?.event?.('bedrock_relay_upstream_close', {
+          state: 'bedrock_relay_closed',
           bedrockRelay: {
             downstream: label,
-            error: failure?.stack || String(reason),
+            reason: String(reason),
             upstreamAttempt: context.attempt,
             upstreamMaxAttempts: context.retryOptions.maxAttempts
           }
         })
-        if (isRelayDownstreamOpen(ds)) ds.disconnect(`Realm relay upstream error: ${reason}`)
-        try { upstream.close?.('upstream_error') } catch {}
-        return
+        if (isRelayDownstreamOpen(ds)) ds.disconnect('Bedrock Realm connection closed')
       }
 
-      console.log(`[bedrock-relay] Upstream Realm connection closed: ${reason}`)
-      this.runtimeStatus?.event?.('bedrock_relay_upstream_close', {
-        state: 'bedrock_relay_closed',
-        bedrockRelay: {
-          downstream: label,
-          reason: String(reason),
-          upstreamAttempt: context.attempt,
-          upstreamMaxAttempts: context.retryOptions.maxAttempts
-        }
-      })
-      if (isRelayDownstreamOpen(ds)) ds.disconnect('Bedrock Realm connection closed')
+      // The transport emits its terminal event after readPacket returns. Since
+      // joined Realm packets now drain cooperatively, preserve the old
+      // packet-before-close lifecycle by placing terminal handling behind every
+      // raw packet already accepted from this upstream.
+      if (upstreamJoined && typeof ds.enqueueRealmClientboundTerminal === 'function' &&
+          ds.enqueueRealmClientboundTerminal(finishUpstreamEnd, upstream)) return
+      finishUpstreamEnd()
     }
 
     upstream.on('error', error => handleUpstreamEnd('error', error))

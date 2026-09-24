@@ -24,6 +24,11 @@ function mergeInto (target, patch) {
   return target
 }
 
+function stopRequestFileForStatus (file, pid = process.pid) {
+  if (!file) return undefined
+  return `${path.resolve(file)}.stop.${Number(pid)}`
+}
+
 class BridgeRuntimeStatus {
   constructor (file) {
     this.file = file ? path.resolve(file) : undefined
@@ -33,8 +38,17 @@ class BridgeRuntimeStatus {
       state: 'starting'
     }
     this.dynamicProviders = []
+    this.closed = false
+    this.stopRequestHandler = null
+    this.stopRequestHandling = false
+    this.stopRequestFile = stopRequestFileForStatus(this.file)
 
     if (this.file) {
+      try {
+        fs.unlinkSync(this.stopRequestFile)
+      } catch (error) {
+        if (error?.code !== 'ENOENT') console.warn(`[bridge-status] Could not remove stale stop request ${this.stopRequestFile}: ${error.message || error}`)
+      }
       this.timer = setInterval(() => this.write(), 2000)
       this.write()
     }
@@ -91,8 +105,58 @@ class BridgeRuntimeStatus {
     }
   }
 
+  onStopRequested (handler) {
+    if (typeof handler !== 'function') return false
+    this.stopRequestHandler = handler
+    if (!this.stopRequestFile || this.closed) return false
+    if (!this.stopRequestTimer) {
+      this.stopRequestTimer = setInterval(() => this.checkStopRequest(), 100)
+    }
+    this.checkStopRequest()
+    return true
+  }
+
+  checkStopRequest () {
+    if (this.closed || this.stopRequestHandling || !this.stopRequestHandler || !this.stopRequestFile) return false
+    if (!fs.existsSync(this.stopRequestFile)) return false
+
+    this.stopRequestHandling = true
+    try {
+      fs.unlinkSync(this.stopRequestFile)
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        this.stopRequestHandling = false
+        console.warn(`[bridge-status] Could not consume stop request ${this.stopRequestFile}: ${error.message || error}`)
+        return false
+      }
+    }
+
+    this.event('launcher_stop_requested', { state: 'stopping' })
+    try {
+      const result = this.stopRequestHandler()
+      Promise.resolve(result).catch(error => {
+        console.error(`[bridge-status] Graceful stop failed: ${error.stack || error.message || error}`)
+      })
+    } catch (error) {
+      console.error(`[bridge-status] Graceful stop failed: ${error.stack || error.message || error}`)
+    }
+    return true
+  }
+
   close (state = 'closed') {
+    if (this.closed) return
+    this.closed = true
     if (this.timer) clearInterval(this.timer)
+    if (this.stopRequestTimer) clearInterval(this.stopRequestTimer)
+    this.timer = null
+    this.stopRequestTimer = null
+    if (this.stopRequestFile) {
+      try {
+        fs.unlinkSync(this.stopRequestFile)
+      } catch (error) {
+        if (error?.code !== 'ENOENT') console.warn(`[bridge-status] Could not remove ${this.stopRequestFile}: ${error.message || error}`)
+      }
+    }
     this.set({
       state,
       stoppedAt: new Date().toISOString()
@@ -107,5 +171,6 @@ function createBridgeRuntimeStatus (config) {
 module.exports = {
   BridgeRuntimeStatus,
   createBridgeRuntimeStatus,
-  mergeInto
+  mergeInto,
+  stopRequestFileForStatus
 }

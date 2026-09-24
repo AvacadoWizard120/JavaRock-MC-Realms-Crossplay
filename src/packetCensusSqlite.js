@@ -2,6 +2,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const { Worker, isMainThread, parentPort, workerData, threadId } = require('worker_threads')
 const { safeStringify } = require('./safeStringify')
 
 function loadDatabaseSync () {
@@ -14,6 +15,13 @@ function loadDatabaseSync () {
 
 function ensureDir (dir) {
   fs.mkdirSync(dir, { recursive: true })
+}
+
+function atomicWriteJson (file, value, taskId = 0) {
+  ensureDir(path.dirname(file))
+  const tmp = `${file}.${process.pid}.${threadId}.${taskId}.tmp`
+  fs.writeFileSync(tmp, safeStringify(value, 2) + '\n')
+  fs.renameSync(tmp, file)
 }
 
 function jsonText (value) {
@@ -708,6 +716,409 @@ class PacketCensusSqliteLedger {
   }
 }
 
+function estimatePersistenceTaskBytes (task) {
+  if (typeof task.content === 'string') return Buffer.byteLength(task.content)
+  if (Buffer.isBuffer(task.content)) return task.content.length
+  if (Array.isArray(task.args?.[0])) return Math.max(1024, task.args[0].length * 2048)
+  if (task.value != null) return 256 * 1024
+  return 1024
+}
+
+class PacketCensusPersistenceQueue {
+  constructor (options = {}) {
+    this.sqliteEnabled = options.sqliteEnabled !== false && Boolean(loadDatabaseSync())
+    this.enabled = this.sqliteEnabled
+    this.unavailableReason = options.sqliteEnabled === false || this.sqliteEnabled
+      ? null
+      : 'node:sqlite is unavailable in this Node runtime'
+    this.maxInFlight = Number.isInteger(options.maxInFlight) && options.maxInFlight > 0
+      ? options.maxInFlight
+      : 4
+    this.maxQueuedBytes = Number.isInteger(options.maxQueuedBytes) && options.maxQueuedBytes > 0
+      ? options.maxQueuedBytes
+      : 8 * 1024 * 1024
+    this.maxAppendBatchBytes = Number.isInteger(options.maxAppendBatchBytes) && options.maxAppendBatchBytes > 0
+      ? options.maxAppendBatchBytes
+      : 256 * 1024
+    this.pending = []
+    this.inFlight = new Map()
+    this.completionCallbacks = new Map()
+    this.queuedBytes = 0
+    this.nextTaskId = 1
+    this.closed = false
+    this.closeResult = undefined
+    this.shutdownQueued = false
+    this.available = false
+    this.drainFailed = false
+    this.failedTaskCount = 0
+    this.rejectedTaskCount = 0
+    this.drainTimeoutMs = Number.isInteger(options.drainTimeoutMs) && options.drainTimeoutMs > 0
+      ? options.drainTimeoutMs
+      : 5000
+    this.warningShown = false
+    // Shared slots: last completed task id, worker error count, fatal-worker
+    // flag, and the task id that caused a fatal worker shutdown. The failed id
+    // lets a synchronous shutdown drain distinguish earlier writes that really
+    // completed from the failed task and the unprocessed tail behind it.
+    this.shared = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 4))
+    this.worker = null
+
+    try {
+      this.worker = new Worker(__filename, {
+        workerData: {
+          packetCensusPersistenceWorker: true,
+          shared: this.shared.buffer,
+          sqlite: {
+            enabled: this.sqliteEnabled,
+            dir: options.dir,
+            file: options.file,
+            captureProfile: options.captureProfile,
+            sourceLabel: options.sourceLabel,
+            targetLabel: options.targetLabel
+          }
+        }
+      })
+      this.available = true
+    } catch (error) {
+      Atomics.store(this.shared, 2, 1)
+      this.warn(`Could not start the persistence worker: ${error.stack || error.message || error}`)
+      return
+    }
+
+    this.worker.on('message', message => {
+      const completed = Number(message?.completed)
+      if (Number.isInteger(completed) && completed > 0) {
+        const entry = this.inFlight.get(completed)
+        if (entry) {
+          this.inFlight.delete(completed)
+          this.queuedBytes = Math.max(0, this.queuedBytes - entry.bytes)
+        }
+        this.settleCompletionCallbacks(completed, {
+          ok: !message?.error,
+          error: message?.error || null
+        })
+      }
+      if (message?.error) {
+        this.failedTaskCount++
+        this.warn(message.error)
+      }
+      if (message?.warning) this.warn(message.warning)
+      this.pump()
+    })
+    this.worker.on('error', error => {
+      this.markUnavailable(`Persistence worker failed: ${error.stack || error.message || error}`)
+    })
+    this.worker.on('exit', code => {
+      const expected = this.closed || this.shutdownQueued
+      this.worker = null
+      this.available = false
+      if (code === 0 && expected) return
+      this.markUnavailable(`Persistence worker exited unexpectedly with code ${code}`)
+    })
+    this.worker.unref()
+  }
+
+  warn (message) {
+    if (this.warningShown) return
+    this.warningShown = true
+    console.warn(`[packet-census] Background persistence failed; gameplay will continue but some queued diagnostics may be missing: ${message}`)
+  }
+
+  settleCompletionCallbacks (id, result) {
+    const callbacks = this.completionCallbacks.get(id)
+    if (!callbacks) return
+    this.completionCallbacks.delete(id)
+    const ordered = result.ok ? callbacks : callbacks.slice().reverse()
+    for (const callback of ordered) {
+      try {
+        callback(result)
+      } catch (error) {
+        this.warn(`Persistence completion callback failed: ${error.stack || error.message || error}`)
+      }
+    }
+  }
+
+  markUnavailable (message) {
+    if (Atomics.load(this.shared, 2) === 0) Atomics.store(this.shared, 2, 1)
+    Atomics.notify(this.shared, 0)
+    this.available = false
+    const error = String(message || 'persistence worker unavailable')
+    this.reapCompleted()
+    const callbackIds = Array.from(this.completionCallbacks.keys()).sort((left, right) => right - left)
+    for (const id of callbackIds) this.settleCompletionCallbacks(id, { ok: false, error })
+    this.pending = []
+    this.inFlight.clear()
+    this.queuedBytes = 0
+    this.warn(error)
+  }
+
+  reapCompleted () {
+    const completed = Atomics.load(this.shared, 0)
+    const failedTaskId = Atomics.load(this.shared, 3)
+    for (const [id, entry] of this.inFlight) {
+      if (id > completed) continue
+      this.inFlight.delete(id)
+      this.queuedBytes = Math.max(0, this.queuedBytes - entry.bytes)
+    }
+    const callbackIds = Array.from(this.completionCallbacks.keys())
+      .filter(id => id <= completed)
+      .sort((left, right) => left - right)
+    for (const id of callbackIds) {
+      const failed = failedTaskId > 0 && id >= failedTaskId
+      // Leave the failed task for markUnavailable(), which settles every
+      // unpersisted callback in reverse task order. Append retry callbacks use
+      // that ordering to rebuild their FIFO batches safely.
+      if (failed) continue
+      this.settleCompletionCallbacks(id, { ok: true, error: null })
+    }
+  }
+
+  pump () {
+    if (!this.worker || !this.available || Atomics.load(this.shared, 2) !== 0) return
+    while (this.pending.length && this.inFlight.size < this.maxInFlight) {
+      const entry = this.pending.shift()
+      this.inFlight.set(entry.task.id, entry)
+      try {
+        this.worker.postMessage(entry.task)
+      } catch (error) {
+        this.markUnavailable(`Could not queue ${entry.task.type} task: ${error.stack || error.message || error}`)
+        return
+      }
+    }
+  }
+
+  canAccept (bytes = 1024) {
+    if (this.closed || this.drainFailed || !this.worker || !this.available || Atomics.load(this.shared, 2) !== 0) return false
+    return this.queuedBytes === 0 || this.queuedBytes + Math.max(0, bytes) <= this.maxQueuedBytes
+  }
+
+  enqueue (task, options = {}) {
+    if (this.closed || this.drainFailed || !this.worker || !this.available || Atomics.load(this.shared, 2) !== 0) return false
+    const bytes = options.bytes || estimatePersistenceTaskBytes(task)
+    const last = this.pending[this.pending.length - 1]
+    const matchingEntry = options.coalesceKey && last?.coalesceKey === options.coalesceKey
+      ? last
+      : null
+
+    if (matchingEntry) {
+      if (task.type === 'append' && matchingEntry.task.type === 'append' &&
+          matchingEntry.bytes + bytes <= this.maxAppendBatchBytes &&
+          this.queuedBytes + bytes <= this.maxQueuedBytes) {
+        matchingEntry.task.content += task.content
+        matchingEntry.bytes += bytes
+        this.queuedBytes += bytes
+        if (typeof options.onComplete === 'function') {
+          const callbacks = this.completionCallbacks.get(matchingEntry.task.id) || []
+          callbacks.push(options.onComplete)
+          this.completionCallbacks.set(matchingEntry.task.id, callbacks)
+        }
+        return true
+      }
+      if (task.type === 'write_json' && matchingEntry.task.type === 'write_json') {
+        this.queuedBytes = Math.max(0, this.queuedBytes - matchingEntry.bytes)
+        matchingEntry.task.value = task.value
+        matchingEntry.bytes = bytes
+        this.queuedBytes += bytes
+        if (typeof options.onComplete === 'function') {
+          const callbacks = this.completionCallbacks.get(matchingEntry.task.id) || []
+          callbacks.push(options.onComplete)
+          this.completionCallbacks.set(matchingEntry.task.id, callbacks)
+        }
+        return true
+      }
+      if (task.type === 'sqlite' && task.method === 'recordRunProgress' && matchingEntry.task.method === task.method) {
+        this.queuedBytes = Math.max(0, this.queuedBytes - matchingEntry.bytes)
+        matchingEntry.task.args = task.args
+        matchingEntry.bytes = bytes
+        this.queuedBytes += bytes
+        return true
+      }
+    }
+
+    // Diagnostics are never allowed to block the gameplay event loop. Callers
+    // retain/retry their buffers when this bounded queue is temporarily full.
+    if (!this.canAccept(bytes)) {
+      this.rejectedTaskCount++
+      return false
+    }
+    task.id = this.nextTaskId++
+    const entry = { task, bytes, coalesceKey: options.coalesceKey }
+    this.pending.push(entry)
+    this.queuedBytes += bytes
+    if (typeof options.onComplete === 'function') {
+      this.completionCallbacks.set(task.id, [options.onComplete])
+    }
+    this.pump()
+    return true
+  }
+
+  appendFile (file, content, onComplete) {
+    if (!content) return true
+    return this.enqueue(
+      { type: 'append', file: path.resolve(file), content: String(content) },
+      { coalesceKey: `append:${path.resolve(file)}`, onComplete }
+    )
+  }
+
+  writeJsonAtomic (file, value, options = {}) {
+    let snapshot
+    try {
+      snapshot = structuredClone(value)
+    } catch (error) {
+      this.warn(`Could not snapshot JSON diagnostics for ${file}: ${error.stack || error.message || error}`)
+      return false
+    }
+    return this.enqueue(
+      { type: 'write_json', file: path.resolve(file), value: snapshot },
+      { coalesceKey: `write_json:${path.resolve(file)}`, onComplete: options.onComplete }
+    )
+  }
+
+  unlink (file) {
+    return this.enqueue({ type: 'unlink', file: path.resolve(file) })
+  }
+
+  sqlite (method, ...args) {
+    if (!this.sqliteEnabled) return
+    let snapshotArgs
+    try {
+      snapshotArgs = structuredClone(args)
+    } catch (error) {
+      this.warn(`Could not snapshot SQLite diagnostics for ${method}: ${error.stack || error.message || error}`)
+      return false
+    }
+    const coalesceKey = method === 'recordRunProgress' ? 'sqlite:recordRunProgress' : undefined
+    return this.enqueue({ type: 'sqlite', method, args: snapshotArgs }, { coalesceKey })
+  }
+
+  recordRunStart (...args) { return this.sqlite('recordRunStart', ...args) }
+  recordRunProgress (...args) { return this.sqlite('recordRunProgress', ...args) }
+  recordRunClose (...args) { return this.sqlite('recordRunClose', ...args) }
+  importJsonDb (...args) { return this.sqlite('importJsonDb', ...args) }
+  recordEvents (...args) { return this.sqlite('recordEvents', ...args) }
+  recordEvent (...args) { return this.sqlite('recordEvent', ...args) }
+
+  drain (timeoutMs = this.drainTimeoutMs) {
+    if (this.drainFailed) return false
+    this.pump()
+    const deadline = Date.now() + Math.max(1, timeoutMs)
+    while (this.pending.length || this.inFlight.size) {
+      if (!this.worker || !this.available || Atomics.load(this.shared, 2) !== 0) return false
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        this.drainFailed = true
+        this.warn(`Timed out after ${timeoutMs}ms while draining background diagnostics`)
+        return false
+      }
+      const completed = Atomics.load(this.shared, 0)
+      Atomics.wait(this.shared, 0, completed, Math.min(100, remainingMs))
+      this.reapCompleted()
+      this.pump()
+    }
+    this.reapCompleted()
+    return Atomics.load(this.shared, 2) === 0
+  }
+
+  fatalTaskId () {
+    return Atomics.load(this.shared, 3)
+  }
+
+  close () {
+    if (this.closed) return this.closeResult !== false
+    let clean = !this.drainFailed && this.drain()
+    if (clean && this.sqliteEnabled) clean = this.enqueue({ type: 'sqlite', method: 'close', args: [] })
+    if (clean) {
+      this.shutdownQueued = this.enqueue({ type: 'shutdown' })
+      clean = this.shutdownQueued && this.drain()
+    }
+    this.closed = true
+    if (!clean) {
+      this.markUnavailable('Background diagnostics did not shut down cleanly')
+      const termination = this.worker?.terminate()
+      termination?.catch?.(() => {})
+    } else {
+      this.worker?.unref()
+    }
+    this.closeResult = clean && Atomics.load(this.shared, 1) === 0
+    return this.closeResult
+  }
+}
+
+function runPersistenceWorker () {
+  const shared = new Int32Array(workerData.shared)
+  let ledger
+  let fatalTaskId = 0
+  try {
+    ledger = new PacketCensusSqliteLedger(workerData.sqlite || { enabled: false })
+  } catch (error) {
+    ledger = null
+    Atomics.add(shared, 1, 1)
+    parentPort.postMessage({ error: `Could not open SQLite ledger: ${error.stack || error.message || error}` })
+  }
+
+  parentPort.on('message', task => {
+    // MessagePort.close() stops new messages from arriving, but messages that
+    // were already posted can still invoke this handler. Never execute that
+    // tail after a failed task: the main thread treats it as unpersisted and
+    // may restore it for a later retry.
+    if (fatalTaskId > 0) return
+    let shutdown = false
+    let taskError = null
+    let taskWarning = null
+    try {
+      switch (task.type) {
+        case 'append':
+          ensureDir(path.dirname(task.file))
+          fs.appendFileSync(task.file, task.content)
+          break
+        case 'write_json':
+          atomicWriteJson(task.file, task.value, task.id)
+          break
+        case 'unlink':
+          try {
+            fs.unlinkSync(task.file)
+          } catch (error) {
+            if (error?.code !== 'ENOENT') taskWarning = `Could not prune old diagnostic sample ${task.file}: ${error.message || error}`
+          }
+          break
+        case 'sqlite':
+          if (ledger?.enabled && typeof ledger[task.method] === 'function') {
+            try {
+              ledger[task.method](...(task.args || []))
+            } catch (error) {
+              Atomics.add(shared, 1, 1)
+              taskWarning = `SQLite ${task.method} failed; JSON diagnostics will continue: ${error.stack || error.message || error}`
+              try { ledger.close() } catch {}
+              ledger = null
+            }
+          }
+          break
+        case 'shutdown':
+          if (ledger?.enabled) ledger.close()
+          shutdown = true
+          break
+        default:
+          throw new Error(`Unknown persistence task: ${task.type}`)
+      }
+    } catch (error) {
+      Atomics.add(shared, 1, 1)
+      Atomics.store(shared, 2, 1)
+      Atomics.compareExchange(shared, 3, 0, task.id)
+      fatalTaskId = task.id
+      taskError = `${task.type} task failed: ${error.stack || error.message || error}`
+      shutdown = true
+    } finally {
+      Atomics.store(shared, 0, task.id)
+      Atomics.notify(shared, 0)
+      // Atomics.notify wakes synchronous drain/backpressure waits, but it does
+      // not schedule JavaScript on the main thread. Always send a completion
+      // message so an idle queue can reap this task and post its pending tail.
+      parentPort.postMessage({ completed: task.id, error: taskError, warning: taskWarning })
+      if (shutdown) parentPort.close()
+    }
+  })
+}
+
 function mostCommonKey (counts) {
   let bestKey = null
   let bestCount = -1
@@ -725,9 +1136,17 @@ function createPacketCensusSqliteLedger (options = {}) {
   return new PacketCensusSqliteLedger(options)
 }
 
+function createPacketCensusPersistenceQueue (options = {}) {
+  return new PacketCensusPersistenceQueue(options)
+}
+
+if (!isMainThread && workerData?.packetCensusPersistenceWorker) runPersistenceWorker()
+
 module.exports = {
   PacketCensusSqliteLedger,
+  PacketCensusPersistenceQueue,
   createPacketCensusSqliteLedger,
+  createPacketCensusPersistenceQueue,
   inferTranslationState,
   inferTranslationStrategy
 }

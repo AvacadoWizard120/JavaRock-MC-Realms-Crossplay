@@ -9,6 +9,21 @@ async function runBedrockPacketRecorder (config) {
   console.log('[bedrock-recorder] This mode is for baseline packet capture. It does not start ViaProxy or the Java compatibility front door.')
 
   const runtimeStatus = createBridgeRuntimeStatus(config)
+  let relay = null
+  let launcherStopStarted = false
+  runtimeStatus.onStopRequested(() => {
+    if (launcherStopStarted) return
+    launcherStopStarted = true
+    console.log('[bedrock-recorder] Launcher requested a graceful stop.')
+    try {
+      relay?.close?.('launcher_stop')
+    } catch (error) {
+      console.warn(`[bedrock-recorder] Could not stop the recorder relay cleanly: ${error.message || error}`)
+    }
+    runtimeStatus.close('stopped')
+    setImmediate(() => process.exit(0))
+  })
+  if (launcherStopStarted) return
   const joinHost = !config.bedrockRelay?.host || ['0.0.0.0', '::'].includes(config.bedrockRelay.host)
     ? '127.0.0.1'
     : config.bedrockRelay.host
@@ -39,7 +54,7 @@ async function runBedrockPacketRecorder (config) {
     throw new Error('Bedrock packet recorder currently expects a NetherNet Realm endpoint.')
   }
 
-  const relay = startNetherNetBedrockRelay(config, info, {
+  relay = startNetherNetBedrockRelay(config, info, {
     runtimeStatus,
     downstreamMode: 'native-bedrock-recorder',
     packetCensusOptions: {

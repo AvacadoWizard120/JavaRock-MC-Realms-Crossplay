@@ -963,6 +963,141 @@ const sanitizedCursor = bridgeSanitizedItemStackRequestParams({ bridgePredictedI
 assert(sanitizedCursor.requests[0].actions[0].destination.stack_id === 0, 'native take sanitizer must use cursor stack id 0 when no cursor stack is server-authoritative')
 assert(sanitizedCursor.requests[0].actions[0].legacy_type_id === 0, 'native take sanitizer must repeat Take in the 1.26.40+ inner discriminator')
 
+// Captured v0.3.110 chest sequence: Take -3 moved hotbar[4] stack 10 to the
+// cursor, then Place -5 emptied that cursor into chest slot 2. ViaBedrock
+// correctly emitted the next Take -7 with cursor stack id 0 before the -5 ACK
+// arrived. The relay must not replace that explicit empty state with the last
+// accepted (pre-Place) cursor id 10.
+const capturedChestCursorOwner = {
+  bridgePredictedItemStackIds: new Map([['hotbar:4', 10]]),
+  bridgeAuthoritativeItemsByStackId: new Map([['10', { network_id: 17, count: 4, stack_id: 10 }]]),
+  bridgePredictedCursorItem: null,
+  pendingBridgeToRealmItemStackRequests: new Map()
+}
+const capturedChestTakeRequest = {
+  request_id: -3,
+  actions: [{
+    type_id: 'take',
+    count: 4,
+    source: { slot_type: { container_id: 'hotbar' }, slot: 4, stack_id: 10 },
+    destination: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 0 }
+  }]
+}
+capturedChestCursorOwner.pendingBridgeToRealmItemStackRequests.set('-3', { request: capturedChestTakeRequest })
+bridgeTrackClientboundInventoryStacks(capturedChestCursorOwner, 'item_stack_response', {
+  responses: [{
+    status: 'ok',
+    request_id: -3,
+    containers: [
+      {
+        slot_type: { container_id: 'hotbar' },
+        slots: [{ slot: 4, hotbar_slot: 4, count: 0 }]
+      },
+      {
+        slot_type: { container_id: 'cursor' },
+        slots: [{ slot: 0, hotbar_slot: 0, count: 4, item_stack_id: 10 }]
+      }
+    ]
+  }]
+})
+assert(capturedChestCursorOwner.bridgePredictedItemStackIds.get('cursor:0') === 10, 'accepted captured Take -3 must adopt authoritative cursor stack id 10')
+assert(capturedChestCursorOwner.bridgePredictedCursorItem?.count === 4, 'accepted captured Take -3 must retain the authoritative cursor count')
+
+const capturedChestPlaceRequest = {
+  request_id: -5,
+  actions: [{
+    type_id: 'place',
+    count: 4,
+    source: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 10 },
+    destination: { slot_type: { container_id: 'container' }, slot: 2, stack_id: 0 }
+  }]
+}
+capturedChestCursorOwner.pendingBridgeToRealmItemStackRequests.set('-5', { request: capturedChestPlaceRequest })
+const capturedNextTake = {
+  requests: [{
+    request_id: -7,
+    actions: [{
+      type_id: 'take',
+      count: 1,
+      source: { slot_type: { container_id: 'container' }, slot: 3, stack_id: 11 },
+      destination: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 0 }
+    }],
+    custom_names: [],
+    cause: -1
+  }]
+}
+const sanitizedCapturedNextTake = bridgeSanitizedItemStackRequestParams(capturedChestCursorOwner, capturedNextTake)
+assert(sanitizedCapturedNextTake.requests[0].actions[0].destination.stack_id === 0, 'captured Take -7 must keep ViaBedrock\'s explicit empty cursor id 0 while Place -5 is awaiting acknowledgement')
+
+capturedChestCursorOwner.pendingBridgeToRealmItemStackRequests.set('-7', { request: sanitizedCapturedNextTake.requests[0] })
+bridgeTrackClientboundInventoryStacks(capturedChestCursorOwner, 'item_stack_response', {
+  responses: [{
+    status: 'ok',
+    request_id: -5,
+    containers: [
+      {
+        slot_type: { container_id: 'cursor' },
+        slots: [{ slot: 0, hotbar_slot: 0, count: 0 }]
+      },
+      {
+        slot_type: { container_id: 'container' },
+        slots: [{ slot: 2, hotbar_slot: 2, count: 4, item_stack_id: 10 }]
+      }
+    ]
+  }]
+})
+assert(!capturedChestCursorOwner.bridgePredictedItemStackIds.has('cursor:0'), 'accepted captured Place -5 must clear authoritative cursor stack id even when the empty response omits item_stack_id')
+bridgeTrackClientboundInventoryStacks(capturedChestCursorOwner, 'item_stack_response', {
+  responses: [{ status: 50, request_id: -7 }]
+})
+assert(!capturedChestCursorOwner.bridgePredictedItemStackIds.has('cursor:0'), 'rejected captured Take -7 must not resurrect pre-Place cursor stack id 10')
+
+const occupiedCursorWithoutPendingPlace = {
+  bridgePredictedItemStackIds: new Map([['cursor:0', 10], ['container:3', 11]]),
+  bridgePredictedCursorItem: { network_id: 17, count: 4, stack_id: 10 },
+  pendingBridgeToRealmItemStackRequests: new Map()
+}
+const repairedOccupiedCursorTake = bridgeSanitizedItemStackRequestParams(occupiedCursorWithoutPendingPlace, {
+  requests: [{
+    request_id: -9,
+    actions: [{
+      type_id: 'take',
+      count: 1,
+      source: { slot_type: { container_id: 'container' }, slot: 3, stack_id: 11 },
+      destination: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 0 }
+    }],
+    custom_names: [],
+    cause: -1
+  }]
+})
+assert(repairedOccupiedCursorTake.requests[0].actions[0].destination.stack_id === 10, 'an occupied cursor without an earlier full Place must still repair ViaBedrock\'s stale zero to the authoritative cursor id')
+
+occupiedCursorWithoutPendingPlace.pendingBridgeToRealmItemStackRequests.set('-7', {
+  request: {
+    request_id: -7,
+    actions: [{
+      type_id: 'place',
+      count: 1,
+      source: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 10 },
+      destination: { slot_type: { container_id: 'container' }, slot: 4, stack_id: 0 }
+    }]
+  }
+})
+const repairedAfterPartialPlace = bridgeSanitizedItemStackRequestParams(occupiedCursorWithoutPendingPlace, {
+  requests: [{
+    request_id: -9,
+    actions: [{
+      type_id: 'take',
+      count: 1,
+      source: { slot_type: { container_id: 'container' }, slot: 3, stack_id: 11 },
+      destination: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 0 }
+    }],
+    custom_names: [],
+    cause: -1
+  }]
+})
+assert(repairedAfterPartialPlace.requests[0].actions[0].destination.stack_id === 10, 'a partial pending Place must not claim that the tracked cursor will be empty')
+
 const staleTakeSourceRequest = {
   requests: [{
     request_id: -20,

@@ -44,6 +44,28 @@ function makeDeferredRelayRealmInfo (config) {
 async function runViaBedrockRelay (config, runtimeStatus) {
   const info = makeDeferredRelayRealmInfo(config)
   const statusText = `Bridge selected ${info.realm.name || 'Realm'} - endpoint resolves on Java join`
+  let relay = null
+  let proxy = null
+  let launcherStopStarted = false
+
+  runtimeStatus.onStopRequested(() => {
+    if (launcherStopStarted) return
+    launcherStopStarted = true
+    console.log('[bridge] Launcher requested a graceful stop.')
+    try {
+      proxy?.close?.()
+    } catch (error) {
+      console.warn(`[bridge] Could not stop ViaProxy cleanly: ${error.message || error}`)
+    }
+    try {
+      relay?.close?.('launcher_stop')
+    } catch (error) {
+      console.warn(`[bridge] Could not stop the Realm relay cleanly: ${error.message || error}`)
+    }
+    runtimeStatus.close('stopped')
+    setImmediate(() => process.exit(0))
+  })
+  if (launcherStopStarted) return
 
   runtimeStatus.event('bedrock_relay_deferred_realm_lookup', {
     state: 'starting_local_relay',
@@ -55,7 +77,7 @@ async function runViaBedrockRelay (config, runtimeStatus) {
     }
   })
 
-  const relay = startNetherNetBedrockRelay(config, info, {
+  relay = startNetherNetBedrockRelay(config, info, {
     runtimeStatus,
     downstreamMode: 'viabedrock'
   })
@@ -68,7 +90,7 @@ async function runViaBedrockRelay (config, runtimeStatus) {
     }
   })
 
-  const proxy = startJavaCompatProxy(config, {
+  proxy = startJavaCompatProxy(config, {
     ...config,
     javaLan: {
       ...config.javaLan,
@@ -114,6 +136,22 @@ async function runViaBedrockRelay (config, runtimeStatus) {
 async function runStatusFacade (config, runtimeStatus) {
   let statusText = 'Bedrock Realm Bridge - Realm lookup did not complete'
   let loginDisconnectText = 'The local Java facade is running, but the Bedrock Realm endpoint was not resolved.'
+  let statusServer = null
+  let launcherStopStarted = false
+
+  runtimeStatus.onStopRequested(() => {
+    if (launcherStopStarted) return
+    launcherStopStarted = true
+    console.log('[bridge] Launcher requested a graceful stop.')
+    try {
+      statusServer?.close?.()
+    } catch (error) {
+      console.warn(`[bridge] Could not stop the Java status facade cleanly: ${error.message || error}`)
+    }
+    runtimeStatus.close('stopped')
+    setImmediate(() => process.exit(0))
+  })
+  if (launcherStopStarted) return
 
   try {
     const info = await inspectRealmNetherNetInfo(config)
@@ -140,7 +178,7 @@ async function runStatusFacade (config, runtimeStatus) {
     console.error(`[bridge] Realm lookup failed: ${error.stack || error.message || error}`)
   }
 
-  startJavaLanStatusServer(config, {
+  statusServer = startJavaLanStatusServer(config, {
     statusText,
     loginDisconnectText,
     onLoginStart: loginStart => {

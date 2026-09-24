@@ -4,7 +4,7 @@ const assert = require('assert')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
-const { BridgeRuntimeStatus } = require('../src/bridgeRuntimeStatus')
+const { BridgeRuntimeStatus, stopRequestFileForStatus } = require('../src/bridgeRuntimeStatus')
 
 function main () {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-runtime-status-smoke-'))
@@ -104,6 +104,26 @@ function main () {
   assert.strictEqual(data.puppet.sentActionCount, 2)
   assert.strictEqual(data.puppet.unsupportedIntentCount, 1)
   assert.strictEqual(data.lastEvent.name, 'smoke_event')
+
+  const stopStatusFile = path.join(directory, 'stop-status.json')
+  const staleStopRequest = stopRequestFileForStatus(stopStatusFile)
+  fs.writeFileSync(staleStopRequest, '{"stale":true}\n')
+  const stopStatus = new BridgeRuntimeStatus(stopStatusFile)
+  assert.strictEqual(fs.existsSync(staleStopRequest), false, 'startup must discard a stale PID-scoped stop request')
+  let stopRequests = 0
+  assert.strictEqual(stopStatus.onStopRequested(() => {
+    stopRequests++
+    stopStatus.close('stopped')
+  }), true)
+  fs.writeFileSync(stopStatus.stopRequestFile, JSON.stringify({ pid: process.pid }))
+  assert.strictEqual(stopStatus.checkStopRequest(), true)
+  assert.strictEqual(stopStatus.checkStopRequest(), false, 'a stop request must be handled only once')
+  assert.strictEqual(stopRequests, 1)
+  assert.strictEqual(fs.existsSync(stopStatus.stopRequestFile), false, 'handled stop requests must be removed')
+  assert.strictEqual(stopStatus.timer, null)
+  assert.strictEqual(stopStatus.stopRequestTimer, null)
+  const stoppedData = JSON.parse(fs.readFileSync(stopStatusFile, 'utf8'))
+  assert.strictEqual(stoppedData.state, 'stopped')
 
   console.log('Bridge runtime status smoke check passed.')
 }

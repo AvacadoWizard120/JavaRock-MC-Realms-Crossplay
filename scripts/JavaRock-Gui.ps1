@@ -192,6 +192,9 @@ $StopStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-stop.err.log'
 $UpdateStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-update.out.log'
 $UpdateStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-update.err.log'
 $UpdateResultFile = Join-Path $RuntimeDir 'bridge-windows-gui-update-result.json'
+$ChangelogStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-changelog.out.log'
+$ChangelogStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-changelog.err.log'
+$ChangelogResultFile = Join-Path $RuntimeDir 'bridge-windows-gui-changelog-result.json'
 $UpdateInstallStdoutLog = Join-Path $RuntimeDir 'bridge-windows-gui-update-install.out.log'
 $UpdateInstallStderrLog = Join-Path $RuntimeDir 'bridge-windows-gui-update-install.err.log'
 $UpdateInstallResultFile = Join-Path $RuntimeDir 'bridge-windows-gui-update-install-result.json'
@@ -585,6 +588,10 @@ $script:StopProcess = $null
 $script:SuppressBridgeLogs = $false
 $script:UpdateProcess = $null
 $script:UpdateInstallProcess = $null
+$script:ChangelogProcess = $null
+$script:ChangelogPhase = ''
+$script:LatestReleaseResult = $null
+$script:InstalledReleaseResult = $null
 $script:SupportProcess = $null
 $script:UpdateCheckManual = $false
 $script:UpdatePromptedVersion = ''
@@ -635,9 +642,11 @@ $configureSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('S
 [void]$diagnosticsMenu.DropDownItems.Add($configureSupportMenuItem)
 $helpMenu = New-Object System.Windows.Forms.ToolStripMenuItem('Help')
 $checkUpdatesMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Check for updates...')
+$changelogMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Changelog...')
 $versionMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem("JavaRock $CurrentVersion")
 $versionMenuItem.Enabled = $false
 [void]$helpMenu.DropDownItems.Add($checkUpdatesMenuItem)
+[void]$helpMenu.DropDownItems.Add($changelogMenuItem)
 [void]$helpMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$helpMenu.DropDownItems.Add($versionMenuItem)
 [void]$menu.Items.Add($accountMenu)
@@ -973,7 +982,7 @@ function Set-DarkTheme {
     $menu.ForeColor = $foreground
     $menuRenderer = [JavaRockNativeWindow]::CreateMenuRenderer($Enabled)
     $menu.Renderer = $menuRenderer
-    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $clearConsoleMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $versionMenuItem)) {
+    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $clearConsoleMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $changelogMenuItem, $versionMenuItem)) {
         $menuItem.BackColor = $panel
         $menuItem.ForeColor = $foreground
     }
@@ -1454,6 +1463,9 @@ function Show-UpdateCheckResult {
     param($Result, [bool]$Manual)
 
     $state = [string](Get-ObjectValue $Result 'state' 'error')
+    if ($state -in @('update-available', 'current')) {
+        $script:LatestReleaseResult = $Result
+    }
     if ($state -eq 'update-available') {
         $latest = [string](Get-ObjectValue $Result 'latestVersion' '')
         $checkUpdatesMenuItem.Text = "Install JavaRock $latest..."
@@ -1549,6 +1561,228 @@ function Complete-UpdateCheck {
         }
     }
     Show-UpdateCheckResult -Result $result -Manual $manual
+}
+
+function Get-ChangelogSections {
+    param(
+        [Parameter(Mandatory = $true)]$LatestResult,
+        $InstalledResult = $null
+    )
+
+    $latestVersion = [string](Get-ObjectValue $LatestResult 'latestVersion' '')
+    if (-not $latestVersion) { throw 'The latest release version is missing.' }
+
+    if ($latestVersion -ne $CurrentVersion) {
+        $installedNotes = [string](Get-ObjectValue $InstalledResult 'notes' '')
+        if (-not $installedNotes.Trim()) { $installedNotes = 'Release notes unavailable.' }
+        [pscustomobject]@{
+            Version = $CurrentVersion
+            Label = 'Installed'
+            Notes = $installedNotes.Trim()
+        }
+    }
+
+    $latestNotes = [string](Get-ObjectValue $LatestResult 'notes' '')
+    if (-not $latestNotes.Trim()) { $latestNotes = 'Release notes unavailable.' }
+    [pscustomobject]@{
+        Version = $latestVersion
+        Label = 'Latest'
+        Notes = $latestNotes.Trim()
+    }
+}
+
+function Show-ChangelogWindow {
+    param(
+        [Parameter(Mandatory = $true)]$LatestResult,
+        $InstalledResult = $null
+    )
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = 'JavaRock Changelog'
+    $dialog.StartPosition = [Windows.Forms.FormStartPosition]::CenterParent
+    $dialog.FormBorderStyle = [Windows.Forms.FormBorderStyle]::Sizable
+    $dialog.MinimizeBox = $false
+    $dialog.ShowIcon = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.ClientSize = New-Object Drawing.Size(720, 560)
+    $dialog.MinimumSize = New-Object Drawing.Size(560, 420)
+    $dialog.Font = $form.Font
+
+    $notesBox = New-Object System.Windows.Forms.RichTextBox
+    $notesBox.Location = New-Object Drawing.Point(16, 16)
+    $notesBox.Size = New-Object Drawing.Size(688, 484)
+    $notesBox.Anchor = 'Top,Bottom,Left,Right'
+    $notesBox.ReadOnly = $true
+    $notesBox.DetectUrls = $true
+    $notesBox.WordWrap = $true
+    $notesBox.BorderStyle = [Windows.Forms.BorderStyle]::FixedSingle
+    $dialog.Controls.Add($notesBox)
+
+    $closeButton = New-Object System.Windows.Forms.Button
+    $closeButton.Text = 'Close'
+    $closeButton.DialogResult = [Windows.Forms.DialogResult]::OK
+    $closeButton.Location = New-Object Drawing.Point(612, 514)
+    $closeButton.Size = New-Object Drawing.Size(92, 30)
+    $closeButton.Anchor = 'Bottom,Right'
+    $dialog.Controls.Add($closeButton)
+    $dialog.AcceptButton = $closeButton
+    $dialog.CancelButton = $closeButton
+
+    $background = if ($script:DarkMode) { [Drawing.Color]::FromArgb(31, 33, 37) } else { [Drawing.SystemColors]::Control }
+    $panel = if ($script:DarkMode) { [Drawing.Color]::FromArgb(41, 44, 49) } else { [Drawing.SystemColors]::Control }
+    $field = if ($script:DarkMode) { [Drawing.Color]::FromArgb(25, 27, 31) } else { [Drawing.SystemColors]::Window }
+    $foreground = if ($script:DarkMode) { [Drawing.Color]::FromArgb(211, 215, 220) } else { [Drawing.SystemColors]::ControlText }
+    $fieldText = if ($script:DarkMode) { [Drawing.Color]::FromArgb(198, 203, 211) } else { [Drawing.SystemColors]::WindowText }
+    $border = if ($script:DarkMode) { [Drawing.Color]::FromArgb(76, 82, 91) } else { [Drawing.SystemColors]::ControlDark }
+    $buttonHover = if ($script:DarkMode) { [Drawing.Color]::FromArgb(57, 61, 68) } else { [Drawing.SystemColors]::ControlLight }
+    $buttonPressed = if ($script:DarkMode) { [Drawing.Color]::FromArgb(35, 38, 43) } else { [Drawing.SystemColors]::ControlDark }
+
+    $dialog.BackColor = $background
+    $dialog.ForeColor = $foreground
+    $notesBox.BackColor = $field
+    $notesBox.ForeColor = $fieldText
+    $closeButton.FlatStyle = if ($script:DarkMode) { [Windows.Forms.FlatStyle]::Flat } else { [Windows.Forms.FlatStyle]::Standard }
+    $closeButton.UseVisualStyleBackColor = -not $script:DarkMode
+    $closeButton.BackColor = $panel
+    $closeButton.ForeColor = $foreground
+    $closeButton.FlatAppearance.BorderColor = $border
+    $closeButton.FlatAppearance.MouseOverBackColor = $buttonHover
+    $closeButton.FlatAppearance.MouseDownBackColor = $buttonPressed
+
+    $headerFont = New-Object Drawing.Font('Segoe UI Semibold', 13)
+    $bodyFont = New-Object Drawing.Font('Segoe UI', 9.5)
+    try {
+        $sections = @(Get-ChangelogSections -LatestResult $LatestResult -InstalledResult $InstalledResult)
+        for ($index = 0; $index -lt $sections.Count; $index++) {
+            if ($index -gt 0) { $notesBox.AppendText("`r`n`r`n") }
+            $section = $sections[$index]
+            $notesBox.SelectionStart = $notesBox.TextLength
+            $notesBox.SelectionFont = $headerFont
+            $notesBox.AppendText("JavaRock $($section.Version) ($($section.Label))`r`n`r`n")
+            $notesBox.SelectionStart = $notesBox.TextLength
+            $notesBox.SelectionFont = $bodyFont
+            $notesBox.AppendText([string]$section.Notes)
+        }
+        $notesBox.SelectionStart = 0
+        $notesBox.SelectionLength = 0
+
+        [JavaRockNativeWindow]::SetAppDarkMode($script:DarkMode)
+        [void]$dialog.Handle
+        [JavaRockNativeWindow]::SetImmersiveDarkMode($dialog.Handle, $script:DarkMode)
+        [JavaRockNativeWindow]::ApplyControlTheme($notesBox.Handle, $script:DarkMode, 'DarkMode_Explorer')
+        [void]$dialog.ShowDialog($form)
+    } finally {
+        $headerFont.Dispose()
+        $bodyFont.Dispose()
+        $dialog.Dispose()
+    }
+}
+
+function Reset-ChangelogMenu {
+    $changelogMenuItem.Enabled = $true
+    $changelogMenuItem.Text = 'Changelog...'
+}
+
+function Start-ChangelogRequest {
+    param([ValidateSet('latest', 'installed')][string]$Phase)
+
+    if (-not (Test-Path -LiteralPath $UpdaterScript -PathType Leaf)) {
+        [void][Windows.Forms.MessageBox]::Show('The JavaRock updater is missing.', 'JavaRock Changelog')
+        Reset-ChangelogMenu
+        return
+    }
+
+    if (Test-Path -LiteralPath $ChangelogResultFile -PathType Leaf) {
+        Remove-Item -LiteralPath $ChangelogResultFile -Force
+    }
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', $UpdaterScript,
+        '-ResultFile', $ChangelogResultFile,
+        '-Quiet'
+    )
+    if ($Phase -eq 'installed') { $arguments += @('-ReleaseTag', "v$CurrentVersion") }
+
+    try {
+        $script:ChangelogPhase = $Phase
+        $changelogMenuItem.Enabled = $false
+        $changelogMenuItem.Text = 'Loading changelog...'
+        $script:ChangelogProcess = Start-RedirectedProcess -FilePath 'powershell.exe' -Arguments $arguments -StdoutPath $ChangelogStdoutLog -StderrPath $ChangelogStderrLog
+    } catch {
+        $script:ChangelogProcess = $null
+        Reset-ChangelogMenu
+        [void][Windows.Forms.MessageBox]::Show(
+            $_.Exception.Message,
+            'JavaRock Changelog',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Warning
+        )
+    }
+}
+
+function Show-LoadedChangelog {
+    $latestVersion = [string](Get-ObjectValue $script:LatestReleaseResult 'latestVersion' '')
+    if (-not $latestVersion) {
+        Reset-ChangelogMenu
+        return
+    }
+
+    if ($latestVersion -ne $CurrentVersion) {
+        $installedVersion = [string](Get-ObjectValue $script:InstalledReleaseResult 'latestVersion' '')
+        if ($installedVersion -ne $CurrentVersion) {
+            Start-ChangelogRequest -Phase 'installed'
+            return
+        }
+    }
+
+    Reset-ChangelogMenu
+    Show-ChangelogWindow -LatestResult $script:LatestReleaseResult -InstalledResult $script:InstalledReleaseResult
+}
+
+function Start-Changelog {
+    if ($null -ne $script:ChangelogProcess -and -not $script:ChangelogProcess.HasExited) { return }
+
+    $latestVersion = [string](Get-ObjectValue $script:LatestReleaseResult 'latestVersion' '')
+    if ($latestVersion) {
+        Show-LoadedChangelog
+    } else {
+        Start-ChangelogRequest -Phase 'latest'
+    }
+}
+
+function Complete-ChangelogRequest {
+    if ($null -eq $script:ChangelogProcess -or -not $script:ChangelogProcess.HasExited) { return }
+
+    $phase = $script:ChangelogPhase
+    $exitCode = $script:ChangelogProcess.ExitCode
+    $script:ChangelogProcess.Dispose()
+    $script:ChangelogProcess = $null
+    $result = Read-JsonFile -Path $ChangelogResultFile
+    $state = [string](Get-ObjectValue $result 'state' 'error')
+    if ($null -eq $result -or $state -eq 'error' -or $exitCode -ne 0) {
+        $message = [string](Get-ObjectValue $result 'message' 'Could not load the changelog.')
+        Add-Log 'update' $message
+        if ($phase -eq 'installed' -and $null -ne $script:LatestReleaseResult) {
+            Reset-ChangelogMenu
+            Show-ChangelogWindow -LatestResult $script:LatestReleaseResult
+        } else {
+            Reset-ChangelogMenu
+            [void][Windows.Forms.MessageBox]::Show(
+                $message,
+                'JavaRock Changelog',
+                [Windows.Forms.MessageBoxButtons]::OK,
+                [Windows.Forms.MessageBoxIcon]::Warning
+            )
+        }
+        return
+    }
+
+    if ($phase -eq 'latest') {
+        $script:LatestReleaseResult = $result
+    } else {
+        $script:InstalledReleaseResult = $result
+    }
+    Show-LoadedChangelog
 }
 
 function Set-SupportUploadDestination {
@@ -1912,6 +2146,7 @@ $supportButton.Add_Click({ Start-SupportBundle })
 $createSupportMenuItem.Add_Click({ Start-SupportBundle })
 $configureSupportMenuItem.Add_Click({ Set-SupportUploadDestination })
 $checkUpdatesMenuItem.Add_Click({ Start-UpdateCheck -Manual $true })
+$changelogMenuItem.Add_Click({ Start-Changelog })
 $modeCombo.Add_SelectedIndexChanged({ Update-ModeControls })
 $realmCombo.Add_SelectedIndexChanged({
     if ($realmCombo.SelectedIndex -ge 0 -and $realmCombo.SelectedIndex -lt $script:Realms.Count) {
@@ -2001,6 +2236,7 @@ $timer.Add_Tick({
         $script:StopProcess = $null
     }
     Complete-UpdateCheck
+    Complete-ChangelogRequest
     Complete-SupportBundle
 
     $status = Read-JsonFile -Path $StatusFile
@@ -2063,6 +2299,26 @@ if ($SmokeTest) {
     }
     if ($menu.Renderer.GetType().Name -ne 'JavaRockDarkToolStripRenderer') {
         throw 'Dark theme menu renderer was not applied.'
+    }
+    if ($helpMenu.DropDownItems.IndexOf($changelogMenuItem) -ne ($helpMenu.DropDownItems.IndexOf($checkUpdatesMenuItem) + 1)) {
+        throw 'Help > Changelog is not directly below Check for updates.'
+    }
+    $sameReleaseSections = @(Get-ChangelogSections -LatestResult ([pscustomobject]@{
+        latestVersion = $CurrentVersion
+        notes = 'Latest release notes'
+    }))
+    if ($sameReleaseSections.Count -ne 1 -or $sameReleaseSections[0].Label -ne 'Latest' -or $sameReleaseSections[0].Notes -ne 'Latest release notes') {
+        throw 'The current changelog should show one Latest section.'
+    }
+    $newerReleaseSections = @(Get-ChangelogSections `
+        -LatestResult ([pscustomobject]@{ latestVersion = '999.0.1'; notes = 'New release notes' }) `
+        -InstalledResult ([pscustomobject]@{ latestVersion = $CurrentVersion; notes = 'Installed release notes' }))
+    if ($newerReleaseSections.Count -ne 2 -or
+        $newerReleaseSections[0].Label -ne 'Installed' -or
+        $newerReleaseSections[0].Notes -ne 'Installed release notes' -or
+        $newerReleaseSections[1].Label -ne 'Latest' -or
+        $newerReleaseSections[1].Notes -ne 'New release notes') {
+        throw 'The behind-version changelog should show Installed followed by Latest.'
     }
     if ($joinReadyLabel.Text -notmatch 'wait|join now') {
         throw 'Connection readiness status is missing.'
