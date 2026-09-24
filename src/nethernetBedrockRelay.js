@@ -65,6 +65,38 @@ function realmEndpointRefreshRetryOptions () {
   }
 }
 
+function realmUpstreamConnectRetryOptions () {
+  return {
+    maxAttempts: Math.max(1, intEnv('NETHERNET_RELAY_UPSTREAM_CONNECT_MAX_ATTEMPTS', 3)),
+    baseDelayMs: Math.max(0, intEnv('NETHERNET_RELAY_UPSTREAM_CONNECT_RETRY_BASE_MS', 500)),
+    maxDelayMs: Math.max(0, intEnv('NETHERNET_RELAY_UPSTREAM_CONNECT_RETRY_MAX_MS', 2000)),
+    jitterMs: Math.max(0, intEnv('NETHERNET_RELAY_UPSTREAM_CONNECT_RETRY_JITTER_MS', 250))
+  }
+}
+
+function realmUpstreamConnectRetryDelayMs (attempt, options = realmUpstreamConnectRetryOptions()) {
+  const exponential = options.baseDelayMs * Math.pow(2, Math.max(0, Number(attempt) - 1))
+  const jitter = options.jitterMs > 0 ? Math.floor(Math.random() * (options.jitterMs + 1)) : 0
+  return Math.max(0, Math.min(options.maxDelayMs, exponential + jitter))
+}
+
+function isRetryableNetherNetOpeningFailure (failure) {
+  const code = String(failure?.code || '')
+  if (code === 'NETHERNET_SIGNALING_CLOSED' || code === 'NETHERNET_PEER_NO_RESPONSE') return true
+  const text = String(failure?.message || failure || '')
+  return /NetherNet signaling WebSocket closed before WebRTC connected/i.test(text) ||
+    /Realm peer did not answer \d+ WebRTC offer/i.test(text) ||
+    /Timed out waiting for NetherNet TURN credentials/i.test(text) ||
+    /Timed out connecting to WebSocket/i.test(text) ||
+    /WebSocket upgrade failed: (?:408|425|429|5\d\d)\b/i.test(text) ||
+    /NetherNet data channel closed before connect/i.test(text) ||
+    /(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up)/i.test(text)
+}
+
+function isRelayDownstreamOpen (ds) {
+  return Boolean(ds) && ds.status !== ClientStatus.Disconnected && ds.connection?.closed !== true
+}
+
 function emptyItemForLocalViaBedrock () {
   // Bedrock Item/ItemLegacy encoders treat network_id 0 as the complete
   // empty item. Do not attach count/extra fields to empties; the protocol
@@ -1887,6 +1919,14 @@ function bridgeFirstCursorPlaceItemStackRequest (params = {}) {
     if (action) return { request, action }
   }
   return null
+}
+
+function bridgeItemStackRequestUsesCursor (request = {}) {
+  const actions = Array.isArray(request.actions) ? request.actions : []
+  return actions.some(action =>
+    bridgeSlotContainerId(action?.source) === 'cursor' ||
+    bridgeSlotContainerId(action?.destination) === 'cursor'
+  )
 }
 
 function bridgeItemStackRequestTouchesOwnInventoryScreen (params = {}) {
@@ -3956,6 +3996,8 @@ class ViaBedrockRelayPlayer extends Player {
     this.pendingCraftingDrainRequestIds = new Set()
     this.deferredCraftingContainerClose = null
     this.craftingContainerCloseTimer = null
+    this.deferredExternalContainerClose = null
+    this.externalContainerCloseTimer = null
     this.pendingBridgeSyntheticItemStackPlaces = new Map()
     this.pendingBridgeCursorDependentTakeRequests = new Map()
     this.pendingBridgeAuthInputItemStackRequests = []
@@ -4457,6 +4499,202 @@ class ViaBedrockRelayPlayer extends Player {
       'container_close',
       deferred.params,
       `crafting_close_after_drain_${reason}`
+    )
+  }
+
+  pendingExternalContainerCursorRequestIds () {
+    const requestIds = new Set()
+
+    if (this.pendingBridgeToRealmItemStackRequests instanceof Map) {
+      for (const [requestKey, pending] of this.pendingBridgeToRealmItemStackRequests.entries()) {
+        const requests = pending?.request
+          ? [pending.request]
+          : bridgeItemStackRequestEntries(pending?.params || {})
+        if (!requests.some(bridgeItemStackRequestUsesCursor)) continue
+        for (const request of requests) {
+          const requestId = bridgeRequestIdForItemStackEntry(request)
+          requestIds.add(String(requestId == null ? requestKey : requestId))
+        }
+      }
+    }
+
+    if (this.pendingBridgeSyntheticItemStackPlaces instanceof Map) {
+      for (const [triggerRequestKey, pending] of this.pendingBridgeSyntheticItemStackPlaces.entries()) {
+        requestIds.add(String(triggerRequestKey))
+        if (pending?.requestId != null) requestIds.add(String(pending.requestId))
+      }
+    }
+
+    if (this.pendingBridgeCursorDependentTakeRequests instanceof Map) {
+      for (const [triggerRequestKey, queued] of this.pendingBridgeCursorDependentTakeRequests.entries()) {
+        if (!Array.isArray(queued) || queued.length === 0) continue
+        requestIds.add(String(triggerRequestKey))
+        for (const pending of queued) {
+          if (pending?.requestId != null) requestIds.add(String(pending.requestId))
+        }
+      }
+    }
+
+    return Array.from(requestIds)
+  }
+
+  snapshotExternalContainerCursorFollowUps () {
+    const syntheticPlaces = []
+    if (this.pendingBridgeSyntheticItemStackPlaces instanceof Map) {
+      for (const [triggerRequestKey, pending] of this.pendingBridgeSyntheticItemStackPlaces.entries()) {
+        syntheticPlaces.push({
+          triggerRequestId: String(triggerRequestKey),
+          requestId: pending?.requestId == null ? null : String(pending.requestId)
+        })
+      }
+    }
+
+    const dependentTakes = []
+    if (this.pendingBridgeCursorDependentTakeRequests instanceof Map) {
+      for (const [triggerRequestKey, queued] of this.pendingBridgeCursorDependentTakeRequests.entries()) {
+        if (!Array.isArray(queued) || queued.length === 0) continue
+        dependentTakes.push({
+          triggerRequestId: String(triggerRequestKey),
+          requestIds: queued
+            .map(pending => pending?.requestId)
+            .filter(requestId => requestId != null)
+            .map(String)
+        })
+      }
+    }
+
+    return { syntheticPlaces, dependentTakes }
+  }
+
+  cancelDeferredExternalContainerCursorFollowUps (deferred = {}) {
+    const snapshot = deferred.cursorFollowUpsAtClose || {}
+    const canceledPlaceRequestIds = []
+    const canceledTakeRequestIds = []
+    const invalidatedRequestIds = []
+
+    if (this.pendingBridgeSyntheticItemStackPlaces instanceof Map) {
+      for (const entry of Array.isArray(snapshot.syntheticPlaces) ? snapshot.syntheticPlaces : []) {
+        const current = this.pendingBridgeSyntheticItemStackPlaces.get(String(entry.triggerRequestId))
+        if (!current) continue
+        const currentRequestId = current.requestId == null ? null : String(current.requestId)
+        if (currentRequestId !== entry.requestId) continue
+        this.pendingBridgeSyntheticItemStackPlaces.delete(String(entry.triggerRequestId))
+        if (currentRequestId != null) canceledPlaceRequestIds.push(currentRequestId)
+      }
+    }
+
+    if (this.pendingBridgeCursorDependentTakeRequests instanceof Map) {
+      for (const entry of Array.isArray(snapshot.dependentTakes) ? snapshot.dependentTakes : []) {
+        const triggerRequestId = String(entry.triggerRequestId)
+        const current = this.pendingBridgeCursorDependentTakeRequests.get(triggerRequestId)
+        if (!Array.isArray(current) || current.length === 0) continue
+        const requestIdsAtClose = new Set((entry.requestIds || []).map(String))
+        const retained = []
+        for (const pending of current) {
+          const requestId = pending?.requestId == null ? null : String(pending.requestId)
+          if (requestId != null && requestIdsAtClose.has(requestId)) canceledTakeRequestIds.push(requestId)
+          else retained.push(pending)
+        }
+        if (retained.length > 0) this.pendingBridgeCursorDependentTakeRequests.set(triggerRequestId, retained)
+        else this.pendingBridgeCursorDependentTakeRequests.delete(triggerRequestId)
+      }
+    }
+
+    if (this.pendingBridgeToRealmItemStackRequests instanceof Map) {
+      for (const requestId of Array.isArray(deferred.pendingAtClose) ? deferred.pendingAtClose : []) {
+        const pending = this.pendingBridgeToRealmItemStackRequests.get(String(requestId))
+        if (!pending?.request || !bridgeItemStackRequestUsesCursor(pending.request)) continue
+        bridgeInvalidatePredictedStackIdsForRejectedRequest(this, pending.request)
+        this.pendingBridgeToRealmItemStackRequests.delete(String(requestId))
+        invalidatedRequestIds.push(String(requestId))
+      }
+    }
+
+    return {
+      placeRequestIds: canceledPlaceRequestIds,
+      takeRequestIds: canceledTakeRequestIds,
+      invalidatedRequestIds
+    }
+  }
+
+  externalContainerCloseAckTimeoutMs () {
+    return Math.max(250, numberOrDefault(process.env.NETHERNET_RELAY_EXTERNAL_CONTAINER_CLOSE_ACK_TIMEOUT_MS, 1500))
+  }
+
+  deferExternalContainerCloseUntilCursorSettles (params = {}, context = 'live') {
+    if (String(context).startsWith('external_container_close_after_cursor_')) return false
+    if (this.externalContainerWindowId == null || !isContainerCloseForWindow(params, this.externalContainerWindowId)) return false
+
+    const pendingRequestIds = this.pendingExternalContainerCursorRequestIds()
+    if (pendingRequestIds.length === 0) return false
+
+    this.deferredExternalContainerClose = {
+      params: clonePacketForCensusDiagnostic(params),
+      context,
+      pendingAtClose: pendingRequestIds,
+      cursorFollowUpsAtClose: this.snapshotExternalContainerCursorFollowUps()
+    }
+    if (this.externalContainerCloseTimer) clearTimeout(this.externalContainerCloseTimer)
+    const timeoutMs = this.externalContainerCloseAckTimeoutMs()
+    this.externalContainerCloseTimer = setTimeout(() => {
+      this.externalContainerCloseTimer = null
+      this.flushDeferredExternalContainerClose('cursor_ack_timeout', true)
+    }, timeoutMs)
+    this.externalContainerCloseTimer.unref?.()
+
+    this.recordBridgeToRealm('container_close', params, 'deferred', {
+      context: `${context}:waiting_for_cursor_chain`,
+      translation_status: 'deferred_until_external_container_cursor_chain_settles',
+      diagnostic: {
+        requestIds: pendingRequestIds,
+        timeoutMs
+      },
+      forceSample: true
+    })
+    console.log(`[bedrock-relay] Holding external container_close until cursor request chain ${pendingRequestIds.join(', ')} settles.`)
+    return true
+  }
+
+  flushDeferredExternalContainerClose (reason = 'cursor_chain_settled', force = false) {
+    const deferred = this.deferredExternalContainerClose
+    if (!deferred) return false
+
+    let pendingRequestIds = this.pendingExternalContainerCursorRequestIds()
+    if (!force && pendingRequestIds.length > 0) return false
+
+    const canceledFollowUps = force
+      ? this.cancelDeferredExternalContainerCursorFollowUps(deferred)
+      : { placeRequestIds: [], takeRequestIds: [], invalidatedRequestIds: [] }
+    if (force) pendingRequestIds = this.pendingExternalContainerCursorRequestIds()
+
+    this.deferredExternalContainerClose = null
+    if (this.externalContainerCloseTimer) {
+      clearTimeout(this.externalContainerCloseTimer)
+      this.externalContainerCloseTimer = null
+    }
+
+    this.recordBridgeToRealm('container_close', deferred.params, 'resumed', {
+      context: `${deferred.context || 'live'}:${reason}`,
+      translation_status: force
+        ? 'resumed_external_container_close_after_cursor_fallback'
+        : 'resumed_external_container_close_after_cursor_chain_settled',
+      diagnostic: {
+        requestIds: deferred.pendingAtClose,
+        stillPendingRequestIds: pendingRequestIds,
+        canceledFollowUps
+      },
+      forceSample: true
+    })
+    if (force) {
+      console.warn(`[bedrock-relay] Sending deferred external container_close after ${reason}; scheduling an authoritative replay for any unresolved cursor request.`)
+      this.scheduleAuthoritativeInventoryReplay(`external_container_close:${reason}`, 10)
+    } else {
+      console.log('[bedrock-relay] Cursor take/place chain settled; sending deferred external container_close.')
+    }
+    return this.relayServerboundToUpstream(
+      'container_close',
+      deferred.params,
+      `external_container_close_after_cursor_${reason}`
     )
   }
 
@@ -5977,6 +6215,17 @@ class ViaBedrockRelayPlayer extends Player {
       return this.queueClientboundNativeBedrock(name, params, context)
     }
 
+    // ViaBedrock's current local Bedrock codec does not register the modern
+    // camera_spline packet (wire id 338). Sending it only produces repeated
+    // unknown-packet decoder warnings; it has no Java-side consumer yet.
+    if (name === 'camera_spline') {
+      this.recordBridgeToViaBedrock(name, params, 'dropped', {
+        context,
+        translation_status: 'dropped_unsupported_local_viabedrock_packet'
+      })
+      return false
+    }
+
     const downstreamProtocolPlayReady = this.downstreamProtocolPlayReady === true || this.downstreamPlayReady === true
 
     if (!downstreamProtocolPlayReady &&
@@ -6451,6 +6700,10 @@ class ViaBedrockRelayPlayer extends Player {
       return true
     }
 
+    if (name === 'container_close' && this.deferExternalContainerCloseUntilCursorSettles(params, context)) {
+      return true
+    }
+
     const equipmentDropDiagnosis = serverboundMobEquipmentDropDiagnosis(this, name, params)
     if (equipmentDropDiagnosis) {
       const reason = `dropped_malformed_mob_equipment:${equipmentDropDiagnosis.reason}`
@@ -6708,6 +6961,7 @@ class ViaBedrockRelayPlayer extends Player {
     if (name === 'item_stack_response') {
       this.flushBridgeSyntheticFollowUpPlacesFromResponse(params, 'live')
       this.flushBridgeCursorDependentTakesFromResponse(params, 'live')
+      this.flushDeferredExternalContainerClose('item_stack_response')
     }
 
     if (name === 'play_status' && params.status === 'login_success') return
@@ -6752,6 +7006,7 @@ class ViaBedrockRelayPlayer extends Player {
       if (des.data.name === 'item_stack_response') {
         this.flushBridgeSyntheticFollowUpPlacesFromResponse(des.data.params, 'downstream_queue_flush')
         this.flushBridgeCursorDependentTakesFromResponse(des.data.params, 'downstream_queue_flush')
+        this.flushDeferredExternalContainerClose('item_stack_response')
       }
       if (this.isNativeBedrockRecorderDownstream()) {
         if (des.data.name !== 'play_status' || des.data.params.status !== 'login_success') {
@@ -6899,6 +7154,10 @@ class ViaBedrockRelayPlayer extends Player {
       clearTimeout(this.craftingContainerCloseTimer)
       this.craftingContainerCloseTimer = null
     }
+    if (this.externalContainerCloseTimer) {
+      clearTimeout(this.externalContainerCloseTimer)
+      this.externalContainerCloseTimer = null
+    }
     if (this.authoritativeInventoryReplayTimer) {
       clearTimeout(this.authoritativeInventoryReplayTimer)
       this.authoritativeInventoryReplayTimer = null
@@ -6910,6 +7169,7 @@ class ViaBedrockRelayPlayer extends Player {
     this.pendingClientboundEntityLinks?.clear?.()
     this.pendingInitialJoinAuthInput = null
     this.deferredCraftingContainerClose = null
+    this.deferredExternalContainerClose = null
     this.pendingCraftingDrainRequestIds?.clear?.()
     this.upstream?.close(reason)
     super.close(reason)
@@ -7049,24 +7309,70 @@ class NetherNetRealmRelay extends Relay {
     return null
   }
 
-  cleanupUpstreamState (hash) {
+  cleanupUpstreamState (hash, expectedUpstream = null) {
+    if (expectedUpstream && this.upstreams.get(hash) !== expectedUpstream) return false
     this.upstreams.delete(hash)
     this.upstreamStates.delete(hash)
+    return true
   }
 
-  async openUpstreamConnection (ds, clientAddr) {
+  createRealmUpstreamClient (relayConfig, realmInfo, options) {
+    return createRealmBedrockClient(relayConfig, realmInfo, options)
+  }
+
+  async openUpstreamConnection (ds, clientAddr, retryContext = null) {
     const hash = clientAddr.hash
     const label = `${ds.profile?.name || ds.profile?.xuid || clientAddr.host || 'bedrock-downstream'}#${String(hash).slice(0, 8)}`
+    const context = retryContext || {
+      attempt: 0,
+      openingStartedAt: Date.now(),
+      retryOptions: realmUpstreamConnectRetryOptions(),
+      retryTimer: null,
+      downstreamClosed: false,
+      finished: false
+    }
+    context.attempt++
 
-    console.log(`[bedrock-relay] Downstream ${this.downstreamClientLabel()} authenticated: ${label}`)
-    console.log('[bedrock-relay] Opening an upstream connection to the selected Bedrock Realm.')
+    if (!retryContext) {
+      console.log(`[bedrock-relay] Downstream ${this.downstreamClientLabel()} authenticated: ${label}`)
+      console.log('[bedrock-relay] Opening an upstream connection to the selected Bedrock Realm.')
 
-    const openingStartedAt = Date.now()
+      ds.once('close', () => {
+        context.downstreamClosed = true
+        context.finished = true
+        if (context.retryTimer) {
+          clearTimeout(context.retryTimer)
+          context.retryTimer = null
+        }
+        const currentUpstream = this.upstreams.get(hash)
+        this.cleanupUpstreamState(hash, currentUpstream)
+        try { currentUpstream?.close?.('downstream_closed_during_realm_connect') } catch {}
+      })
+
+      ds.on('clientbound', data => {
+        if (!this.debugBridgeRelay) return
+        console.log(`[bedrock-relay] Realm -> ${this.downstreamSchemaLabel()} ${safeStringify(summarizePacket(data), 0)}`)
+      })
+
+      ds.on('serverbound', data => {
+        if (this.debugBridgeRelay) {
+          console.log(`[bedrock-relay] Observed serverbound ${safeStringify(summarizePacket(data), 0)}`)
+        }
+      })
+    }
+
+    if (context.downstreamClosed || context.finished || !isRelayDownstreamOpen(ds)) return
+
     this.runtimeStatus?.event?.('bedrock_relay_endpoint_lookup_started', {
       state: 'resolving_realm_endpoint',
-      bedrockRelay: { downstream: label }
+      bedrockRelay: {
+        downstream: label,
+        upstreamAttempt: context.attempt,
+        upstreamMaxAttempts: context.retryOptions.maxAttempts
+      }
     })
     const attemptRealmInfo = await this.resolveFreshRealmInfoForUpstream(label)
+    if (context.downstreamClosed || context.finished || !isRelayDownstreamOpen(ds)) return
     if (!this.hasUsableRealmEndpoint(attemptRealmInfo)) {
       const message = 'Realm endpoint lookup did not finish in time. Check Microsoft/Minecraft Services connectivity, refresh the Realm list, and try again.'
       console.error(`[bedrock-relay] ${message}`)
@@ -7079,6 +7385,7 @@ class NetherNetRealmRelay extends Relay {
           error: message
         }
       })
+      context.finished = true
       ds.disconnect(message)
       return
     }
@@ -7091,9 +7398,13 @@ class NetherNetRealmRelay extends Relay {
         transport: attemptRealmInfo.endpoint.transport,
         networkProtocol: attemptRealmInfo.endpoint.networkProtocol
       },
-      bedrockRelay: { downstream: label }
+      bedrockRelay: {
+        downstream: label,
+        upstreamAttempt: context.attempt,
+        upstreamMaxAttempts: context.retryOptions.maxAttempts
+      }
     })
-    console.log(`[bedrock-relay] Fresh ${attemptRealmInfo.endpoint.transport} Realm endpoint ready after ${Date.now() - openingStartedAt}ms; starting Bedrock login.`)
+    console.log(`[bedrock-relay] Fresh ${attemptRealmInfo.endpoint.transport} Realm endpoint ready after ${Date.now() - context.openingStartedAt}ms; starting Bedrock login attempt ${context.attempt}/${context.retryOptions.maxAttempts}.`)
 
     console.log(`[bedrock-relay] Local ${this.downstreamSchemaLabel()} packet schema: ${downstreamBedrockVersion}`)
     console.log(`[bedrock-relay] Upstream Realm Bedrock client version: ${upstreamBedrockVersion || '(bedrock-protocol current)'}`)
@@ -7112,10 +7423,11 @@ class NetherNetRealmRelay extends Relay {
 
     let upstreamBundle
     try {
-      upstreamBundle = createRealmBedrockClient(relayConfig, attemptRealmInfo, {
+      upstreamBundle = this.createRealmUpstreamClient(relayConfig, attemptRealmInfo, {
         prefix: '[bedrock-relay]'
       })
     } catch (error) {
+      context.finished = true
       ds.disconnect(`Realm relay startup error: ${error.message || String(error)}`)
       this.emit('error', error)
       return
@@ -7131,11 +7443,22 @@ class NetherNetRealmRelay extends Relay {
       state: 'bedrock_relay_upstream_opening',
       bedrockRelay: {
         downstream: label,
-        clientAddr: clientAddr.host ? `${clientAddr.host}:${clientAddr.port}` : undefined
+        clientAddr: clientAddr.host ? `${clientAddr.host}:${clientAddr.port}` : undefined,
+        upstreamAttempt: context.attempt,
+        upstreamMaxAttempts: context.retryOptions.maxAttempts
       }
     })
 
+    let upstreamJoined = false
+    let terminalHandled = false
+
     upstream.once('join', () => {
+      if (terminalHandled || context.downstreamClosed || context.finished || !isRelayDownstreamOpen(ds)) {
+        try { upstream.close?.('downstream_closed_before_realm_join') } catch {}
+        return
+      }
+      upstreamJoined = true
+      context.finished = true
       ds.upstream = upstream
       ds.upstreamState = upstreamState
       upstream.readPacket = packet => ds.readUpstream(packet)
@@ -7148,7 +7471,7 @@ class NetherNetRealmRelay extends Relay {
         })
       }
       ds.flushUpQueue()
-      console.log(`[bedrock-relay] Realm upstream joined over ${attemptRealmInfo.endpoint.transport}; packet relay is now live (${Date.now() - openingStartedAt}ms after downstream authentication).`)
+      console.log(`[bedrock-relay] Realm upstream joined over ${attemptRealmInfo.endpoint.transport} on attempt ${context.attempt}/${context.retryOptions.maxAttempts}; packet relay is now live (${Date.now() - context.openingStartedAt}ms after downstream authentication).`)
       if (this.isNativeBedrockRecorderDownstream()) {
         console.log('[bedrock-recorder-ready] Native Bedrock recorder relay is live. Join from Bedrock and reproduce the baseline flow; packets should pass through without ViaBedrock play gating.')
       } else {
@@ -7175,43 +7498,81 @@ class NetherNetRealmRelay extends Relay {
       })
     })
 
-    upstream.on('error', error => {
-      console.error(`[bedrock-relay] Upstream Realm error: ${error.stack || error.message || error}`)
-      this.runtimeStatus?.event?.('bedrock_relay_upstream_error', {
-        state: 'bedrock_relay_error',
-        bedrockRelay: {
-          downstream: label,
-          error: error.stack || error.message || String(error)
-        }
-      })
-      ds.disconnect(`Realm relay upstream error: ${error.message || String(error)}`)
-      this.cleanupUpstreamState(hash)
-      try { upstream.close?.('upstream_error') } catch {}
-    })
+    const handleUpstreamEnd = (kind, failure) => {
+      if (terminalHandled) return
+      terminalHandled = true
+      const reason = failure?.message || failure || (kind === 'error' ? 'NetherNet upstream error' : 'closed')
+      const canRetry = !upstreamJoined &&
+        attemptRealmInfo.endpoint.transport === 'nethernet' &&
+        isRetryableNetherNetOpeningFailure(failure) &&
+        context.attempt < context.retryOptions.maxAttempts &&
+        !context.downstreamClosed &&
+        !context.finished &&
+        isRelayDownstreamOpen(ds)
 
-    upstream.on('close', reason => {
-      console.log(`[bedrock-relay] Upstream Realm connection closed: ${reason || 'closed'}`)
+      this.cleanupUpstreamState(hash, upstream)
+
+      if (canRetry) {
+        const delayMs = realmUpstreamConnectRetryDelayMs(context.attempt, context.retryOptions)
+        console.warn(`[bedrock-relay] Realm NetherNet login attempt ${context.attempt}/${context.retryOptions.maxAttempts} ended before join (${reason}). Refreshing the Realm session and retrying in ${delayMs}ms without disconnecting Java.`)
+        this.runtimeStatus?.event?.('bedrock_relay_upstream_retrying', {
+          state: 'bedrock_relay_upstream_retrying',
+          bedrockRelay: {
+            downstream: label,
+            reason: String(reason),
+            upstreamAttempt: context.attempt,
+            upstreamMaxAttempts: context.retryOptions.maxAttempts,
+            retryDelayMs: delayMs
+          }
+        })
+        if (kind !== 'close') {
+          try { upstream.close?.('retrying_realm_upstream') } catch {}
+        }
+        context.retryTimer = setTimeout(() => {
+          context.retryTimer = null
+          if (context.downstreamClosed || context.finished || !isRelayDownstreamOpen(ds)) return
+          this.openUpstreamConnection(ds, clientAddr, context).catch(error => {
+            if (context.downstreamClosed || context.finished || !isRelayDownstreamOpen(ds)) return
+            context.finished = true
+            console.error(`[bedrock-relay] Realm upstream retry failed: ${error.stack || error.message || error}`)
+            ds.disconnect(`Realm relay startup error: ${error.message || String(error)}`)
+          })
+        }, delayMs)
+        return
+      }
+
+      context.finished = true
+      if (kind === 'error') {
+        console.error(`[bedrock-relay] Upstream Realm error: ${failure?.stack || reason}`)
+        this.runtimeStatus?.event?.('bedrock_relay_upstream_error', {
+          state: 'bedrock_relay_error',
+          bedrockRelay: {
+            downstream: label,
+            error: failure?.stack || String(reason),
+            upstreamAttempt: context.attempt,
+            upstreamMaxAttempts: context.retryOptions.maxAttempts
+          }
+        })
+        if (isRelayDownstreamOpen(ds)) ds.disconnect(`Realm relay upstream error: ${reason}`)
+        try { upstream.close?.('upstream_error') } catch {}
+        return
+      }
+
+      console.log(`[bedrock-relay] Upstream Realm connection closed: ${reason}`)
       this.runtimeStatus?.event?.('bedrock_relay_upstream_close', {
         state: 'bedrock_relay_closed',
         bedrockRelay: {
           downstream: label,
-          reason: reason == null ? 'closed' : String(reason)
+          reason: String(reason),
+          upstreamAttempt: context.attempt,
+          upstreamMaxAttempts: context.retryOptions.maxAttempts
         }
       })
-      if (!ds.connection?.closed) ds.disconnect('Bedrock Realm connection closed')
-      this.cleanupUpstreamState(hash)
-    })
+      if (isRelayDownstreamOpen(ds)) ds.disconnect('Bedrock Realm connection closed')
+    }
 
-    ds.on('clientbound', data => {
-      if (!this.debugBridgeRelay) return
-      console.log(`[bedrock-relay] Realm -> ${this.downstreamSchemaLabel()} ${safeStringify(summarizePacket(data), 0)}`)
-    })
-
-    ds.on('serverbound', data => {
-      if (this.debugBridgeRelay) {
-        console.log(`[bedrock-relay] Observed serverbound ${safeStringify(summarizePacket(data), 0)}`)
-      }
-    })
+    upstream.on('error', error => handleUpstreamEnd('error', error))
+    upstream.on('close', reason => handleUpstreamEnd('close', reason))
   }
 
   close (...args) {
@@ -7366,6 +7727,9 @@ module.exports = {
   isServerboundRespawnAction,
   nativeBedrockRawActionDiagnostic,
   downstreamBedrockVersionForMode,
+  isRetryableNetherNetOpeningFailure,
   normalizeRelayHostForViaProxy,
+  realmUpstreamConnectRetryDelayMs,
+  realmUpstreamConnectRetryOptions,
   startNetherNetBedrockRelay
 }

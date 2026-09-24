@@ -814,7 +814,9 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
         return
       }
 
-      finishReject(new Error('NetherNet signaling WebSocket closed before WebRTC connected.'))
+      const error = new Error('NetherNet signaling WebSocket closed before WebRTC connected.')
+      error.code = 'NETHERNET_SIGNALING_CLOSED'
+      finishReject(error)
     })
 
     ws.on('error', finishReject)

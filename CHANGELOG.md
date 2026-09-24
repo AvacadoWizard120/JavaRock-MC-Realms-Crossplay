@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.110 - 2026-09-24
+
+- Door interaction acknowledgements now wait for the Realm's authoritative paired-half update, preventing the predicted open state from snapping closed and then opening again.
+- Closing a chest now waits for an in-flight cursor take/place chain to finish. If the Realm never answers, JavaRock cancels only the staged follow-up moves before closing so a late reply cannot corrupt the inventory.
+- Transient NetherNet signaling failures during join now refresh the Realm session and retry up to three times without dropping the waiting Java connection.
+- Unsupported camera-spline packets are discarded before ViaBedrock decoding, eliminating the packet-338/packet-0 warning cascade seen in the capture.
+- Private support uploads still expire automatically after 30 days, and maintainers can now preview or remove older confirmed bundles by age without touching malformed or changed objects.
+
 ## 0.3.109 - 2026-09-24
 
 - Fixed joining with a maxed-out FOV and seven-times-normal movement speed. Realm attributes, entities, and inventory now initialize under the Loading Terrain screen while the final spawn gate remains closed.

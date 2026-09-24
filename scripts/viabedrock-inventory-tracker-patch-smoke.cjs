@@ -510,6 +510,233 @@ function assertChunkLifecycleFixes () {
   }
 }
 
+function assertDeferredDoorInteractionAck () {
+  const experimentalSourceName = 'ExperimentalFeatures.java'
+  const experimentalClassName = 'net/raphimc/viabedrock/experimental/ExperimentalFeatures.class'
+  const experimentalSwitchClassName = 'net/raphimc/viabedrock/experimental/ExperimentalFeatures$1.class'
+  if (!PATCH_SOURCE_RELATIVE_PATHS.includes(experimentalSourceName)) {
+    throw new Error('ExperimentalFeatures.java is not registered in the ViaProxy patch source set')
+  }
+  for (const className of [experimentalClassName, experimentalSwitchClassName]) {
+    if (!CLASS_RELATIVE_PATHS.includes(className)) {
+      throw new Error(`door acknowledgement patch class is not registered: ${className}`)
+    }
+  }
+
+  const experimentalSource = fs.readFileSync(path.join(patchRoot, experimentalSourceName), 'utf8')
+  const useStart = experimentalSource.indexOf('protocol.registerServerbound(ServerboundPackets26_1.USE_ITEM_ON')
+  const useEnd = experimentalSource.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.INVENTORY_TRANSACTION', useStart)
+  const useItemOn = experimentalSource.slice(useStart, useEnd)
+  for (const marker of [
+    'final int sequence = wrapper.read(Types.VAR_INT)',
+    'if (hand != InteractionHand.MAIN_HAND)',
+    'chunkTracker.shouldDeferDoorInteractionAck(position)',
+    'chunkTracker.deferDoorInteractionAck(position, sequence)',
+    'chunkTracker.acknowledgeBlockInteraction(sequence)'
+  ]) {
+    if (!useItemOn.includes(marker)) throw new Error(`USE_ITEM_ON is missing deferred-door marker: ${marker}`)
+  }
+  const sequenceRead = useItemOn.indexOf('final int sequence = wrapper.read(Types.VAR_INT)')
+  const doorDecision = useItemOn.indexOf('chunkTracker.shouldDeferDoorInteractionAck(position)')
+  const bedrockStart = useItemOn.indexOf('PlayerActionType.StartItemUseOn')
+  if (sequenceRead < 0 || doorDecision < sequenceRead || bedrockStart < doorDecision) {
+    throw new Error('door acknowledgement must be deferred before the Bedrock StartItemUseOn request is sent')
+  }
+  if (useItemOn.includes('PacketFactory.sendJavaBlockChangedAck')) {
+    throw new Error('USE_ITEM_ON must route every immediate acknowledgement through the ordered ChunkTracker gate')
+  }
+  if ((useItemOn.match(/chunkTracker\.acknowledgeBlockInteraction\(sequence\)/g) || []).length !== 2) {
+    throw new Error('USE_ITEM_ON must route exactly the off-hand and non-door immediate paths through the ordered gate')
+  }
+
+  // ExperimentalFeatures is replaced as one class. Preserve the unrelated
+  // safety behavior from the bundled ViaBedrock 3.4.13 bytecode while changing
+  // only USE_ITEM_ON acknowledgement timing.
+  const linkStart = experimentalSource.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.SET_ENTITY_LINK')
+  const linkEnd = experimentalSource.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.MAP_ITEM_DATA', linkStart)
+  const entityLink = experimentalSource.slice(linkStart, linkEnd)
+  const vehicleLookup = entityLink.indexOf('final Entity vehicle = entityTracker.getEntityByUid')
+  const vehicleGuard = entityLink.indexOf('if (vehicle == null)')
+  const passengerLookup = entityLink.indexOf('final Entity passenger = entityTracker.getEntityByUid')
+  if (vehicleLookup < 0 || vehicleGuard < vehicleLookup || passengerLookup < vehicleGuard) {
+    throw new Error('ExperimentalFeatures must preserve the bundled missing-vehicle cancellation guard')
+  }
+
+  const mapStart = experimentalSource.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.MAP_ITEM_DATA')
+  const mapEnd = experimentalSource.indexOf('    public static void registerTasks()', mapStart)
+  const mapHandler = experimentalSource.slice(mapStart, mapEnd)
+  const mapCancel = mapHandler.indexOf('wrapper.cancel()')
+  const mapClear = mapHandler.indexOf('wrapper.clearPacket()')
+  const disabledMapBody = mapHandler.indexOf('/*')
+  if (mapCancel < 0 || mapClear < mapCancel || disabledMapBody < mapClear) {
+    throw new Error('ExperimentalFeatures must preserve the bundled disabled MAP_ITEM_DATA translator')
+  }
+
+  const chunkSource = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
+  for (const marker of [
+    'private static final int DOOR_INTERACTION_ACK_FALLBACK_TICKS = 6',
+    'public boolean shouldDeferDoorInteractionAck(final BlockPosition blockPosition)',
+    'public void acknowledgeBlockInteraction(final int sequence)',
+    'public void deferDoorInteractionAck(final BlockPosition blockPosition, final int sequence)',
+    'this.acknowledgeDoorInteraction(lowerPosition, upperPosition)',
+    'private void flushExpiredDoorInteractionAcks()',
+    'private void flushReadyBlockInteractionAcks()',
+    'return readySequences.lower(deferredSequences.first())'
+  ]) {
+    if (!chunkSource.includes(marker)) throw new Error(`ChunkTracker is missing deferred-door marker: ${marker}`)
+  }
+
+  const playerSource = fs.readFileSync(path.join(patchRoot, 'ClientPlayerPackets.java'), 'utf8')
+  if (playerSource.includes('PacketFactory.sendJavaBlockChangedAck')) {
+    throw new Error('PLAYER_ACTION must not bypass the ordered ChunkTracker acknowledgement gate')
+  }
+  if ((playerSource.match(/chunkTracker\.acknowledgeBlockInteraction\(sequence\)/g) || []).length !== 2) {
+    throw new Error('PLAYER_ACTION must route both immutable-world and normal acknowledgements through the ordered gate')
+  }
+  const tickStart = chunkSource.indexOf('public void tick()')
+  const tickEnd = chunkSource.indexOf('private Chunk remapChunk', tickStart)
+  const tick = chunkSource.slice(tickStart, tickEnd)
+  if (tick.indexOf('this.flushPendingDoorUpdates()') > tick.indexOf('this.flushExpiredDoorInteractionAcks()')) {
+    throw new Error('authoritative paired door updates must settle prediction before the timeout fallback runs')
+  }
+
+  const doorSendStart = chunkSource.indexOf('private boolean sendPairedDoorUpdate')
+  const doorSendEnd = chunkSource.indexOf('private void acknowledgeDoorInteraction', doorSendStart)
+  const doorSend = chunkSource.slice(doorSendStart, doorSendEnd)
+  const lowerUpdate = doorSend.indexOf('PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition')
+  const upperUpdate = doorSend.indexOf('PacketFactory.sendJavaBlockUpdate(this.user(), upperPosition')
+  const acknowledgement = doorSend.indexOf('this.acknowledgeDoorInteraction(lowerPosition, upperPosition)')
+  if (lowerUpdate < 0 || upperUpdate < lowerUpdate || acknowledgement < upperUpdate) {
+    throw new Error('door prediction acknowledgement must follow both authoritative Java block updates')
+  }
+
+  const experimentalBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(experimentalClassName)]).stdout
+  for (const marker of ['shouldDeferDoorInteractionAck', 'deferDoorInteractionAck', 'acknowledgeBlockInteraction']) {
+    if (!experimentalBytecode.includes(marker)) throw new Error(`compiled ExperimentalFeatures.class is missing deferred-door bytecode: ${marker}`)
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-door-ack-order-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const sourcePath = path.join(packageDir, 'DoorAckOrderSmoke.java')
+    fs.writeFileSync(sourcePath, `
+package net.raphimc.viabedrock.protocol.storage;
+
+import java.util.NavigableSet;
+import java.util.TreeSet;
+
+public final class DoorAckOrderSmoke {
+    private static void check(Integer actual, Integer expected, String message) {
+        if (actual == null ? expected != null : !actual.equals(expected)) {
+            throw new AssertionError(message + ": expected=" + expected + " actual=" + actual);
+        }
+    }
+
+    private static NavigableSet<Integer> sequences(int... values) {
+        final NavigableSet<Integer> result = new TreeSet<>();
+        for (int value : values) result.add(value);
+        return result;
+    }
+
+    public static void main(String[] args) {
+        check(ChunkTracker.highestReadyBlockInteractionAck(sequences(), sequences()), null,
+                "no interaction is ready");
+        check(ChunkTracker.highestReadyBlockInteractionAck(sequences(4, 6, 8), sequences()), 8,
+                "without a deferred door the highest cumulative acknowledgement is safe");
+        check(ChunkTracker.highestReadyBlockInteractionAck(sequences(4, 6, 8), sequences(5, 7)), 4,
+                "a later non-door acknowledgement must stop before the earliest deferred door");
+        check(ChunkTracker.highestReadyBlockInteractionAck(sequences(5, 6, 8), sequences(7)), 6,
+                "resolving the first door releases only acknowledgements before the next door");
+        check(ChunkTracker.highestReadyBlockInteractionAck(sequences(6, 7, 8), sequences(5)), null,
+                "a resolved newer door must not overtake an older unresolved door");
+        check(ChunkTracker.highestReadyBlockInteractionAck(sequences(4, 6, 7, 8), sequences(5)), 4,
+                "older ready work may still advance without crossing the deferred door");
+        check(ChunkTracker.highestReadyBlockInteractionAck(sequences(5, 6, 7, 8), sequences()), 8,
+                "resolving all doors releases the newest cumulative acknowledgement");
+    }
+}
+`)
+
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.DoorAckOrderSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+
+  const bundledExperimentalBytecode = run('javap', [
+    '-classpath',
+    viaProxyJar,
+    '-c',
+    '-p',
+    'net.raphimc.viabedrock.experimental.ExperimentalFeatures'
+  ]).stdout
+  const methodBodies = text => {
+    const methods = new Map()
+    let method
+    for (const line of text.replace(/\r/g, '').split('\n')) {
+      if (/^  (?:public|private|protected|static)/.test(line) && line.trim().endsWith(';')) {
+        method = line.trim()
+        methods.set(method, [])
+      } else if (method) {
+        methods.get(method).push(line)
+      }
+    }
+    return methods
+  }
+  const normalizedInstructions = lines => lines
+    .map(line => line
+      .replace(/^\s*\d+:\s*/, '')
+      .replace(/#\d+/g, '#')
+      .replace(/\s+$/, ''))
+    .filter(line => line.trim())
+    .join('\n')
+  const bundledMethods = methodBodies(bundledExperimentalBytecode)
+  const patchedMethods = methodBodies(experimentalBytecode)
+  for (const [method, bundledBody] of bundledMethods) {
+    // This is the sole intended method-level difference: Java USE_ITEM_ON now
+    // defers door ACKs. Every other translator must remain bytecode-equivalent
+    // to the bundled ViaBedrock 3.4.13 implementation.
+    if (method.includes('lambda$registerPacketTranslators$2')) continue
+    const patchedBody = patchedMethods.get(method)
+    if (!patchedBody || normalizedInstructions(bundledBody) !== normalizedInstructions(patchedBody)) {
+      throw new Error(`ExperimentalFeatures changed unrelated bundled bytecode: ${method}`)
+    }
+  }
+
+  const bundledSwitchBytecode = run('javap', [
+    '-classpath',
+    viaProxyJar,
+    '-c',
+    '-p',
+    'net.raphimc.viabedrock.experimental.ExperimentalFeatures$1'
+  ]).stdout
+  const patchedSwitchBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(experimentalSwitchClassName)]).stdout
+  const canonicalSwitchInitializer = text => {
+    const lines = text.replace(/\r/g, '').split('\n')
+    const enumTypes = []
+    const assignments = []
+    for (let index = 0; index < lines.length; index++) {
+      const values = lines[index].match(/\/\/ Method ([^:]+)\.values:/)
+      if (values) enumTypes.push(values[1])
+
+      const constant = lines[index].match(/\/\/ Field ([^:]+)\.([^./:]+):L/)
+      if (!constant || constant[1].includes('$SwitchMap$')) continue
+      const assignment = lines.slice(index + 1, index + 5).join('\n').match(/\b(iconst_[0-5]|bipush\s+-?\d+|sipush\s+-?\d+)\b/)
+      if (assignment) assignments.push(`${constant[1]}.${constant[2]}=${assignment[1].replace(/\s+/g, ':')}`)
+    }
+    return JSON.stringify({
+      enumTypes: Array.from(new Set(enumTypes)).sort(),
+      assignments: assignments.sort(),
+      noSuchFieldGuards: (text.match(/Class java\/lang\/NoSuchFieldError/g) || []).length
+    })
+  }
+  if (canonicalSwitchInitializer(bundledSwitchBytecode) !== canonicalSwitchInitializer(patchedSwitchBytecode)) {
+    throw new Error('ExperimentalFeatures$1 changed the bundled enum-switch mappings or guards')
+  }
+}
+
 function assertMissingBlockStateWarningDedupe () {
   const source = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
   for (const marker of [
@@ -1630,6 +1857,7 @@ assertModernMobEquipmentCodec()
 assertModernMobArmorEquipmentCodec()
 assertCanonicalInventoryInteractionState()
 assertChunkLifecycleFixes()
+assertDeferredDoorInteractionAck()
 assertMissingBlockStateWarningDedupe()
 assertAggregatedStartupBlockStateMappingWarnings()
 assertBedrockBlockStateCompatibility()

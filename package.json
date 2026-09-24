@@ -1,6 +1,6 @@
 {
   "name": "javarock-mc-realms-crossplay",
-  "version": "0.3.109",
+  "version": "0.3.110",
   "private": true,
   "description": "Experimental local Java-to-Bedrock Realm bridge for authorized accounts.",
   "license": "SEE LICENSE IN LICENSE",

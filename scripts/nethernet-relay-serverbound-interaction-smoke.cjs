@@ -208,6 +208,11 @@ function makeRelayPlayerHarness (queueImpl) {
   relayPlayer.pendingBridgeToRealmItemStackRequests = new Map()
   relayPlayer.pendingBridgeSyntheticItemStackPlaces = new Map()
   relayPlayer.pendingBridgeCursorDependentTakeRequests = new Map()
+  relayPlayer.pendingCraftingDrainRequestIds = new Set()
+  relayPlayer.deferredCraftingContainerClose = null
+  relayPlayer.craftingContainerCloseTimer = null
+  relayPlayer.deferredExternalContainerClose = null
+  relayPlayer.externalContainerCloseTimer = null
   relayPlayer.pendingBridgeAuthInputItemStackRequests = []
   relayPlayer.bridgeAuthInputItemStackEmbeddingDisabled = false
   relayPlayer.bridgePredictedItemStackIds = new Map()
@@ -715,6 +720,157 @@ withQuietRelayLogs(() => {
   assert.strictEqual(queued[1].params.requests[0].actions[0].source.stack_id, 5025)
   assert.strictEqual(queued[1].params.requests[0].actions[0].destination.slot, 22)
   assert.strictEqual(relayPlayer.pendingBridgeSyntheticItemStackPlaces.size, 0)
+})
+
+withQuietRelayLogs(() => {
+  const { relayPlayer, records, queued } = makeRelayPlayerHarness()
+  relayPlayer.externalContainerWindowId = 2
+  const nativeTake = {
+    requests: [{
+      request_id: -3,
+      actions: [{
+        type_id: 'take',
+        count: 2,
+        source: { slot_type: { container_id: 'container' }, slot: 31, stack_id: 9 },
+        destination: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 0 }
+      }],
+      custom_names: [],
+      cause: -1
+    }]
+  }
+  const nativePlace = {
+    requests: [{
+      request_id: -5,
+      actions: [{
+        type_id: 'place',
+        count: 2,
+        source: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: -3 },
+        destination: { slot_type: { container_id: 'inventory' }, slot: 22, stack_id: 0 }
+      }],
+      custom_names: [],
+      cause: -1
+    }]
+  }
+  const close = { window_id: 2, window_type: 'container', server: false }
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('item_stack_request', nativeTake, 'live:captured_chest_take'), true)
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('item_stack_request', nativePlace, 'live:captured_chest_place'), true)
+  assert.deepStrictEqual(queued.map(packet => packet.name), ['item_stack_request'])
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('container_close', close, 'live:captured_chest_close'), true)
+  assert.deepStrictEqual(queued.map(packet => packet.name), ['item_stack_request'])
+  assert(relayPlayer.deferredExternalContainerClose)
+  assert(records.some(event => event.name === 'container_close' && event.phase === 'deferred' && event.translation_status === 'deferred_until_external_container_cursor_chain_settles'))
+
+  const takeResponse = {
+    responses: [{
+      status: 'ok',
+      request_id: -3,
+      containers: [{
+        slot_type: { container_id: 'cursor' },
+        slots: [{ slot: 0, hotbar_slot: 0, count: 2, item_stack_id: 19, custom_name: '', filtered_custom_name: '', durability_correction: 0 }]
+      }]
+    }]
+  }
+  relayPlayer.mirrorUpstreamClientStateFromPacket('item_stack_response', takeResponse)
+  relayPlayer.flushBridgeSyntheticFollowUpPlacesFromResponse(takeResponse, 'live')
+  assert.strictEqual(relayPlayer.flushDeferredExternalContainerClose('take_response'), false)
+  assert.deepStrictEqual(queued.map(packet => packet.name), ['item_stack_request', 'item_stack_request'])
+  assert.strictEqual(queued[1].params.requests[0].request_id, -5)
+
+  const placeResponse = { responses: [{ status: 'ok', request_id: -5, containers: [] }] }
+  relayPlayer.mirrorUpstreamClientStateFromPacket('item_stack_response', placeResponse)
+  assert.strictEqual(relayPlayer.flushDeferredExternalContainerClose('place_response'), true)
+  assert.deepStrictEqual(queued.map(packet => packet.name), ['item_stack_request', 'item_stack_request', 'container_close'])
+  assert.strictEqual(relayPlayer.deferredExternalContainerClose, null)
+  assert.strictEqual(relayPlayer.externalContainerCloseTimer, null)
+  assert(records.some(event => event.name === 'container_close' && event.phase === 'resumed' && event.translation_status === 'resumed_external_container_close_after_cursor_chain_settled'))
+})
+
+withQuietRelayLogs(() => {
+  const { relayPlayer, records, queued } = makeRelayPlayerHarness()
+  relayPlayer.externalContainerWindowId = 2
+  let replayCount = 0
+  relayPlayer.scheduleAuthoritativeInventoryReplay = () => { replayCount++ }
+  const nativeTake = {
+    requests: [{
+      request_id: -3,
+      actions: [{
+        type_id: 'take',
+        count: 2,
+        source: { slot_type: { container_id: 'container' }, slot: 31, stack_id: 9 },
+        destination: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 0 }
+      }],
+      custom_names: [],
+      cause: -1
+    }]
+  }
+  const nativePlace = {
+    requests: [{
+      request_id: -5,
+      actions: [{
+        type_id: 'place',
+        count: 2,
+        source: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: -3 },
+        destination: { slot_type: { container_id: 'inventory' }, slot: 22, stack_id: 0 }
+      }],
+      custom_names: [],
+      cause: -1
+    }]
+  }
+  const dependentTake = {
+    requests: [{
+      request_id: -7,
+      actions: [{
+        type_id: 'take',
+        count: 1,
+        source: { slot_type: { container_id: 'container' }, slot: 40, stack_id: 18 },
+        destination: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: -3 }
+      }],
+      custom_names: [],
+      cause: -1
+    }]
+  }
+  const close = { window_id: 2, window_type: 'container', server: false }
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('item_stack_request', nativeTake, 'live:timeout_take'), true)
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('item_stack_request', nativePlace, 'live:timeout_place'), true)
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('item_stack_request', dependentTake, 'live:timeout_dependent_take'), true)
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('container_close', close, 'live:timeout_close'), true)
+  assert.deepStrictEqual(queued.map(packet => packet.name), ['item_stack_request'])
+  assert.strictEqual(relayPlayer.pendingBridgeSyntheticItemStackPlaces.size, 1)
+  assert.strictEqual(relayPlayer.pendingBridgeCursorDependentTakeRequests.size, 1)
+
+  assert.strictEqual(relayPlayer.flushDeferredExternalContainerClose('cursor_ack_timeout', true), true)
+  assert.deepStrictEqual(queued.map(packet => packet.name), ['item_stack_request', 'container_close'])
+  assert.strictEqual(relayPlayer.pendingBridgeSyntheticItemStackPlaces.size, 0)
+  assert.strictEqual(relayPlayer.pendingBridgeCursorDependentTakeRequests.size, 0)
+  assert.strictEqual(relayPlayer.pendingBridgeToRealmItemStackRequests.has('-3'), false)
+  assert.deepStrictEqual(relayPlayer.pendingExternalContainerCursorRequestIds(), [])
+  assert.strictEqual(replayCount, 1)
+
+  const lateTakeResponse = {
+    responses: [{
+      status: 'ok',
+      request_id: -3,
+      containers: [{
+        slot_type: { container_id: 'cursor' },
+        slots: [{ slot: 0, hotbar_slot: 0, count: 2, item_stack_id: 19, custom_name: '', filtered_custom_name: '', durability_correction: 0 }]
+      }]
+    }]
+  }
+  relayPlayer.mirrorUpstreamClientStateFromPacket('item_stack_response', lateTakeResponse)
+  relayPlayer.flushBridgeSyntheticFollowUpPlacesFromResponse(lateTakeResponse, 'late_after_close')
+  relayPlayer.flushBridgeCursorDependentTakesFromResponse(lateTakeResponse, 'late_after_close')
+  assert.deepStrictEqual(queued.map(packet => packet.name), ['item_stack_request', 'container_close'])
+  assert.strictEqual(relayPlayer.pendingBridgeToRealmItemStackRequests.has('-3'), false)
+  assert.strictEqual(replayCount, 1)
+
+  const timeoutResume = records.find(event => event.name === 'container_close' && event.phase === 'resumed' && event.translation_status === 'resumed_external_container_close_after_cursor_fallback')
+  assert(timeoutResume)
+  assert.deepStrictEqual(timeoutResume.diagnostic.canceledFollowUps.placeRequestIds, ['-5'])
+  assert.deepStrictEqual(timeoutResume.diagnostic.canceledFollowUps.takeRequestIds, ['-7'])
+  assert.deepStrictEqual(timeoutResume.diagnostic.canceledFollowUps.invalidatedRequestIds, ['-3'])
 })
 
 withQuietRelayLogs(() => {
