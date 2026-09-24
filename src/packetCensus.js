@@ -5,7 +5,7 @@ const fs = require('fs')
 const path = require('path')
 const { safeStringify } = require('./safeStringify')
 const { redactSensitiveFields } = require('./packetLogger')
-const { createPacketCensusSqliteLedger } = require('./packetCensusSqlite')
+const { createPacketCensusPersistenceQueue } = require('./packetCensusSqlite')
 
 const DEFAULT_HIGH_VALUE_PACKET_NAMES = new Set([
   'start_game',
@@ -211,11 +211,17 @@ function ensureDir (dir) {
   fs.mkdirSync(dir, { recursive: true })
 }
 
-function atomicWriteJson (file, value) {
+function atomicWriteJsonSync (file, value) {
   ensureDir(path.dirname(file))
-  const tmp = `${file}.${process.pid}.tmp`
-  fs.writeFileSync(tmp, safeStringify(value, 2) + '\n')
-  fs.renameSync(tmp, file)
+  const temporary = `${file}.${process.pid}.fallback-${crypto.randomBytes(4).toString('hex')}.tmp`
+  try {
+    fs.writeFileSync(temporary, safeStringify(value, 2) + '\n')
+    fs.renameSync(temporary, file)
+  } finally {
+    try { fs.unlinkSync(temporary) } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+  }
 }
 
 function normalizeValueForSummary (value) {
@@ -229,6 +235,158 @@ function normalizeValueForSummary (value) {
     return out
   }
   return value
+}
+
+const SAMPLE_CAPTURE_LIMITS = Object.freeze({
+  maxDepth: 12,
+  maxNodes: 2048,
+  maxArrayItems: 128,
+  maxObjectKeys: 64,
+  maxTextBytes: 128 * 1024,
+  maxStringBytes: 4096
+})
+
+function boundedValueForSample (value, limits = SAMPLE_CAPTURE_LIMITS) {
+  const state = {
+    nodes: 0,
+    textBytes: 0,
+    omittedNodes: 0,
+    omittedArrayItems: 0,
+    omittedObjectKeys: 0,
+    omittedBuffers: 0,
+    omittedBufferBytes: 0,
+    truncatedStrings: 0
+  }
+
+  const omit = reason => {
+    state.omittedNodes++
+    return { _javarock_omitted: reason }
+  }
+
+  const visit = (current, depth) => {
+    if (current == null || typeof current === 'boolean' || typeof current === 'number') return current
+    if (typeof current === 'bigint') return current.toString()
+    if (typeof current === 'string') {
+      const available = Math.max(0, limits.maxTextBytes - state.textBytes)
+      if (available === 0) return omit('text_budget')
+      const allowed = Math.min(limits.maxStringBytes, available)
+      const bytes = Buffer.byteLength(current)
+      if (bytes <= allowed) {
+        state.textBytes += bytes
+        return current
+      }
+      state.textBytes += allowed
+      state.truncatedStrings++
+      return `${Buffer.from(current).subarray(0, allowed).toString('utf8')}[truncated:${bytes - allowed}_bytes]`
+    }
+    if (Buffer.isBuffer(current)) {
+      state.omittedBuffers++
+      state.omittedBufferBytes += current.length
+      return { _javarock_omitted: 'buffer_payload', bytes: current.length }
+    }
+    if (typeof current !== 'object') return String(current)
+    if (depth >= limits.maxDepth) return omit('depth_budget')
+    if (state.nodes >= limits.maxNodes) return omit('node_budget')
+    state.nodes++
+
+    if (Array.isArray(current)) {
+      const take = Math.min(current.length, limits.maxArrayItems)
+      const out = new Array(take)
+      for (let index = 0; index < take; index++) out[index] = visit(current[index], depth + 1)
+      if (take < current.length) {
+        state.omittedArrayItems += current.length - take
+        out.push({ _javarock_omitted_items: current.length - take })
+      }
+      return out
+    }
+
+    const out = {}
+    let copied = 0
+    for (const key in current) {
+      if (!Object.prototype.hasOwnProperty.call(current, key)) continue
+      if (copied >= limits.maxObjectKeys) {
+        state.omittedObjectKeys++
+        out._javarock_omitted_keys = true
+        break
+      }
+      out[key] = visit(current[key], depth + 1)
+      copied++
+    }
+    return out
+  }
+
+  const bounded = visit(value, 0)
+  const omitted = state.omittedNodes > 0 ||
+    state.omittedArrayItems > 0 ||
+    state.omittedObjectKeys > 0 ||
+    state.omittedBuffers > 0 ||
+    state.truncatedStrings > 0
+  return {
+    value: redactSensitiveFields(bounded),
+    capture: {
+      mode: omitted ? 'bounded' : 'full',
+      limits,
+      ...state
+    }
+  }
+}
+
+function summarizeCraftingRecipe (entry) {
+  const recipe = entry?.recipe || entry?.data || entry || {}
+  const input = recipe.input || recipe.ingredients || recipe.inputs
+  const output = recipe.output || recipe.outputs || recipe.results
+  return {
+    type: entry?.type ?? entry?.recipe_type ?? entry?.recipeType ?? recipe.type,
+    recipe_id: recipe.recipe_id ?? recipe.recipeId ?? recipe.network_id ?? recipe.networkId,
+    uuid: recipe.uuid,
+    block: recipe.block ?? recipe.block_name ?? recipe.blockName ?? recipe.tag,
+    inputCount: Array.isArray(input) ? input.length : undefined,
+    outputCount: Array.isArray(output) ? output.length : (output == null ? undefined : 1)
+  }
+}
+
+function summarizeCraftingData (params = {}) {
+  const recipes = Array.isArray(params.recipes) ? params.recipes : []
+  const potionTypes = params.potion_type_recipes || params.potionTypeRecipes || []
+  const potionContainers = params.potion_container_recipes || params.potionContainerRecipes || []
+  const materialReducers = params.material_reducers || params.materialReducers || []
+  return {
+    clear_recipes: params.clear_recipes ?? params.clearRecipes,
+    recipeCount: recipes.length,
+    potionTypeRecipeCount: Array.isArray(potionTypes) ? potionTypes.length : undefined,
+    potionContainerRecipeCount: Array.isArray(potionContainers) ? potionContainers.length : undefined,
+    materialReducerCount: Array.isArray(materialReducers) ? materialReducers.length : undefined,
+    firstRecipes: recipes.slice(0, 12).map(summarizeCraftingRecipe)
+  }
+}
+
+function boundedCraftingSample (params, summary) {
+  const recipes = Array.isArray(params?.recipes) ? params.recipes : []
+  const potionTypes = params?.potion_type_recipes || params?.potionTypeRecipes || []
+  const potionContainers = params?.potion_container_recipes || params?.potionContainerRecipes || []
+  const materialReducers = params?.material_reducers || params?.materialReducers || []
+  const preview = boundedValueForSample({
+    clear_recipes: params?.clear_recipes ?? params?.clearRecipes,
+    recipes: recipes.slice(0, 12),
+    potion_type_recipes: Array.isArray(potionTypes) ? potionTypes.slice(0, 8) : undefined,
+    potion_container_recipes: Array.isArray(potionContainers) ? potionContainers.slice(0, 8) : undefined,
+    material_reducers: Array.isArray(materialReducers) ? materialReducers.slice(0, 8) : undefined
+  })
+  return {
+    value: {
+      _javarock_capture: 'bounded_preview',
+      reason: 'full crafting_data payload omitted from realtime capture',
+      summary_location: 'event.summary',
+      preview: preview.value
+    },
+    capture: {
+      mode: 'bounded_preview',
+      recipe_count: summary?.recipeCount,
+      preview_recipe_count: Math.min(recipes.length, 12),
+      omitted_recipe_count: Math.max(0, recipes.length - 12),
+      preview_bounds: preview.capture
+    }
+  }
 }
 
 function bufferLikeByteLength (value) {
@@ -442,6 +600,11 @@ function packetInputFlagNames (inputData) {
 function summarizePacketForCensus (name, params = {}) {
   const out = {
     keys: params && typeof params === 'object' ? Object.keys(params).slice(0, 24) : []
+  }
+
+  if (name === 'crafting_data') {
+    Object.assign(out, summarizeCraftingData(params))
+    return out
   }
 
   if (name === 'player_auth_input') {
@@ -792,6 +955,7 @@ class PacketCensus {
       ? Math.max(options.sampleHardLimitPerKindPerRun, this.sampleLimitPerKind)
       : Math.max(16, this.sampleLimitPerKind)
     this.sampleKindsPrunedThisRun = new Set()
+    this.queuedSampleFiles = new Set()
     this.eventWindowSize = Number.isInteger(options.eventWindowSize) ? options.eventWindowSize : 240
     this.fullPayload = options.fullPayload === true
     this.eventMode = String(options.eventMode || process.env.PACKET_CENSUS_EVENT_MODE || 'important').toLowerCase()
@@ -826,7 +990,11 @@ class PacketCensus {
     this.sqliteBatchSize = Number.isInteger(options.sqliteBatchSize) && options.sqliteBatchSize > 0
       ? options.sqliteBatchSize
       : 250
+    this.maxPendingSqliteEvents = Number.isInteger(options.maxPendingSqliteEvents) && options.maxPendingSqliteEvents > 0
+      ? Math.max(options.maxPendingSqliteEvents, this.sqliteBatchSize)
+      : Math.max(4096, this.sqliteBatchSize * 8)
     this.pendingSqliteEvents = []
+    this.sqliteBackpressureWarningShown = false
     this.bufferFlushTimer = null
     this.bufferWriteWarningShown = false
     this.dbFile = path.join(this.dir, 'census.json')
@@ -839,24 +1007,34 @@ class PacketCensus {
     this.summaryFile = path.join(this.dir, `run-summary-${this.runId}.json`)
     this.samplesDir = path.join(this.dir, 'samples')
     this.writeBuffers = {
-      events: { file: this.eventsFile, chunks: [], bytes: 0 },
-      focus: { file: this.focusTraceFile, chunks: [], bytes: 0 },
-      raw: { file: this.rawJournalFile, chunks: [], bytes: 0 }
+      events: { file: this.eventsFile, chunks: [], bytes: 0, retryBatches: [], nextSequence: 1 },
+      focus: { file: this.focusTraceFile, chunks: [], bytes: 0, retryBatches: [], nextSequence: 1 },
+      raw: { file: this.rawJournalFile, chunks: [], bytes: 0, retryBatches: [], nextSequence: 1 }
     }
     this.db = this.loadExistingDb()
     this.sqlite = undefined
+    this.persistence = undefined
 
     if (this.enabled) {
       ensureDir(this.dir)
       ensureDir(this.samplesDir)
-      this.sqlite = createPacketCensusSqliteLedger({
-        enabled: this.sqliteEnabled,
+      this.persistence = createPacketCensusPersistenceQueue({
+        sqliteEnabled: this.sqliteEnabled,
         dir: this.dir,
         file: this.sqliteFile,
         captureProfile: this.captureProfile,
         sourceLabel: this.sourceLabel,
-        targetLabel: this.targetLabel
+        targetLabel: this.targetLabel,
+        maxInFlight: options.persistenceMaxInFlight,
+        maxQueuedBytes: options.persistenceMaxQueuedBytes,
+        maxAppendBatchBytes: options.persistenceMaxAppendBatchBytes,
+        drainTimeoutMs: options.persistenceDrainTimeoutMs
       })
+      if (!this.persistence.available) {
+        this.enabled = false
+        return
+      }
+      this.sqlite = this.persistence
       const shouldImportJsonIntoSqlite = options.sqliteImportJson === true
       if (this.sqlite?.enabled && shouldImportJsonIntoSqlite) {
         this.withSqlite('importJsonDb', this.db)
@@ -884,7 +1062,7 @@ class PacketCensus {
         summary_file: path.relative(this.dir, this.summaryFile).replace(/\\/g, '/')
       }
       this.withSqlite('recordRunStart', this.db.runs[this.runId])
-      atomicWriteJson(path.join(this.dir, 'latest-run.json'), this.db.runs[this.runId])
+      this.persistence.writeJsonAtomic(path.join(this.dir, 'latest-run.json'), this.db.runs[this.runId])
       console.log(`[packet-census] Enabled. DB: ${this.dbFile}`)
       if (this.sqlite?.enabled) console.log(`[packet-census] SQLite ledger: ${this.sqliteFile}`)
       console.log(`[packet-census] Events: ${this.eventsFile}`)
@@ -912,17 +1090,32 @@ class PacketCensus {
 
   flushBufferedTarget (target) {
     const buffer = this.writeBuffers[target]
-    if (!buffer?.chunks.length) return
-    const content = buffer.chunks.join('')
-    try {
-      fs.appendFileSync(buffer.file, content)
-      buffer.chunks = []
-      buffer.bytes = 0
-    } catch (error) {
+    if (!buffer || (!buffer.chunks.length && !buffer.retryBatches.length)) return
+    const retryBatches = buffer.retryBatches.slice().sort((left, right) => left.sequence - right.sequence)
+    const retryBytes = retryBatches.reduce((total, batch) => total + Buffer.byteLength(batch.content), 0)
+    if (!this.persistence?.canAccept(retryBytes + buffer.bytes)) {
       if (!this.bufferWriteWarningShown) {
         this.bufferWriteWarningShown = true
-        console.warn(`[packet-census] Buffered event write failed; capture data is still retained in memory for the next flush: ${error.message || error}`)
+        console.warn('[packet-census] Background event queue is unavailable; capture data remains buffered for the next flush.')
       }
+      return
+    }
+    const currentContent = buffer.chunks.join('')
+    const batches = retryBatches.slice()
+    if (currentContent) batches.push({ sequence: buffer.nextSequence, content: currentContent })
+    const content = batches.map(batch => batch.content).join('')
+    const retrySequence = batches[0].sequence
+    if (this.persistence?.appendFile(buffer.file, content, result => {
+      if (result.ok) return
+      buffer.retryBatches.push({ sequence: retrySequence, content })
+    })) {
+      if (currentContent) buffer.nextSequence++
+      buffer.retryBatches = []
+      buffer.chunks = []
+      buffer.bytes = 0
+    } else if (!this.bufferWriteWarningShown) {
+      this.bufferWriteWarningShown = true
+      console.warn('[packet-census] Background event queue is unavailable; capture data remains buffered for the next flush.')
     }
   }
 
@@ -931,6 +1124,46 @@ class PacketCensus {
     this.flushBufferedTarget('events')
     this.flushBufferedTarget('focus')
     this.flushBufferedTarget('raw')
+  }
+
+  flushBufferedTargetSynchronously (target) {
+    const buffer = this.writeBuffers[target]
+    if (!buffer || (!buffer.chunks.length && !buffer.retryBatches.length)) return true
+    const retryBatches = buffer.retryBatches.slice().sort((left, right) => left.sequence - right.sequence)
+    const currentContent = buffer.chunks.join('')
+    const batches = retryBatches.slice()
+    if (currentContent) batches.push({ sequence: buffer.nextSequence, content: currentContent })
+    fs.appendFileSync(buffer.file, batches.map(batch => batch.content).join(''))
+    if (currentContent) buffer.nextSequence++
+    buffer.retryBatches = []
+    buffer.chunks = []
+    buffer.bytes = 0
+    return true
+  }
+
+  persistFatalWorkerFallback (finalSummary) {
+    let complete = true
+    for (const target of ['events', 'focus', 'raw']) {
+      try {
+        this.flushBufferedTargetSynchronously(target)
+      } catch (error) {
+        complete = false
+        console.warn(`[packet-census] Could not recover queued ${target} diagnostics during shutdown: ${error.message || error}`)
+      }
+    }
+    for (const [file, value] of [
+      [this.summaryFile, finalSummary],
+      [this.dbFile, this.db],
+      [path.join(this.dir, 'latest-run.json'), this.db.runs[this.runId]]
+    ]) {
+      try {
+        atomicWriteJsonSync(file, value)
+      } catch (error) {
+        complete = false
+        console.warn(`[packet-census] Could not recover ${file} during shutdown: ${error.message || error}`)
+      }
+    }
+    return complete
   }
 
   recordRawPacket (partial = {}) {
@@ -962,19 +1195,33 @@ class PacketCensus {
 
   queueSqliteEvent (entry) {
     if (!this.sqlite?.enabled) return
+    if (this.pendingSqliteEvents.length >= this.maxPendingSqliteEvents) {
+      if (!this.sqliteBackpressureWarningShown) {
+        this.sqliteBackpressureWarningShown = true
+        console.warn('[packet-census] SQLite diagnostics are behind; JSON event capture will continue without blocking gameplay.')
+      }
+      return
+    }
     this.pendingSqliteEvents.push(entry)
     if (this.pendingSqliteEvents.length >= this.sqliteBatchSize) this.flushSqliteEvents()
   }
 
   flushSqliteEvents () {
     if (!this.sqlite?.enabled || !this.pendingSqliteEvents.length) return
-    const entries = this.pendingSqliteEvents.splice(0)
+    const estimatedBytes = Math.max(1024, this.pendingSqliteEvents.length * 2048)
+    if (!this.persistence?.canAccept(estimatedBytes)) return false
+    const entries = this.pendingSqliteEvents.slice()
+    let accepted
     if (typeof this.sqlite.recordEvents === 'function') {
-      this.withSqlite('recordEvents', entries)
+      accepted = this.withSqlite('recordEvents', entries)
     } else {
-      for (const entry of entries) this.withSqlite('recordEvent', entry)
+      accepted = true
+      for (const entry of entries) accepted = this.withSqlite('recordEvent', entry) && accepted
     }
+    if (!accepted) return false
+    this.pendingSqliteEvents.splice(0, entries.length)
     this.withSqlite('recordRunProgress', this.db.runs[this.runId])
+    return true
   }
 
   withSqlite (method, ...args) {
@@ -1061,7 +1308,7 @@ class PacketCensus {
   focusTracePacketForEvent (event, params) {
     if (!params || typeof params !== 'object') return undefined
     if (this.focusTraceFull || event.force_sample || this.focusTraceFullNames.has(event.name)) {
-      return redactSensitiveFields(params)
+      return boundedValueForSample(params).value
     }
     return undefined
   }
@@ -1133,10 +1380,10 @@ class PacketCensus {
         retained.push(reference)
         continue
       }
-      try {
-        fs.unlinkSync(file)
-      } catch (error) {
-        if (error?.code !== 'ENOENT') retained.push(reference)
+      if (!this.persistence?.unlink(file)) {
+        retained.push(reference)
+      } else {
+        this.queuedSampleFiles.delete(file)
       }
     }
 
@@ -1158,22 +1405,38 @@ class PacketCensus {
     if (currentRunSampleCount >= this.sampleHardLimitPerKindPerRun) return undefined
     if (currentRunSampleCount >= this.sampleLimitPerKind && !forceSample && !event.error && event.phase !== 'failed') return undefined
 
-    const redacted = redactSensitiveFields(params)
-    const hash = packetHash(redacted).slice(0, 16)
+    const bounded = event.name === 'crafting_data'
+      ? boundedCraftingSample(params, event.summary)
+      : boundedValueForSample(params)
+    const hash = packetHash({
+      packet: bounded.value,
+      capture: bounded.capture,
+      summary: event.summary
+    }).slice(0, 16)
     const filename = `${this.runId}-${event.direction || 'unknown'}-${event.name || 'unknown'}-${hash}.json`
     const file = path.join(this.samplesDir, filename)
-    if (!fs.existsSync(file)) {
-      atomicWriteJson(file, {
+    const rel = path.relative(this.dir, file).replace(/\\/g, '/')
+    if (!this.queuedSampleFiles.has(file) && !fs.existsSync(file)) {
+      const accepted = this.persistence?.writeJsonAtomic(file, {
         schema_version: 1,
         run_id: this.runId,
         event_sequence: event.sequence,
         packet_key: key,
         event,
-        packet: redacted
+        packet_capture: bounded.capture,
+        packet: bounded.value
+      }, {
+        onComplete: result => {
+          if (result.ok) return
+          this.queuedSampleFiles.delete(file)
+          const index = kind.samples.indexOf(rel)
+          if (index >= 0) kind.samples.splice(index, 1)
+        }
       })
+      if (!accepted) return undefined
+      this.queuedSampleFiles.add(file)
     }
 
-    const rel = path.relative(this.dir, file).replace(/\\/g, '/')
     if (!kind.samples.includes(rel)) kind.samples.push(rel)
     return rel
   }
@@ -1204,7 +1467,7 @@ class PacketCensus {
       bytes: Buffer.isBuffer(partial.raw) ? partial.raw.length : partial.bytes,
       tags: classifyPacket(name),
       summary: partial.summary || summarizePacketForCensus(name, params),
-      diagnostic: partial.diagnostic == null ? undefined : normalizeValueForSummary(redactSensitiveFields(partial.diagnostic)),
+      diagnostic: partial.diagnostic == null ? undefined : normalizeValueForSummary(boundedValueForSample(partial.diagnostic).value),
       error: partial.error ? String(partial.error.stack || partial.error.message || partial.error) : undefined,
       force_sample: partial.forceSample === true || partial.force_sample === true || undefined
     }
@@ -1284,7 +1547,7 @@ class PacketCensus {
     this.lastFlushAtEvent = this.eventsSeen
     this.flushBufferedFiles()
     this.flushSqliteEvents()
-    atomicWriteJson(this.dbFile, this.db)
+    this.persistence?.writeJsonAtomic(this.dbFile, this.db)
   }
 
   close (reason) {
@@ -1305,8 +1568,13 @@ class PacketCensus {
       this.db.runs[this.runId].close_reason = reason == null ? 'closed' : String(reason)
     }
     this.db.updated_at = now
+    // Make room before the final buffers/snapshots are enqueued. This wait is
+    // only part of an explicit shutdown, never the live gameplay path.
+    this.persistence?.drain()
     this.flushBufferedFiles()
+    this.persistence?.drain()
     this.flushSqliteEvents()
+    this.persistence?.drain()
 
     const topKinds = Object.values(this.db.packet_kinds)
       .filter(kind => kind.last_seen_run_id === this.runId)
@@ -1322,7 +1590,7 @@ class PacketCensus {
         last_error: kind.last_error
       }))
 
-    atomicWriteJson(this.summaryFile, {
+    const finalSummary = {
       schema_version: 1,
       run_id: this.runId,
       started_at: this.db.runs[this.runId]?.started_at,
@@ -1345,12 +1613,22 @@ class PacketCensus {
       sqlite_file: this.sqliteFile,
       recent_events: this.recentEvents.slice(-this.eventWindowSize),
       top_packet_kinds_this_run: topKinds
-    })
-    atomicWriteJson(this.dbFile, this.db)
-    atomicWriteJson(path.join(this.dir, 'latest-run.json'), this.db.runs[this.runId])
+    }
+    this.persistence?.writeJsonAtomic(this.summaryFile, finalSummary)
+    this.persistence?.drain()
+    this.persistence?.writeJsonAtomic(this.dbFile, this.db)
+    this.persistence?.drain()
+    this.persistence?.writeJsonAtomic(path.join(this.dir, 'latest-run.json'), this.db.runs[this.runId])
+    this.persistence?.drain()
     this.withSqlite('recordRunClose', this.db.runs[this.runId])
-    this.withSqlite('close')
-    console.log(`[packet-census] Closed run ${this.runId}; events=${this.eventsSeen}; summary=${this.summaryFile}`)
+    const persisted = this.persistence?.close()
+    const recovered = persisted === false && this.persistence?.fatalTaskId?.() > 0
+      ? this.persistFatalWorkerFallback(finalSummary)
+      : false
+    const persistenceState = persisted === false
+      ? (recovered ? 'json-recovered' : 'incomplete')
+      : 'complete'
+    console.log(`[packet-census] Closed run ${this.runId}; events=${this.eventsSeen}; summary=${this.summaryFile}; persistence=${persistenceState}`)
   }
 }
 

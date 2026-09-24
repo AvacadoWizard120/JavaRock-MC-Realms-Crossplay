@@ -586,4 +586,142 @@ if (DatabaseSync) {
   sqlite.close()
 }
 
+const largePacketDir = fs.mkdtempSync(path.join(os.tmpdir(), 'packet-census-large-packet-smoke-'))
+const sharedLargeRecipeField = 'x'.repeat(8192)
+const largeCraftingPacket = {
+  clear_recipes: true,
+  recipes: Array.from({ length: 3000 }, (_, index) => ({
+    type: 'shapeless',
+    recipe: {
+      network_id: index + 1,
+      uuid: `recipe-${index}`,
+      block: 'crafting_table',
+      input: [{ network_id: index }],
+      output: [{ network_id: index + 1 }],
+      deliberately_large_unused_field: sharedLargeRecipeField
+    }
+  })),
+  potion_type_recipes: new Array(25).fill({}),
+  potion_container_recipes: new Array(10).fill({})
+}
+const largePacketCensus = new PacketCensus({
+  enabled: true,
+  dir: largePacketDir,
+  runId: 'large-packet-smoke',
+  sampleLimitPerKind: 1,
+  sqliteEnabled: false
+})
+largePacketCensus.record({
+  lane: 'realm_to_bridge',
+  direction: 'realm_to_bridge',
+  source_version: '1.26.30',
+  target_version: '1.26.30',
+  phase: 'received',
+  name: 'crafting_data',
+  params: largeCraftingPacket
+})
+largePacketCensus.close('large packet smoke complete')
+
+const largePacketDb = JSON.parse(fs.readFileSync(path.join(largePacketDir, 'census.json'), 'utf8'))
+const craftingKind = Object.values(largePacketDb.packet_kinds).find(kind => kind.name === 'crafting_data')
+assert.strictEqual(craftingKind.last_summary.recipeCount, 3000, 'crafting summary should retain the recipe count')
+assert.strictEqual(craftingKind.last_summary.potionTypeRecipeCount, 25, 'crafting summary should retain auxiliary recipe counts')
+assert.strictEqual(craftingKind.last_summary.firstRecipes[0].recipe_id, 1, 'crafting summary should retain bounded recipe schema details')
+assert.strictEqual(craftingKind.samples.length, 1, 'large crafting data should still leave one useful diagnostic sample')
+const craftingSampleFile = path.join(largePacketDir, craftingKind.samples[0])
+const craftingSampleText = fs.readFileSync(craftingSampleFile, 'utf8')
+const craftingSample = JSON.parse(craftingSampleText)
+assert.strictEqual(craftingSample.packet_capture.mode, 'bounded_preview')
+assert.strictEqual(craftingSample.packet_capture.omitted_recipe_count, 2988)
+assert.strictEqual(craftingSample.packet._javarock_capture, 'bounded_preview')
+assert.strictEqual(craftingSample.packet.summary_location, 'event.summary')
+assert.strictEqual(craftingSample.event.summary.recipeCount, 3000)
+assert.strictEqual(craftingSample.packet.preview.recipes.length, 12, 'bounded crafting sample should retain a useful recipe preview')
+assert.strictEqual(craftingSample.packet.preview.recipes[0].recipe.input[0].network_id, 0)
+assert.ok(craftingSampleText.length < 96 * 1024, `crafting sample must stay bounded; wrote ${craftingSampleText.length} characters`)
+assert.ok(!craftingSampleText.includes(sharedLargeRecipeField), 'crafting sample must not serialize the multi-megabyte recipe payload')
+
+const distinctCraftingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'packet-census-distinct-crafting-smoke-'))
+const commonRecipePreview = Array.from({ length: 12 }, (_, index) => ({
+  type: 'shapeless',
+  recipe: { network_id: index + 1, uuid: `common-${index}`, input: [], output: [] }
+}))
+const distinctCraftingCensus = new PacketCensus({
+  enabled: true,
+  dir: distinctCraftingDir,
+  runId: 'distinct-crafting-smoke',
+  sampleLimitPerKind: 2,
+  sqliteEnabled: false
+})
+for (const recipes of [
+  commonRecipePreview.concat({ type: 'shapeless', recipe: { network_id: 100, uuid: 'tail-a', input: [], output: [] } }),
+  commonRecipePreview.concat([
+    { type: 'shapeless', recipe: { network_id: 200, uuid: 'tail-b', input: [], output: [] } },
+    { type: 'shapeless', recipe: { network_id: 201, uuid: 'tail-c', input: [], output: [] } }
+  ])
+]) {
+  distinctCraftingCensus.record({
+    lane: 'realm_to_bridge',
+    direction: 'realm_to_bridge',
+    source_version: '1.26.30',
+    target_version: '1.26.30',
+    phase: 'received',
+    name: 'crafting_data',
+    params: { clear_recipes: true, recipes }
+  })
+}
+distinctCraftingCensus.close('distinct crafting samples complete')
+const distinctCraftingDb = JSON.parse(fs.readFileSync(path.join(distinctCraftingDir, 'census.json'), 'utf8'))
+const distinctCraftingKind = Object.values(distinctCraftingDb.packet_kinds).find(kind => kind.name === 'crafting_data')
+assert.strictEqual(
+  distinctCraftingKind.samples.filter(ref => ref.startsWith('samples/distinct-crafting-smoke-')).length,
+  2,
+  'crafting captures with the same preview but different recipe counts must not collapse to one sample'
+)
+
+const queuedPersistenceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'packet-census-queued-persistence-smoke-'))
+const queuedPersistenceCensus = new PacketCensus({
+  enabled: true,
+  dir: queuedPersistenceDir,
+  runId: 'queued-persistence-smoke',
+  eventMode: 'all',
+  sampleLimitPerKind: 0,
+  sqliteBatchSize: 7,
+  bufferFlushBytes: 512,
+  flushEvery: 13,
+  persistenceMaxInFlight: 1,
+  persistenceMaxQueuedBytes: 32 * 1024,
+  persistenceMaxAppendBatchBytes: 2048
+})
+for (let sequence = 0; sequence < 400; sequence++) {
+  queuedPersistenceCensus.record({
+    lane: 'realm_to_bridge',
+    direction: 'realm_to_bridge',
+    source_version: '1.26.30',
+    target_version: '1.26.30',
+    phase: 'received',
+    name: 'text',
+    params: { type: 'chat', message: `queued persistence event ${sequence}` }
+  })
+}
+queuedPersistenceCensus.close('queued persistence smoke complete')
+const queuedEvents = fs.readFileSync(path.join(queuedPersistenceDir, 'events-queued-persistence-smoke.jsonl'), 'utf8')
+  .trim()
+  .split('\n')
+  .filter(Boolean)
+  .map(line => JSON.parse(line))
+assert.strictEqual(queuedEvents.length, 400, 'bounded persistence queue must drain every JSONL event on close')
+const queuedDb = JSON.parse(fs.readFileSync(path.join(queuedPersistenceDir, 'census.json'), 'utf8'))
+assert.strictEqual(queuedDb.runs['queued-persistence-smoke'].event_count, 400, 'final census snapshot must include every queued event')
+if (DatabaseSync) {
+  const queuedSqlite = new DatabaseSync(path.join(queuedPersistenceDir, 'packet-ledger.sqlite'))
+  const queuedKind = queuedSqlite.prepare(`
+    SELECT count_seen
+    FROM packet_kinds
+    WHERE name = 'text' AND direction = 'realm_to_bridge'
+  `).get()
+  assert.strictEqual(queuedKind.count_seen, 400, 'bounded persistence queue must drain every SQLite observation on close')
+  queuedSqlite.close()
+}
+
 console.log('[smoke] packet census smoke passed')
