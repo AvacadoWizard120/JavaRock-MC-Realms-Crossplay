@@ -27,6 +27,7 @@ import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.ServerboundBedrockPackets;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.ComplexInventoryTransaction_Type;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnumName;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySourceType;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySource_InventorySourceFlags;
 import net.raphimc.viabedrock.protocol.data.enums.java.generated.ContainerInput;
@@ -265,6 +266,19 @@ public abstract class Container {
         this.bridgeChestStorage = bridgeIsChestStorageBlockTag(blockTag);
         this.bridgeGenericStorageBlockTag = this.bridgeChestStorage ? null : blockTag;
     }
+    public ContainerEnumName bridgeNativeStackRequestContainerName() {
+        if (this.type != ContainerType.CONTAINER) return null;
+        String blockTag = this.bridgeConfiguredStorageBlockTag;
+        if (blockTag != null && blockTag.startsWith("minecraft:")) {
+            blockTag = blockTag.substring("minecraft:".length());
+        }
+        if ("barrel".equals(blockTag)) return ContainerEnumName.BarrelContainer;
+        if ("shulker_box".equals(blockTag) || (blockTag != null && blockTag.endsWith("_shulker_box"))) {
+            return ContainerEnumName.ShulkerBoxContainer;
+        }
+        if ("crafter".equals(blockTag)) return ContainerEnumName.CrafterLevelEntityContainer;
+        return ContainerEnumName.LevelEntityContainer;
+    }
     boolean bridgeCanPromoteToDoubleChest(int incomingSize) {
         return this.bridgeChestStorage && this.items.length == SINGLE_CHEST_SIZE && incomingSize == DOUBLE_CHEST_SIZE;
     }
@@ -474,16 +488,26 @@ public abstract class Container {
 
         BedrockItem slotBefore = safeCopy(slotContainer.getItem(bedrockSlot));
         BedrockItem hotbarBefore = safeCopy(inventory.getItem(hotbarSlot));
-        BedrockItem slotAfter = hotbarBefore.copy();
-        BedrockItem hotbarAfter = slotBefore.copy();
+        if (inventory.bridgeTrySendNativeSlotSwap(
+                slotContainer,
+                bridgeSourceContainerIdForJavaSlot(javaSlot, inventory),
+                bedrockSlot,
+                slotBefore,
+                inventory,
+                inventory.containerId() & 0xFF,
+                hotbarSlot,
+                hotbarBefore,
+                "container_number_key_swap")) {
+            bridgePublishJavaContainerSnapshot(inventory, "container_number_key_swap_native_stack_request");
+            return true;
+        }
 
-        List<InventoryActionData> actions = new ArrayList<>();
-        actions.add(bridgeContainerAction(slotContainer, bridgeSourceContainerIdForJavaSlot(javaSlot, inventory), bedrockSlot, slotBefore, slotAfter));
-        actions.add(bridgeContainerAction(inventory, inventory.containerId() & 0xFF, hotbarSlot, hotbarBefore, hotbarAfter));
-        slotContainer.setItem(bedrockSlot, slotAfter.copy());
-        inventory.setItem(hotbarSlot, hotbarAfter.copy());
-        bridgeSendNormalInventoryTransaction(actions, "container_swap");
-        bridgePublishJavaContainerSnapshot(inventory, "container_swap");
+        bridgePublishJavaContainerSnapshot(inventory, "container_number_key_swap_blocked_no_native_stack_request");
+        ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                "[BedrockRealmBridge] blocked unsafe legacy generic-container number-key swap" +
+                        " javaSlot=" + javaSlot +
+                        " bedrockSlot=" + bedrockSlot +
+                        " hotbarSlot=" + hotbarSlot);
         return true;
     }
 

@@ -24,6 +24,27 @@ assert.strictEqual(movementSummary.attributeCount, 1)
 assert.strictEqual(movementSummary.attributes[0].current, 0.1)
 assert.strictEqual(movementSummary.attributes[0].modifiers[0].amount, 0.3)
 
+const authInputArraySummary = summarizePacketForCensus('player_auth_input', {
+  tick: 80n,
+  position: { x: 180.0077, y: 72.62001, z: 9.2049 },
+  delta: { x: 0, y: -0.0784, z: 0 },
+  move_vector: { x: 0, z: 0 },
+  raw_move_vector: { x: 0, z: 0 },
+  analogue_move_vector: { x: 0, z: 0 },
+  input_data: ['block_breaking_delay_enabled', 'vertical_collision']
+})
+assert.deepStrictEqual(authInputArraySummary.inputFlags, ['block_breaking_delay_enabled', 'vertical_collision'])
+assert.deepStrictEqual(authInputArraySummary.move_vector, { x: 0, z: 0 })
+assert.deepStrictEqual(authInputArraySummary.raw_move_vector, { x: 0, z: 0 })
+assert.deepStrictEqual(authInputArraySummary.analogue_move_vector, { x: 0, z: 0 })
+assert.strictEqual(authInputArraySummary.itemInteract, false)
+
+const authInputObjectSummary = summarizePacketForCensus('player_auth_input', {
+  input_data: { _value: 9, up: true, item_interact: true, jump: false }
+})
+assert.deepStrictEqual(authInputObjectSummary.inputFlags, ['up', 'item_interact'])
+assert.strictEqual(authInputObjectSummary.itemInteract, true)
+
 const abilitiesSummary = summarizePacketForCensus('update_abilities', {
   entity_unique_id: 1n,
   abilities: [{

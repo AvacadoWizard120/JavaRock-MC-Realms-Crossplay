@@ -428,26 +428,40 @@ function summarizeActorMetadata (metadata) {
   }
 }
 
+function packetInputFlagNames (inputData) {
+  if (Array.isArray(inputData)) {
+    return Array.from(new Set(inputData.filter(flag => flag != null).map(String)))
+  }
+  if (inputData instanceof Set) {
+    return Array.from(new Set(Array.from(inputData, String)))
+  }
+  if (!inputData || typeof inputData !== 'object') return []
+  return Object.keys(inputData).filter(key => inputData[key] === true)
+}
+
 function summarizePacketForCensus (name, params = {}) {
   const out = {
     keys: params && typeof params === 'object' ? Object.keys(params).slice(0, 24) : []
   }
 
   if (name === 'player_auth_input') {
-    const input = params.input_data || {}
+    const input = params.input_data || params.inputData || {}
+    const inputFlags = packetInputFlagNames(input)
+    const hasInputFlag = (...names) => names.some(flag => inputFlags.includes(flag))
     const itemStackRequest = params.item_stack_request || params.itemStackRequest
     const itemUseTransaction = params.transaction || params.item_use_transaction || params.itemUseTransaction
     out.tick = params.tick
     out.position = params.position
     out.delta = params.delta
+    out.move_vector = params.move_vector ?? params.moveVector
+    out.raw_move_vector = params.raw_move_vector ?? params.rawMoveVector
+    out.analogue_move_vector = params.analogue_move_vector ?? params.analogueMoveVector
     out.yaw = params.yaw
     out.pitch = params.pitch
-    out.inputFlags = input && typeof input === 'object'
-      ? Object.keys(input).filter(key => input[key] === true).slice(0, 32)
-      : undefined
-    out.itemInteract = Boolean(input.item_interact || input.itemInteract || itemUseTransaction)
-    out.itemStackRequest = Boolean(input.item_stack_request || input.itemStackRequest || itemStackRequest)
-    out.blockAction = Boolean(input.block_action || params.block_action)
+    out.inputFlags = inputFlags.slice(0, 32)
+    out.itemInteract = Boolean(hasInputFlag('item_interact', 'itemInteract') || itemUseTransaction)
+    out.itemStackRequest = Boolean(hasInputFlag('item_stack_request', 'itemStackRequest') || itemStackRequest)
+    out.blockAction = Boolean(hasInputFlag('block_action', 'blockAction') || params.block_action)
     out.blockActions = summarizeBlockActions(params.block_action)
     if (itemStackRequest && typeof itemStackRequest === 'object') {
       out.itemStackRequestSummary = summarizePacketForCensus('item_stack_request', itemStackRequest)

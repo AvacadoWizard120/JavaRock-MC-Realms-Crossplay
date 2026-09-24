@@ -2,6 +2,7 @@ package net.raphimc.viabedrock.protocol.packet;
 
 import com.viaversion.nbt.tag.StringTag;
 import com.viaversion.viaversion.api.minecraft.BlockPosition;
+import com.viaversion.viaversion.api.protocol.packet.State;
 import com.viaversion.viaversion.api.protocol.packet.PacketWrapper;
 import com.viaversion.viaversion.api.type.Types;
 import com.viaversion.viaversion.libs.mcstructs.text.TextComponent;
@@ -30,6 +31,12 @@ import net.raphimc.viabedrock.protocol.storage.ResourcePackStorage;
 import net.raphimc.viabedrock.protocol.types.BedrockTypes;
 
 public class UnhandledPackets {
+
+    // The pinned local Bedrock 1.26.45 packet enum predates CameraSplinePacket,
+    // but that wire schema reserves packet id 338 for it. Register the raw id
+    // so ViaVersion cancels the Java-inexpressible camera data instead of
+    // reporting it (and its payload bytes) as unknown PLAY packets.
+    private static final int CAMERA_SPLINE_PACKET_ID = 338;
 
     public static void register(final BedrockProtocol protocol) {
         protocol.registerClientbound(ClientboundBedrockPackets.CONTAINER_OPEN, ClientboundPackets26_1.OPEN_SCREEN, wrapper -> {
@@ -167,6 +174,7 @@ public class UnhandledPackets {
         protocol.cancelClientbound(ClientboundBedrockPackets.CAMERA_AIM_ASSIST);
         protocol.cancelClientbound(ClientboundBedrockPackets.CAMERA_AIM_ASSIST_PRESETS);
         protocol.cancelClientbound(ClientboundBedrockPackets.PLAYER_VIDEO_CAPTURE);
+        protocol.cancelClientbound(State.PLAY, CAMERA_SPLINE_PACKET_ID);
 
         protocol.registerServerboundTransition(ServerboundConfigurationPackets1_21_9.KEEP_ALIVE, null, PacketWrapper::cancel);
         protocol.cancelServerbound(ServerboundPackets26_1.CHAT_ACK);

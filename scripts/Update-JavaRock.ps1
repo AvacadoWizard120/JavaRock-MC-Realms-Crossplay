@@ -38,6 +38,12 @@ $script:UpdateMutexHeld = $false
 $script:CurrentVersionText = ''
 $script:LatestVersionText = ''
 $script:DarkModeWasSpecified = $PSBoundParameters.ContainsKey('DarkMode')
+$script:ProgressWindowHandle = [int64]0
+$script:ProgressWindowVisible = $false
+$script:DownloadedBytes = [int64]0
+$script:DownloadTotalBytes = [int64]0
+$script:InstalledBytes = [int64]0
+$script:InstallTotalBytes = [int64]0
 
 function Get-PropertyValue {
     param($Object, [string]$Name, $Default = $null)
@@ -116,6 +122,26 @@ function Write-UpdateLog {
     Write-Host "[JavaRock] $Message"
 }
 
+function Format-ByteCount {
+    param([int64]$Bytes)
+
+    return [string]::Format([Globalization.CultureInfo]::CurrentCulture, '{0:N0}', [Math]::Max([int64]0, $Bytes))
+}
+
+function Get-TransferDetail {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Downloaded', 'Installed')][string]$Verb,
+        [int64]$CurrentBytes,
+        [int64]$TotalBytes
+    )
+
+    $current = Format-ByteCount $CurrentBytes
+    if ($TotalBytes -gt 0) {
+        return "$Verb $current / $(Format-ByteCount $TotalBytes) bytes"
+    }
+    return "$Verb $current bytes"
+}
+
 function Pump-UpdateProgressWindow {
     if ($null -eq $script:ProgressForm -or $script:ProgressForm.IsDisposed) { return }
     try { [Windows.Forms.Application]::DoEvents() } catch {}
@@ -153,8 +179,18 @@ function Write-UpdateProgress {
         [switch]$Indeterminate
     )
 
+    if ($null -ne $script:ProgressForm -and -not $script:ProgressForm.IsDisposed -and
+        $null -ne ('JavaRockUpdaterWindowTheme' -as [type])) {
+        try {
+            $script:ProgressWindowHandle = [int64]$script:ProgressForm.Handle.ToInt64()
+            $script:ProgressWindowVisible = [bool][JavaRockUpdaterWindowTheme]::IsVisible($script:ProgressForm.Handle)
+        } catch {
+            $script:ProgressWindowVisible = $false
+        }
+    }
+
     $value = [ordered]@{
-        format = 1
+        format = 2
         attemptId = $script:AttemptId
         state = $State
         phase = $Phase
@@ -163,6 +199,12 @@ function Write-UpdateProgress {
         percent = [Math]::Max(0, [Math]::Min(100, $Percent))
         indeterminate = [bool]$Indeterminate
         pid = $PID
+        windowHandle = [int64]$script:ProgressWindowHandle
+        windowVisible = [bool]$script:ProgressWindowVisible
+        downloadedBytes = [int64]$script:DownloadedBytes
+        downloadTotalBytes = [int64]$script:DownloadTotalBytes
+        installedBytes = [int64]$script:InstalledBytes
+        installTotalBytes = [int64]$script:InstallTotalBytes
         currentVersion = $script:CurrentVersionText
         latestVersion = $script:LatestVersionText
         logFile = $script:UpdateLogFile
@@ -236,6 +278,24 @@ public static class JavaRockUpdaterWindowTheme {
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr window, int command);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr window);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
+    private static readonly IntPtr HwndTopMost = new IntPtr(-1);
+    private const int SwRestore = 9;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpShowWindow = 0x0040;
+
     public static void Apply(IntPtr window, bool dark) {
         if (window == IntPtr.Zero) return;
         int enabled = dark ? 1 : 0;
@@ -244,6 +304,23 @@ public static class JavaRockUpdaterWindowTheme {
                 DwmSetWindowAttribute(window, 19, ref enabled, sizeof(int));
             }
         } catch { }
+    }
+
+    public static bool EnsureVisible(IntPtr window) {
+        if (window == IntPtr.Zero) return false;
+        try {
+            ShowWindow(window, SwRestore);
+            SetWindowPos(window, HwndTopMost, 0, 0, 0, 0, SwpNoSize | SwpNoMove | SwpShowWindow);
+            SetForegroundWindow(window);
+            return IsWindowVisible(window);
+        } catch {
+            return false;
+        }
+    }
+
+    public static bool IsVisible(IntPtr window) {
+        if (window == IntPtr.Zero) return false;
+        try { return IsWindowVisible(window); } catch { return false; }
     }
 }
 '@
@@ -321,10 +398,15 @@ function Initialize-UpdateProgressWindow {
         if (-not $script:ProgressCloseButton.Visible) { $_.Cancel = $true }
     })
     $form.Show()
+    Set-ProgressWindowChromeTheme
+    $script:ProgressWindowHandle = [int64]$form.Handle.ToInt64()
+    $script:ProgressWindowVisible = [bool][JavaRockUpdaterWindowTheme]::EnsureVisible($form.Handle)
     $form.BringToFront()
     $form.Activate()
-    Set-ProgressWindowChromeTheme
     Pump-UpdateProgressWindow
+    if (-not $script:ProgressWindowVisible -or -not [JavaRockUpdaterWindowTheme]::IsVisible($form.Handle)) {
+        throw 'The updater could not make its progress window visible.'
+    }
 }
 
 function Complete-UpdateProgressWindow {
@@ -530,11 +612,55 @@ function Get-NodePath {
     return $command.Source
 }
 
+function Read-DownloadProgress {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    try {
+        $text = Read-TextFileShared -Path $Path -Attempts 2 -RetryDelayMilliseconds 10
+        if (-not $text) { return $null }
+        return $text | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Publish-DownloadProgress {
+    param(
+        [Parameter(Mandatory = $true)]$Progress,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [int]$BasePercent = 12,
+        [int]$PercentSpan = 16
+    )
+
+    [int64]$received = 0
+    [int64]$total = 0
+    try { $received = [Math]::Max([int64]0, [int64](Get-PropertyValue $Progress 'receivedBytes' 0)) } catch {}
+    try { $total = [Math]::Max([int64]0, [int64](Get-PropertyValue $Progress 'totalBytes' 0)) } catch {}
+    $lengthComputable = [bool](Get-PropertyValue $Progress 'lengthComputable' ($total -gt 0))
+    if (-not $lengthComputable) { $total = 0 }
+
+    $script:DownloadedBytes = $received
+    $script:DownloadTotalBytes = $total
+    $detail = Get-TransferDetail -Verb 'Downloaded' -CurrentBytes $received -TotalBytes $total
+    if ($total -gt 0) {
+        $ratio = [Math]::Min(1.0, ([double]$received / [double]$total))
+        $percent = $BasePercent + [int][Math]::Floor($PercentSpan * $ratio)
+        Write-UpdateProgress -State 'running' -Phase 'download' -Message $Message -Percent $percent -Detail $detail
+    } else {
+        Write-UpdateProgress -State 'running' -Phase 'download' -Message $Message -Percent $BasePercent -Detail $detail -Indeterminate
+    }
+}
+
 function Invoke-GitHubDownload {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$Destination,
-        [Parameter(Mandatory = $true)][int64]$MaxBytes
+        [Parameter(Mandatory = $true)][int64]$MaxBytes,
+        [int64]$ExpectedBytes = 0,
+        [switch]$ReportProgress,
+        [string]$ProgressMessage = 'Downloading the JavaRock update...',
+        [int]$ProgressBasePercent = 12,
+        [int]$ProgressPercentSpan = 16
     )
 
     if (-not (Test-Path -LiteralPath $HttpHelper -PathType Leaf)) {
@@ -544,17 +670,43 @@ function Invoke-GitHubDownload {
     [IO.Directory]::CreateDirectory($RuntimeRoot) | Out-Null
     $stdoutPath = Join-Path $RuntimeRoot "http-$PID-$([DateTime]::UtcNow.Ticks).out.log"
     $stderrPath = Join-Path $RuntimeRoot "http-$PID-$([DateTime]::UtcNow.Ticks).err.log"
+    $transferProgressPath = Join-Path $RuntimeRoot "http-$PID-$([DateTime]::UtcNow.Ticks).progress.json"
     $process = $null
     try {
+        $helperArguments = @($HttpHelper, $Url, $Destination, ([string]$MaxBytes))
+        if ($ReportProgress) {
+            $helperArguments += @($transferProgressPath, ([string][Math]::Max([int64]0, $ExpectedBytes)))
+        }
         $process = Start-Process -FilePath $node `
-            -ArgumentList (Join-NativeArguments @($HttpHelper, $Url, $Destination, ([string]$MaxBytes))) `
+            -ArgumentList (Join-NativeArguments $helperArguments) `
             -WorkingDirectory $ProjectRoot `
             -RedirectStandardOutput $stdoutPath `
             -RedirectStandardError $stderrPath `
             -WindowStyle Hidden `
             -PassThru
+        [int64]$lastReceived = -1
+        [int64]$lastTotal = -1
         while (-not $process.HasExited) {
-            Pump-UpdateProgressWindow
+            if ($ReportProgress) {
+                $transfer = Read-DownloadProgress -Path $transferProgressPath
+                if ($null -ne $transfer) {
+                    [int64]$received = 0
+                    [int64]$total = 0
+                    try { $received = [int64](Get-PropertyValue $transfer 'receivedBytes' 0) } catch {}
+                    try { $total = [int64](Get-PropertyValue $transfer 'totalBytes' 0) } catch {}
+                    if ($received -ne $lastReceived -or $total -ne $lastTotal) {
+                        Publish-DownloadProgress -Progress $transfer -Message $ProgressMessage -BasePercent $ProgressBasePercent -PercentSpan $ProgressPercentSpan
+                        $lastReceived = $received
+                        $lastTotal = $total
+                    } else {
+                        Pump-UpdateProgressWindow
+                    }
+                } else {
+                    Pump-UpdateProgressWindow
+                }
+            } else {
+                Pump-UpdateProgressWindow
+            }
             Start-Sleep -Milliseconds 100
         }
         $process.WaitForExit()
@@ -570,10 +722,19 @@ function Invoke-GitHubDownload {
             if (-not $output) { $output = "download helper exited with code $exitCode" }
             throw $output
         }
+        if ($ReportProgress) {
+            $transfer = Read-DownloadProgress -Path $transferProgressPath
+            if ($null -eq $transfer) { throw 'The update download finished without reporting its byte count.' }
+            Publish-DownloadProgress -Progress $transfer -Message $ProgressMessage -BasePercent $ProgressBasePercent -PercentSpan $ProgressPercentSpan
+            if ([string](Get-PropertyValue $transfer 'state' '') -ne 'complete') {
+                throw 'The update download did not report a complete transfer.'
+            }
+        }
     } finally {
         if ($null -ne $process) { $process.Dispose() }
         Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $transferProgressPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -713,6 +874,10 @@ function Get-ReleaseInfo {
 
     $body = [string](Get-PropertyValue $release 'body' '')
     if ($body.Length -gt 6000) { $body = $body.Substring(0, 6000) + "`r`n..." }
+    [int64]$archiveBytes = 0
+    if ($null -ne $archiveAsset) {
+        try { $archiveBytes = [Math]::Max([int64]0, [int64](Get-PropertyValue $archiveAsset 'size' 0)) } catch { $archiveBytes = 0 }
+    }
     return [pscustomobject]@{
         State = $state
         CurrentVersion = $currentVersion.ToString(3)
@@ -724,15 +889,23 @@ function Get-ReleaseInfo {
         ArchiveName = $archiveName
         ArchiveUrl = if ($null -ne $archiveAsset) { [string]$archiveAsset.browser_download_url } else { '' }
         ArchiveDigest = if ($null -ne $archiveAsset) { [string](Get-PropertyValue $archiveAsset 'digest' '') } else { '' }
+        ArchiveBytes = $archiveBytes
         ChecksumName = $checksumName
         ChecksumUrl = if ($null -ne $checksumAsset) { [string]$checksumAsset.browser_download_url } else { '' }
     }
 }
 
 function Copy-Download {
-    param([string]$Url, [string]$Destination, [int64]$MaxBytes = 300MB)
+    param(
+        [string]$Url,
+        [string]$Destination,
+        [int64]$MaxBytes = 300MB,
+        [int64]$ExpectedBytes = 0,
+        [switch]$ReportProgress,
+        [string]$ProgressMessage = 'Downloading the JavaRock update...'
+    )
 
-    Invoke-GitHubDownload -Url $Url -Destination $Destination -MaxBytes $MaxBytes
+    Invoke-GitHubDownload -Url $Url -Destination $Destination -MaxBytes $MaxBytes -ExpectedBytes $ExpectedBytes -ReportProgress:$ReportProgress -ProgressMessage $ProgressMessage
 }
 
 function Get-ExpectedArchiveHash {
@@ -880,6 +1053,119 @@ function Copy-FileWithRetry {
             if ($attempt -lt 20) {
                 Pump-UpdateProgressWindow
                 Start-Sleep -Milliseconds 150
+            }
+        }
+    }
+    throw $lastError
+}
+
+function Publish-InstallProgress {
+    $detail = Get-TransferDetail -Verb 'Installed' -CurrentBytes $script:InstalledBytes -TotalBytes $script:InstallTotalBytes
+    $percent = 66
+    if ($script:InstallTotalBytes -gt 0) {
+        $ratio = [Math]::Min(1.0, ([double]$script:InstalledBytes / [double]$script:InstallTotalBytes))
+        $percent += [int][Math]::Floor(12.0 * $ratio)
+    }
+    Write-UpdateProgress -State 'running' -Phase 'install' -Message "Installing JavaRock $($script:LatestVersionText)..." -Percent $percent -Detail $detail
+}
+
+function Copy-InstallFileWithProgress {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    [int64]$sourceLength = [int64](Get-Item -LiteralPath $Source -ErrorAction Stop).Length
+    [int64]$committedBase = $script:InstalledBytes
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        $temporary = "$Destination.javarock-update-$PID-$([Guid]::NewGuid().ToString('N')).tmp"
+        $sourceStream = $null
+        $destinationStream = $null
+        try {
+            $script:InstalledBytes = $committedBase
+            $sourceStream = [IO.FileStream]::new(
+                $Source,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::Read,
+                131072,
+                [IO.FileOptions]::SequentialScan
+            )
+            $destinationStream = [IO.FileStream]::new(
+                $temporary,
+                [IO.FileMode]::CreateNew,
+                [IO.FileAccess]::Write,
+                [IO.FileShare]::None,
+                131072,
+                [IO.FileOptions]::WriteThrough
+            )
+            $buffer = New-Object byte[] 131072
+            $lastPublishedAt = [DateTime]::UtcNow
+            [int64]$fileBytes = 0
+            while (($read = $sourceStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $destinationStream.Write($buffer, 0, $read)
+                $fileBytes += [int64]$read
+                $script:InstalledBytes = $committedBase + $fileBytes
+                if (([DateTime]::UtcNow - $lastPublishedAt).TotalMilliseconds -ge 75 -or $fileBytes -eq $sourceLength) {
+                    Publish-InstallProgress
+                    $lastPublishedAt = [DateTime]::UtcNow
+                } else {
+                    Pump-UpdateProgressWindow
+                }
+            }
+            $destinationStream.Flush($true)
+            $destinationStream.Dispose()
+            $destinationStream = $null
+            $sourceStream.Dispose()
+            $sourceStream = $null
+            if ($fileBytes -ne $sourceLength -or [int64](Get-Item -LiteralPath $temporary -ErrorAction Stop).Length -ne $sourceLength) {
+                throw "The updater wrote an incomplete copy of $Source."
+            }
+
+            $replaceError = $null
+            for ($replaceAttempt = 1; $replaceAttempt -le 20; $replaceAttempt++) {
+                $replaceBackup = "$Destination.javarock-replaced-$PID-$([Guid]::NewGuid().ToString('N')).bak"
+                try {
+                    if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+                        # Windows PowerShell binds a null File.Replace backup path as
+                        # an empty string. Use a real same-directory backup and discard
+                        # it after the atomic swap; the durable rollback copy is separate.
+                        [IO.File]::Replace($temporary, $Destination, $replaceBackup, $true)
+                    } else {
+                        [IO.File]::Move($temporary, $Destination)
+                    }
+                    $replaceError = $null
+                    break
+                } catch {
+                    $replaceError = $_
+                    if ($replaceAttempt -lt 20) {
+                        Pump-UpdateProgressWindow
+                        Start-Sleep -Milliseconds 150
+                    }
+                } finally {
+                    if (Test-Path -LiteralPath $replaceBackup -PathType Leaf) {
+                        Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            if ($null -ne $replaceError) { throw $replaceError }
+            try { [IO.File]::SetLastWriteTimeUtc($Destination, [IO.File]::GetLastWriteTimeUtc($Source)) } catch {}
+            $script:InstalledBytes = $committedBase + $sourceLength
+            Publish-InstallProgress
+            return
+        } catch {
+            $lastError = $_
+            $script:InstalledBytes = $committedBase
+            if ($attempt -lt 20) {
+                Publish-InstallProgress
+                Start-Sleep -Milliseconds 150
+            }
+        } finally {
+            if ($null -ne $destinationStream) { try { $destinationStream.Dispose() } catch {} }
+            if ($null -ne $sourceStream) { try { $sourceStream.Dispose() } catch {} }
+            if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+                Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
             }
         }
     }
@@ -1048,10 +1334,17 @@ function Install-Release {
         $localArchive = $ArchivePath
         if (-not $localArchive) {
             $localArchive = Join-Path $work $ReleaseInfo.ArchiveName
-            Set-UpdatePhase -Phase 'download' -Message "Downloading $($ReleaseInfo.ArchiveName)..." -Percent 12 -Detail 'Downloading the update from GitHub.' -Indeterminate
-            Copy-Download -Url $ReleaseInfo.ArchiveUrl -Destination $localArchive
+            $script:DownloadedBytes = [int64]0
+            $script:DownloadTotalBytes = [int64]$ReleaseInfo.ArchiveBytes
+            $downloadMessage = "Downloading $($ReleaseInfo.ArchiveName)..."
+            $downloadDetail = Get-TransferDetail -Verb 'Downloaded' -CurrentBytes 0 -TotalBytes $script:DownloadTotalBytes
+            Set-UpdatePhase -Phase 'download' -Message $downloadMessage -Percent 12 -Detail $downloadDetail -Indeterminate:($script:DownloadTotalBytes -le 0)
+            Copy-Download -Url $ReleaseInfo.ArchiveUrl -Destination $localArchive -ExpectedBytes $script:DownloadTotalBytes -ReportProgress -ProgressMessage $downloadMessage
         } else {
-            Set-UpdatePhase -Phase 'download' -Message "Reading $($ReleaseInfo.ArchiveName)..." -Percent 18 -Detail 'Using the supplied update package.'
+            [int64]$localArchiveBytes = [int64](Get-Item -LiteralPath $localArchive -ErrorAction Stop).Length
+            $script:DownloadedBytes = $localArchiveBytes
+            $script:DownloadTotalBytes = $localArchiveBytes
+            Set-UpdatePhase -Phase 'download' -Message "Reading $($ReleaseInfo.ArchiveName)..." -Percent 28 -Detail (Get-TransferDetail -Verb 'Downloaded' -CurrentBytes $localArchiveBytes -TotalBytes $localArchiveBytes)
         }
         $localChecksum = $ChecksumPath
         if (-not $localChecksum -and $ReleaseInfo.ChecksumUrl) {
@@ -1090,6 +1383,12 @@ function Install-Release {
         $oldManifest = Read-ReleaseManifest -Root $ProjectRoot -Optional
         $oldFiles = if ($null -ne $oldManifest) { @($oldManifest.Files) } else { @() }
         $newFiles = @($newManifest.Files)
+        $script:InstalledBytes = [int64]0
+        $script:InstallTotalBytes = [int64]0
+        foreach ($relative in $newFiles) {
+            $stagedFile = Join-Path $stage ($relative.Replace('/', '\'))
+            $script:InstallTotalBytes += [int64](Get-Item -LiteralPath $stagedFile -ErrorAction Stop).Length
+        }
         $staleFiles = @($oldFiles | Where-Object { $newFiles -notcontains $_ })
         $affected = @($newFiles + $staleFiles | Sort-Object -Unique)
         $absent = @()
@@ -1110,25 +1409,26 @@ function Install-Release {
 
         Set-UpdatePhase -Phase 'wait-for-parent' -Message 'Waiting for the old JavaRock window to close...' -Percent 60 -Detail 'The verified update is ready to install.' -Indeterminate -State 'running'
         Wait-ForParentExit
-        Set-UpdatePhase -Phase 'install' -Message "Installing JavaRock $($ReleaseInfo.LatestVersion)..." -Percent 66 -Detail 'Replacing application files.'
+        Set-UpdatePhase -Phase 'install' -Message "Installing JavaRock $($ReleaseInfo.LatestVersion)..." -Percent 66 -Detail (Get-TransferDetail -Verb 'Installed' -CurrentBytes 0 -TotalBytes $script:InstallTotalBytes)
         try {
             foreach ($relative in $staleFiles) {
                 $target = Join-Path $ProjectRoot ($relative.Replace('/', '\'))
                 Remove-FileWithRetry -Path $target
             }
-            $orderedFiles = @($newFiles | Where-Object { $_ -ne 'scripts/Update-JavaRock.ps1' })
+            # Keep package.json last: it is the version marker the next update check reads.
+            # If power is lost before that final atomic replace, JavaRock will offer the
+            # same release again instead of mistaking a partial installation for current.
+            $commitFiles = @('javarock-release-manifest.json', 'package.json')
+            $orderedFiles = @($newFiles | Where-Object { $_ -ne 'scripts/Update-JavaRock.ps1' -and $_ -notin $commitFiles })
             if ($newFiles -contains 'scripts/Update-JavaRock.ps1') { $orderedFiles += 'scripts/Update-JavaRock.ps1' }
-            $copied = 0
+            foreach ($commitFile in $commitFiles) {
+                if ($newFiles -contains $commitFile) { $orderedFiles += $commitFile }
+            }
             foreach ($relative in $orderedFiles) {
                 $source = Join-Path $stage ($relative.Replace('/', '\'))
                 $target = Join-Path $ProjectRoot ($relative.Replace('/', '\'))
                 [IO.Directory]::CreateDirectory((Split-Path -Parent $target)) | Out-Null
-                Copy-FileWithRetry -Source $source -Destination $target
-                $copied++
-                if (($copied % 8) -eq 0 -or $copied -eq $orderedFiles.Count) {
-                    $copyPercent = 66 + [int][Math]::Floor((12.0 * $copied) / [Math]::Max(1, $orderedFiles.Count))
-                    Write-UpdateProgress -State 'running' -Phase 'install' -Message "Installing JavaRock $($ReleaseInfo.LatestVersion)..." -Percent $copyPercent -Detail "Copied $copied of $($orderedFiles.Count) application files."
-                }
+                Copy-InstallFileWithProgress -Source $source -Destination $target
             }
 
             Set-UpdatePhase -Phase 'verify-install' -Message 'Verifying the installed files...' -Percent 82 -Detail 'Confirming the installed version and file integrity.' -Indeterminate

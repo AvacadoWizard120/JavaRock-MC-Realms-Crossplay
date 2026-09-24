@@ -841,6 +841,12 @@ function assertInitialJoinReadinessLifecycle () {
   }
 
   const playerSource = fs.readFileSync(path.join(patchRoot, 'ClientPlayerEntity.java'), 'utf8')
+  if (!playerSource.includes('new EntityAttribute("minecraft:movement", 0.1F, 0F, Float.MAX_VALUE)')) {
+    throw new Error('ClientPlayerEntity must bootstrap the local player at Bedrock\'s normal 0.1 movement speed')
+  }
+  if (playerSource.includes('new EntityAttribute("minecraft:movement", 0.7F, 0F, Float.MAX_VALUE)')) {
+    throw new Error('ClientPlayerEntity still exposes the old 0.7 movement-speed bootstrap to Java during joins')
+  }
   for (const marker of [
     'private boolean initialJavaPlayerLoadedReceived',
     'private boolean initialWorldJoinFinished',
@@ -1003,6 +1009,9 @@ function assertGenericStorageLifecycle () {
   for (const marker of [
     'private String bridgeGenericStorageBlockTag',
     'public void bridgeConfigureContainerBlockTag(String blockTag)',
+    'public ContainerEnumName bridgeNativeStackRequestContainerName()',
+    'ContainerEnumName.BarrelContainer',
+    'ContainerEnumName.ShulkerBoxContainer',
     'if (this.bridgeGenericStorageBlockTag != null) return this.bridgeGenericStorageBlockTag.equals(tag)',
     'return this.bridgeChestStorage && this.items.length == SINGLE_CHEST_SIZE && incomingSize == DOUBLE_CHEST_SIZE'
   ]) {
@@ -1049,12 +1058,21 @@ public final class BridgeGenericStorageSmoke {
         check(barrel.isValidBlockTag("barrel"), "barrel must survive InventoryTracker block-tag validation");
         check(!barrel.isValidBlockTag("chest"), "barrel must not inherit chest-only lifecycle validation");
         check(!barrel.bridgeCanPromoteToDoubleChest(54), "barrel must not receive chest-only 27-to-54 promotion");
+        check(barrel.bridgeNativeStackRequestContainerName() == net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnumName.BarrelContainer,
+                "barrel clicks must use the native BarrelContainer stack-request address");
+
+        final ChestContainer shulker = container();
+        shulker.bridgeConfigureContainerBlockTag("blue_shulker_box");
+        check(shulker.bridgeNativeStackRequestContainerName() == net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnumName.ShulkerBoxContainer,
+                "colored shulker clicks must use the native ShulkerBoxContainer stack-request address");
 
         final ChestContainer chest = container();
         chest.bridgeConfigureContainerBlockTag("chest");
         check(chest.isValidBlockTag("chest"), "chest lifecycle validation");
         check(chest.isValidBlockTag("trapped_chest"), "existing chest-family validation");
         check(chest.bridgeCanPromoteToDoubleChest(54), "real chest must retain double-chest promotion");
+        check(chest.bridgeNativeStackRequestContainerName() == net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnumName.LevelEntityContainer,
+                "chests must retain the generic level-entity stack-request address");
 
         final ChestContainer trappedChest = container();
         trappedChest.bridgeConfigureContainerBlockTag("trapped_chest");
@@ -1064,6 +1082,8 @@ public final class BridgeGenericStorageSmoke {
         final ChestContainer unknown = container();
         unknown.bridgeConfigureContainerBlockTag(null);
         check(!unknown.bridgeCanPromoteToDoubleChest(54), "unknown generic storage must not be promoted as a chest");
+        check(unknown.bridgeNativeStackRequestContainerName() == net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnumName.LevelEntityContainer,
+                "unknown generic storage must retain the conservative level-entity stack-request address");
     }
 }
 `)
@@ -1115,6 +1135,7 @@ function assertMouseActionStateMachine () {
     'bridgeQuickCraftIsEndButton(this.bridgeQuickCraftMode, button)',
     'bridgeQuickCraftPlacementPerSlot(mode, amountOrZero(initialCursor), selected.size())',
     'inventory.bridgeTrySendNativeCursorMove(',
+    'inventory.bridgeTrySendNativeSlotSwap(',
     'inventory.bridgeTakeMatchingSlotsToCursor(',
     'container_quick_craft_complete'
   ]) {
@@ -1129,7 +1150,13 @@ function assertMouseActionStateMachine () {
   }
   for (const marker of [
     'ContainerEnumName.LevelEntityContainer',
+    'clickSlot.container.bridgeNativeStackRequestContainerName()',
     'public boolean bridgeTrySendNativeCursorMove(',
+    'public boolean bridgeTrySendNativeSlotSwap(',
+    'ItemStackRequestActionType.Swap',
+    'private void sendItemStackRequestSwap(',
+    'bridgeSameItemAndAmount(slotAfter, cursorBefore)',
+    '(isEmpty(slotBefore) || canStack(cursorBefore, slotBefore))',
     '(isEmpty(cursorBefore) || canStack(cursorBefore, slotBefore))',
     'public int bridgeTakeMatchingSlotsToCursor(',
     'private void sendItemStackRequestTakes(',
@@ -1172,8 +1199,21 @@ function assertMouseActionStateMachine () {
   if (stackSlotWriter.includes('BedrockTypes.VAR_INT, slot.stackId')) {
     throw new Error('native StackRequestSlotInfo regressed to the pre-1.26.40 zigzag stack-ID wire shape')
   }
-  if ((inventorySource.match(/writeItemStackRequestActionType\(wrapper,/g) || []).length !== 7) {
+  if ((inventorySource.match(/writeItemStackRequestActionType\(wrapper,/g) || []).length !== 8) {
     throw new Error('every native item_stack_request action writer must include the 1.26.45 legacy action-type byte')
+  }
+  const nativeSwapWriterStart = inventorySource.indexOf('private void sendItemStackRequestSwap(')
+  const nativeSwapWriterEnd = inventorySource.indexOf('private void sendBatchedItemStackRequestMoves(', nativeSwapWriterStart)
+  const nativeSwapWriter = inventorySource.slice(nativeSwapWriterStart, nativeSwapWriterEnd)
+  if (!nativeSwapWriter.includes('writeItemStackRequestActionType(wrapper, ItemStackRequestActionType.Swap)')) {
+    throw new Error('native Swap writer must emit the compressed and legacy action-type discriminators')
+  }
+  if (nativeSwapWriter.includes('Math.max(1, count)') || nativeSwapWriter.includes('Types.BYTE, (byte) count')) {
+    throw new Error('native Swap wire shape must not include a move count')
+  }
+  if (inventorySource.includes('sendNormalInventoryTransaction(actions, "swap")') ||
+      inventorySource.includes('bridgeSendNormalInventoryTransaction(actions, "container_swap")')) {
+    throw new Error('number-key swaps must not fall back to legacy inventory_transaction packets')
   }
   for (const marker of [
     'ClientboundBedrockPackets.ITEM_STACK_RESPONSE',
@@ -1546,6 +1586,29 @@ public final class BridgeWorkbenchTagSmoke {
   }
 }
 
+function assertUnsupportedCameraSplineCancelled () {
+  const source = fs.readFileSync(path.join(patchRoot, 'UnhandledPackets.java'), 'utf8')
+  for (const marker of [
+    'private static final int CAMERA_SPLINE_PACKET_ID = 338;',
+    'protocol.cancelClientbound(State.PLAY, CAMERA_SPLINE_PACKET_ID);'
+  ]) {
+    if (!source.includes(marker)) {
+      throw new Error(`UnhandledPackets.java is missing raw Bedrock CAMERA_SPLINE cancellation marker: ${marker}`)
+    }
+  }
+
+  const className = 'net/raphimc/viabedrock/protocol/packet/UnhandledPackets.class'
+  if (!CLASS_RELATIVE_PATHS.includes(className)) {
+    throw new Error('UnhandledPackets.class is not registered in the ViaProxy patch')
+  }
+  const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(className)]).stdout
+  for (const marker of ['sipush        338', 'cancelClientbound:(Lcom/viaversion/viaversion/api/protocol/packet/State;I)V']) {
+    if (!bytecode.includes(marker)) {
+      throw new Error(`compiled UnhandledPackets.class is missing raw Bedrock CAMERA_SPLINE cancellation bytecode: ${marker}`)
+    }
+  }
+}
+
 compileViaBedrockPatch(viaProxyJar)
 for (const relativePath of CLASS_RELATIVE_PATHS) {
   const patchClass = bundledPatchedClassPath(relativePath)
@@ -1581,6 +1644,7 @@ assertMouseActionStateMachine()
 assertRenderingBehavior()
 assertRecipeBookSync()
 assertCraftingTableBridge()
+assertUnsupportedCameraSplineCancelled()
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-inventory-patch-'))
 try {

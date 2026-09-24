@@ -93,7 +93,13 @@ public class ClientPlayerEntity extends PlayerEntity {
 
     public ClientPlayerEntity(final UserConnection user, final long runtimeId, final UUID javaUuid, final PlayerAbilities abilities) {
         super(user, runtimeId, JAVA_ENTITY_ID, javaUuid, abilities);
-        this.attributes.put("minecraft:movement", new EntityAttribute("minecraft:movement", 0.7F, 0F, Float.MAX_VALUE));
+        // Bedrock's normal player movement attribute is 0.1. The Realm's
+        // authoritative update can arrive after Java's LOGIN while the relay is
+        // still holding gameplay state for terrain readiness, so this bootstrap
+        // value is visible to the Java client for several ticks. Using 0.7 here
+        // makes that short window seven times too fast and also drives Java's
+        // dynamic FOV to its maximum before the real attribute is delivered.
+        this.attributes.put("minecraft:movement", new EntityAttribute("minecraft:movement", 0.1F, 0F, Float.MAX_VALUE));
         this.attributes.put("minecraft:player.hunger", new EntityAttribute("minecraft:player.hunger", 20F, 0F, 20F));
         this.attributes.put("minecraft:player.saturation", new EntityAttribute("minecraft:player.saturation", 5F, 0F, 20F));
         this.attributes.put("minecraft:player.experience", new EntityAttribute("minecraft:player.experience", 0F, 0F, 1F));

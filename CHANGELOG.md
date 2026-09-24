@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.109 - 2026-09-24
+
+- Fixed joining with a maxed-out FOV and seven-times-normal movement speed. Realm attributes, entities, and inventory now initialize under the Loading Terrain screen while the final spawn gate remains closed.
+- Chest and player-inventory swaps now use Bedrock's native swap request. Number keys and clicks between two occupied, incompatible slots no longer corrupt stack identities and poison the interactions that follow.
+- Mount and passenger links now use Bedrock's unique entity ids and wait until both entities exist, preventing linked mobs from being dropped during startup. Unsupported camera-spline traffic is discarded cleanly instead of becoming repeated unknown-packet noise.
+- Movement captures now retain Bedrock's input flags and all three movement vectors, making future join and ladder reports diagnosable from the support ZIP.
+
+## 0.3.108 - 2026-09-24
+
+- Fixed rapid 2x2 crafting and recipe-book moves losing track of items while earlier moves are still awaiting a Realm reply. Valid chained moves now continue instead of poisoning every inventory action that follows.
+- Barrels now use their real Bedrock storage identity, so their contents can be taken and moved. Shulker boxes, crafters, chests, and unknown storage keep their appropriate request paths.
+- Putting an item into an item frame no longer creates a fake copy of that block beside the frame while waiting for the Realm.
+- The updater now proves its progress window is actually visible and on top before the launcher closes. Downloading and installation show real current/total byte counts, and installed files are swapped into place safely instead of being overwritten mid-copy.
+
 ## 0.3.107 - 2026-09-24
 
 - Initial joins now follow Minecraft Java Edition's own terrain-readiness lifecycle. Loading Terrain remains active until the current player chunk has resolved sections at the camera, feet, and floor, and JavaRock acknowledges the Realm only after Java reports that terrain ready. A failed join closes cleanly before Java's 30-second fallback can expose the void.

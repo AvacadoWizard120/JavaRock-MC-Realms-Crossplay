@@ -84,6 +84,9 @@ public static class JavaRockNativeWindow {
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr window);
 
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
 
@@ -104,6 +107,12 @@ public static class JavaRockNativeWindow {
 
     [DllImport("user32.dll")]
     private static extern bool RedrawWindow(IntPtr window, IntPtr updateRect, IntPtr updateRegion, uint flags);
+
+    public static uint GetWindowProcessId(IntPtr window) {
+        uint processId;
+        GetWindowThreadProcessId(window, out processId);
+        return processId;
+    }
 
     public static void SetImmersiveDarkMode(IntPtr window, bool enabled) {
         int value = enabled ? 1 : 0;
@@ -1380,16 +1389,29 @@ function Start-UpdateInstall {
         $script:UpdateInstallProcess = $installProcess
 
         $ready = $false
-        $deadline = [DateTime]::UtcNow.AddSeconds(8)
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
         while ([DateTime]::UtcNow -lt $deadline) {
             if ($installProcess.HasExited) { break }
             $progress = Read-JsonFile -Path $UpdateInstallProgressFile
             $state = [string](Get-ObjectValue $progress 'state' '')
             $progressPid = 0
             try { $progressPid = [int](Get-ObjectValue $progress 'pid' 0) } catch {}
-            if ($state -in @('ready', 'running') -and $progressPid -eq $installProcess.Id) {
-                $ready = $true
-                break
+            [int64]$windowHandleValue = 0
+            try { $windowHandleValue = [int64](Get-ObjectValue $progress 'windowHandle' 0) } catch {}
+            $windowVisible = [bool](Get-ObjectValue $progress 'windowVisible' $false)
+            if ($state -in @('ready', 'running') -and $progressPid -eq $installProcess.Id -and
+                $windowHandleValue -gt 0 -and $windowVisible) {
+                try {
+                    $windowHandle = [IntPtr]$windowHandleValue
+                    $liveVisible = [JavaRockNativeWindow]::IsWindowVisible($windowHandle)
+                    $windowProcessId = [int][JavaRockNativeWindow]::GetWindowProcessId($windowHandle)
+                    if ($liveVisible -and $windowProcessId -eq $installProcess.Id) {
+                        [void][JavaRockNativeWindow]::ShowWindow($windowHandle, 9)
+                        [void][JavaRockNativeWindow]::SetForegroundWindow($windowHandle)
+                        $ready = $true
+                        break
+                    }
+                } catch {}
             }
             [Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 100
