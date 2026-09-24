@@ -158,6 +158,7 @@ function makeOutboundRelay (downstreamMode = 'viabedrock') {
     }
   }
   relay.downstreamMode = downstreamMode
+  relay.downstreamProtocolPlayReady = downstreamMode !== 'viabedrock'
   relay.downstreamPlayReady = downstreamMode !== 'viabedrock'
   relay.downstreamPlayReadyTimer = null
   relay.delayedClientboundPlayPackets = []
@@ -304,10 +305,63 @@ function makeOutboundRelay (downstreamMode = 'viabedrock') {
   relay.queueClientbound('play_status', { status: 'player_spawn' }, 'movement-baseline-smoke')
   assert.deepStrictEqual(sentPackets.map(packet => packet.name), ['play_status'])
   assert.strictEqual(relay.downstreamPlayReady, false)
-  relay.markDownstreamPlayReady('downstream set_local_player_as_initialized')
+  relay.markDownstreamProtocolPlayReady('first real ViaBedrock player_auth_input')
   assert.deepStrictEqual(sentPackets.map(packet => packet.name), ['play_status', 'update_attributes'])
+  assert.strictEqual(relay.downstreamProtocolPlayReady, true)
+  assert.strictEqual(relay.downstreamPlayReady, false)
   assert.strictEqual(sentPackets[1].params.attributes[0].current, 0.1)
   assert.deepStrictEqual(relay.delayedClientboundPlayPackets, [])
+}
+
+{
+  const { relay, sentPackets, shimRequests } = makeOutboundRelay()
+  const realmPackets = []
+  relay.localPlayerRuntimeIdKey = '123'
+  relay.downstreamKnownEntityRuntimeIds.add('123')
+  relay.upstream = {
+    queue: (name, params) => realmPackets.push({ name, params })
+  }
+  relay.delayedClientboundPlayPackets = [{
+    name: 'player_list',
+    params: { records: { type: 'add', records: [] } },
+    context: 'queued-before-attributes'
+  }, {
+    name: 'update_attributes',
+    params: {
+      runtime_entity_id: 123n,
+      attributes: [{
+        min: 0,
+        max: 3.4028234663852886e+38,
+        current: 0.1,
+        default_min: 0,
+        default_max: 3.4028234663852886e+38,
+        default: 0.1,
+        name: 'minecraft:movement',
+        modifiers: []
+      }],
+      tick: 0n
+    },
+    context: 'authoritative-movement'
+  }]
+  const readinessTimer = setTimeout(() => {}, 60_000)
+  readinessTimer.unref?.()
+  relay.downstreamPlayReadyTimer = readinessTimer
+
+  assert.strictEqual(relay.relayServerboundToUpstream('player_auth_input', {
+    tick: 1n,
+    position: { x: 180, y: 72.62, z: 9 }
+  }, 'loading-heartbeat'), true)
+  assert.strictEqual(relay.downstreamProtocolPlayReady, true)
+  assert.strictEqual(relay.downstreamPlayReady, false)
+  assert.strictEqual(relay.downstreamPlayReadyTimer, readinessTimer, 'protocol PLAY must not weaken the guarded PLAYER_LOADED deadline')
+  assert.deepStrictEqual(sentPackets.map(packet => packet.name), ['update_attributes', 'player_list'])
+  assert.strictEqual(sentPackets[0].params.attributes[0].current, 0.1)
+  assert.deepStrictEqual(realmPackets, [], 'pre-initialization player_auth_input must remain Realm-gated')
+  assert.strictEqual(relay.pendingInitialJoinAuthInput.params.tick, 1n)
+  assert.deepStrictEqual(shimRequests, [], 'protocol PLAY alone must not expose gameplay shims')
+
+  clearTimeout(readinessTimer)
+  relay.downstreamPlayReadyTimer = null
 }
 
 {

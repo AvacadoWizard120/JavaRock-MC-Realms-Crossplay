@@ -2,14 +2,16 @@
 
 const assert = require('assert')
 const crypto = require('crypto')
+const { EventEmitter } = require('events')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
-const { spawnSync } = require('child_process')
+const { spawn, spawnSync } = require('child_process')
+const { PassThrough } = require('stream')
 
 const sourceUpdater = path.join(__dirname, 'Update-JavaRock.ps1')
 const sourceHttpHelper = path.join(__dirname, 'javarock-update-http.cjs')
-const { validateUrl } = require(sourceHttpHelper)
+const { download, validateUrl } = require(sourceHttpHelper)
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'javarock-updater-smoke-'))
 const currentRoot = path.join(tempRoot, 'current')
 let restartChildPid = 0
@@ -113,6 +115,8 @@ function createReleaseFixture ({ version, fixtureVersion, startScript = 'Write-H
   fs.copyFileSync(sourceUpdater, path.join(nextRoot, 'scripts', 'Update-JavaRock.ps1'))
   fs.copyFileSync(sourceHttpHelper, path.join(nextRoot, 'scripts', 'javarock-update-http.cjs'))
   writeManifest(nextRoot, version, nextFiles)
+  const installBytes = [...nextFiles, 'javarock-release-manifest.json']
+    .reduce((total, relative) => total + fs.statSync(path.join(nextRoot, ...relative.split('/'))).size, 0)
 
   const zipped = runPowerShell([
     '-Command',
@@ -123,6 +127,7 @@ function createReleaseFixture ({ version, fixtureVersion, startScript = 'Write-H
   })
   assert.strictEqual(zipped.status, 0, `${zipped.stdout || ''}${zipped.stderr || ''}`)
   const digest = crypto.createHash('sha256').update(fs.readFileSync(archivePath)).digest('hex')
+  const archiveBytes = fs.statSync(archivePath).size
   fs.writeFileSync(checksumPath, `${digest}  ${path.basename(archivePath)}\n`)
 
   const baseUrl = `https://github.com/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/releases/download/v${version}`
@@ -137,13 +142,18 @@ function createReleaseFixture ({ version, fixtureVersion, startScript = 'Write-H
       {
         name: path.basename(archivePath),
         browser_download_url: `${baseUrl}/${path.basename(archivePath)}`,
-        digest: `sha256:${digest}`
+        digest: `sha256:${digest}`,
+        size: archiveBytes
       },
-      { name: path.basename(checksumPath), browser_download_url: `${baseUrl}/${path.basename(checksumPath)}` }
+      {
+        name: path.basename(checksumPath),
+        browser_download_url: `${baseUrl}/${path.basename(checksumPath)}`,
+        size: fs.statSync(checksumPath).size
+      }
     ]
   }, null, 2)}\n`)
 
-  return { archivePath, checksumPath, releasePath }
+  return { archivePath, checksumPath, releasePath, archiveBytes, installBytes }
 }
 
 function installFixture (fixture, resultName, progressName, extraArguments = []) {
@@ -174,6 +184,11 @@ function installFixture (fixture, resultName, progressName, extraArguments = [])
   assert.strictEqual(progress.state, 'complete')
   assert.strictEqual(progress.phase, 'complete')
   assert.strictEqual(progress.percent, 100)
+  assert.strictEqual(progress.format, 2)
+  assert.strictEqual(progress.downloadedBytes, fixture.archiveBytes)
+  assert.strictEqual(progress.downloadTotalBytes, fixture.archiveBytes)
+  assert.strictEqual(progress.installedBytes, fixture.installBytes)
+  assert.strictEqual(progress.installTotalBytes, fixture.installBytes)
   const durableResultPath = path.join(currentRoot, '.runtime', 'updates', 'latest-result.json')
   const durableLogPath = path.join(currentRoot, '.runtime', 'updates', 'latest-update.log')
   assert(fs.existsSync(durableResultPath), 'the updater did not persist its latest install result')
@@ -183,8 +198,196 @@ function installFixture (fixture, resultName, progressName, extraArguments = [])
   return { result, progress }
 }
 
-try {
-  const currentFiles = [
+async function verifyHiddenLaunchShowsProgress (fixture) {
+  const resultPath = path.join(tempRoot, 'hidden-window-result.json')
+  const progressPath = path.join(tempRoot, 'hidden-window-progress.json')
+  const child = spawn('powershell.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', path.join(currentRoot, 'scripts', 'Update-JavaRock.ps1'),
+    '-Install',
+    '-ReleaseJsonPath', fixture.releasePath,
+    '-ArchivePath', fixture.archivePath,
+    '-ChecksumPath', fixture.checksumPath,
+    '-ResultFile', resultPath,
+    '-ProgressFile', progressPath,
+    '-ParentProcessId', String(process.pid),
+    '-ShowProgress'
+  ], {
+    cwd: currentRoot,
+    stdio: 'ignore',
+    windowsHide: true
+  })
+
+  try {
+    const deadline = Date.now() + 15000
+    let visibleProgress = null
+    while (Date.now() < deadline && child.exitCode === null) {
+      try {
+        const progress = JSON.parse(fs.readFileSync(progressPath, 'utf8'))
+        if (progress.pid === child.pid && progress.windowVisible === true && Number(progress.windowHandle) > 0) {
+          visibleProgress = progress
+          break
+        }
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    assert(visibleProgress, 'an updater started with a hidden PowerShell host did not prove its progress form was visible')
+    assert(['ready', 'running'].includes(visibleProgress.state))
+  } finally {
+    if (child.exitCode === null) child.kill()
+    await Promise.race([
+      new Promise(resolve => child.once('exit', resolve)),
+      new Promise(resolve => setTimeout(resolve, 3000))
+    ])
+  }
+}
+
+function createFakeRequest (responses, requestedUrls = []) {
+  return (url, options, callback) => {
+    const request = new EventEmitter()
+    request.setTimeout = () => {}
+    request.destroy = error => setImmediate(() => request.emit('error', error))
+    const responseSpec = responses.shift()
+    if (!responseSpec) throw new Error('The fake HTTPS response queue was exhausted')
+    requestedUrls.push(url.toString())
+    setImmediate(() => {
+      if (responseSpec.requestError) {
+        request.emit('error', responseSpec.requestError)
+        return
+      }
+      const response = new PassThrough()
+      response.statusCode = responseSpec.statusCode === undefined ? 200 : responseSpec.statusCode
+      response.headers = responseSpec.headers || {}
+      response.complete = false
+      callback(response)
+      setImmediate(() => {
+        if (responseSpec.aborted) {
+          for (const chunk of responseSpec.chunks || []) response.write(chunk)
+          // Let the pipeline consume the partial bytes before simulating the
+          // socket abort, so the assertion checks the reporter rather than an
+          // event-loop race in this fake transport.
+          setTimeout(() => {
+            response.emit('aborted')
+            response.destroy()
+          }, 10)
+          return
+        }
+        for (const chunk of responseSpec.chunks || []) response.write(chunk)
+        response.complete = true
+        response.end()
+      })
+    })
+    return request
+  }
+}
+
+async function runHttpProgressSmoke () {
+  const httpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'javarock-update-http-smoke-'))
+  try {
+    const payload = Buffer.from('JavaRock update bytes')
+    const destination = path.join(httpRoot, 'update.zip')
+    const progressPath = path.join(httpRoot, 'download-progress.json')
+    const snapshots = []
+    const requestedUrls = []
+    const result = await download(
+      'https://github.com/example/project/releases/download/v1/update.zip',
+      destination,
+      1024,
+      {
+        expectedBytes: payload.length,
+        progressFile: progressPath,
+        progressThrottleMs: 0,
+        onProgress: progress => snapshots.push(progress),
+        request: createFakeRequest([
+          {
+            statusCode: 302,
+            headers: { location: 'https://release-assets.githubusercontent.com/example/update.zip' }
+          },
+          {
+            headers: { 'content-length': String(payload.length) },
+            chunks: [payload.subarray(0, 5), payload.subarray(5)]
+          }
+        ], requestedUrls)
+      }
+    )
+    assert.deepStrictEqual(fs.readFileSync(destination), payload)
+    assert.deepStrictEqual(result, { receivedBytes: payload.length, totalBytes: payload.length })
+    assert.strictEqual(requestedUrls.length, 2)
+    assert.match(requestedUrls[1], /^https:\/\/release-assets\.githubusercontent\.com\//)
+    assert.strictEqual(snapshots[0].state, 'starting')
+    assert.strictEqual(snapshots[0].receivedBytes, 0)
+    assert.strictEqual(snapshots[0].totalBytes, payload.length)
+    assert.strictEqual(snapshots[0].lengthComputable, true)
+    assert(snapshots.some(progress => progress.state === 'downloading' && progress.receivedBytes > 0 && progress.receivedBytes < payload.length))
+    assert.strictEqual(snapshots.at(-1).state, 'complete')
+    assert.strictEqual(snapshots.at(-1).receivedBytes, payload.length)
+    assert.strictEqual(snapshots.at(-1).totalBytes, payload.length)
+    assert.strictEqual(snapshots.at(-1).lengthComputable, true)
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(progressPath, 'utf8')), snapshots.at(-1))
+    assert(!fs.readdirSync(httpRoot).some(name => name.includes('.tmp-') || name.includes('.part-')))
+
+    const declaredMismatchDestination = path.join(httpRoot, 'declared-mismatch.zip')
+    const declaredMismatchProgress = path.join(httpRoot, 'declared-mismatch.json')
+    await assert.rejects(
+      download('https://github.com/example/declared.zip', declaredMismatchDestination, 1024, {
+        progressFile: declaredMismatchProgress,
+        request: createFakeRequest([{
+          headers: { 'content-length': '9' },
+          chunks: [Buffer.from('short')]
+        }])
+      }),
+      /Content-Length declared 9 bytes/i
+    )
+    assert.strictEqual(JSON.parse(fs.readFileSync(declaredMismatchProgress, 'utf8')).state, 'error')
+    assert(!fs.existsSync(declaredMismatchDestination))
+
+    const expectedMismatchDestination = path.join(httpRoot, 'expected-mismatch.zip')
+    const expectedMismatchProgress = path.join(httpRoot, 'expected-mismatch.json')
+    await assert.rejects(
+      download('https://objects.githubusercontent.com/example/expected.zip', expectedMismatchDestination, 1024, {
+        expectedBytes: 8,
+        progressFile: expectedMismatchProgress,
+        request: createFakeRequest([{ chunks: [Buffer.from('short')] }])
+      }),
+      /expected asset size was 8 bytes/i
+    )
+    assert.strictEqual(JSON.parse(fs.readFileSync(expectedMismatchProgress, 'utf8')).state, 'error')
+    assert(!fs.existsSync(expectedMismatchDestination))
+
+    const abortedDestination = path.join(httpRoot, 'aborted.zip')
+    const abortedProgress = path.join(httpRoot, 'aborted.json')
+    await assert.rejects(
+      download('https://github-releases.githubusercontent.com/example/aborted.zip', abortedDestination, 1024, {
+        expectedBytes: 10,
+        progressFile: abortedProgress,
+        request: createFakeRequest([{ aborted: true, chunks: [Buffer.from('partial')] }])
+      }),
+      /aborted before completion|premature close/i
+    )
+    const abortedState = JSON.parse(fs.readFileSync(abortedProgress, 'utf8'))
+    assert.strictEqual(abortedState.state, 'error')
+    assert.strictEqual(abortedState.receivedBytes, Buffer.byteLength('partial'))
+    assert(!fs.existsSync(abortedDestination))
+    assert(!fs.readdirSync(httpRoot).some(name => name.includes('.tmp-') || name.includes('.part-')))
+  } finally {
+    fs.rmSync(httpRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  }
+}
+
+async function main () {
+  if (process.argv.includes('--http-only')) {
+    try {
+      await runHttpProgressSmoke()
+      console.log('JavaRock updater HTTP progress smoke check passed.')
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+    }
+    return
+  }
+  try {
+    const currentFiles = [
     'START-JAVAROCK.bat',
     'obsolete.txt',
     'package-lock.json',
@@ -207,6 +410,7 @@ try {
   write(currentRoot, 'node_modules/updater-smoke-fixture/marker.txt', 'keep when only the package version changes\n')
 
   const sameDependencies = createReleaseFixture({ version: '1.0.1', fixtureVersion: '1.0.0' })
+  await verifyHiddenLaunchShowsProgress(sameDependencies)
   const checkResult = path.join(tempRoot, 'check.json')
   runUpdater(['-ReleaseJsonPath', sameDependencies.releasePath, '-ResultFile', checkResult, '-Quiet'])
   const check = JSON.parse(fs.readFileSync(checkResult, 'utf8'))
@@ -364,22 +568,44 @@ try {
   assert.match(updaterSource, /Set-ProgressWindowTheme/)
   assert.match(updaterSource, /FromArgb\(32, 33, 36\)/)
   assert.match(updaterSource, /\$form\.TopMost\s*=\s*\$true/)
+  assert.match(updaterSource, /EnsureVisible\(\$form\.Handle\)/)
+  assert.match(updaterSource, /IsVisible\(\$script:ProgressForm\.Handle\)/)
+  assert.match(updaterSource, /windowHandle\s*=\s*\[int64\]\$script:ProgressWindowHandle/)
+  assert.match(updaterSource, /windowVisible\s*=\s*\[bool\]\$script:ProgressWindowVisible/)
+  assert.match(updaterSource, /downloadedBytes\s*=\s*\[int64\]\$script:DownloadedBytes/)
+  assert.match(updaterSource, /downloadTotalBytes\s*=\s*\[int64\]\$script:DownloadTotalBytes/)
+  assert.match(updaterSource, /installedBytes\s*=\s*\[int64\]\$script:InstalledBytes/)
+  assert.match(updaterSource, /installTotalBytes\s*=\s*\[int64\]\$script:InstallTotalBytes/)
+  assert.match(updaterSource, /Copy-InstallFileWithProgress/)
+  assert.match(updaterSource, /\[IO\.File\]::Replace/)
+  assert.doesNotMatch(updaterSource, /Copied \$copied of/)
   assert.match(updaterSource, /\$script:ProgressForm\.Close\(\)/)
   assert.doesNotMatch(updaterSource, /\$close\.Add_Click\(\{\s*\$form\.Close\(\)/)
   assert.doesNotMatch(updaterSource, /\.auth-profiles.*Remove-Item/i)
   assert.strictEqual(validateUrl('https://api.github.com/repos/example/project/releases/latest').hostname, 'api.github.com')
   assert.throws(() => validateUrl('http://api.github.com/example'), /unexpected update URL/i)
   assert.throws(() => validateUrl('https://example.com/update.zip'), /unexpected update URL/i)
+  await runHttpProgressSmoke()
 
   console.log('JavaRock updater smoke check passed.')
-} finally {
-  if (restartChildPid <= 0) {
-    try {
-      restartChildPid = Number(fs.readFileSync(path.join(currentRoot, '.runtime', 'restart-child.pid'), 'utf8').trim())
-    } catch {}
+  } finally {
+    if (restartChildPid <= 0) {
+      try {
+        restartChildPid = Number(fs.readFileSync(path.join(currentRoot, '.runtime', 'restart-child.pid'), 'utf8').trim())
+      } catch {}
+    }
+    if (restartChildPid > 0) {
+      try { process.kill(restartChildPid) } catch {}
+    }
+    if (process.env.JAVAROCK_UPDATER_SMOKE_KEEP !== '1') {
+      fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+    } else {
+      console.error(`Kept updater smoke fixture at ${tempRoot}`)
+    }
   }
-  if (restartChildPid > 0) {
-    try { process.kill(restartChildPid) } catch {}
-  }
-  fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
 }
+
+main().catch(error => {
+  console.error(error && error.stack ? error.stack : error)
+  process.exitCode = 1
+})

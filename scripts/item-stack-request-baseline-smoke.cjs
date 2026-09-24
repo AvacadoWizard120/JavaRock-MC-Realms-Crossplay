@@ -1031,4 +1031,139 @@ const currentRequestCursorPrediction = {
 const sanitizedCurrentRequestCursor = bridgeSanitizedItemStackRequestParams({ bridgePredictedItemStackIds: new Map([['cursor:0', '-19']]) }, currentRequestCursorPrediction)
 assert(sanitizedCurrentRequestCursor.requests[0].actions[0].destination.stack_id === 0, 'sanitizer must not rewrite a take destination to the same request id that creates the cursor stack')
 
+// ViaBedrock's recipe-book mover sends a sequence of stack moves in one packet,
+// then can immediately send another sequence before the Realm acknowledges the
+// first. The second packet legitimately refers to the first packet's negative
+// request IDs even though the last acknowledged grid IDs are still positive.
+const recipeBookFirstMoveBatch = {
+  requests: [
+    {
+      request_id: -19,
+      actions: [{
+        type_id: 'place',
+        count: 1,
+        source: { slot_type: { container_id: 'crafting_input' }, slot: 28, stack_id: 19 },
+        destination: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 22, stack_id: 7 }
+      }]
+    },
+    {
+      request_id: -21,
+      actions: [{
+        type_id: 'place',
+        count: 1,
+        source: { slot_type: { container_id: 'crafting_input' }, slot: 30, stack_id: 20 },
+        destination: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 22, stack_id: -19 }
+      }]
+    },
+    {
+      request_id: -23,
+      actions: [{
+        type_id: 'place',
+        count: 1,
+        source: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 22, stack_id: -21 },
+        destination: { slot_type: { container_id: 'crafting_input' }, slot: 28, stack_id: -19 }
+      }]
+    },
+    {
+      request_id: -25,
+      actions: [{
+        type_id: 'place',
+        count: 1,
+        source: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 22, stack_id: -23 },
+        destination: { slot_type: { container_id: 'crafting_input' }, slot: 30, stack_id: -21 }
+      }]
+    }
+  ]
+}
+const recipeBookSecondMoveBatch = {
+  requests: [
+    {
+      request_id: -27,
+      actions: [{
+        type_id: 'place',
+        count: 1,
+        source: { slot_type: { container_id: 'crafting_input' }, slot: 28, stack_id: -23 },
+        destination: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 22, stack_id: -25 }
+      }]
+    },
+    {
+      request_id: -29,
+      actions: [{
+        type_id: 'place',
+        count: 1,
+        source: { slot_type: { container_id: 'crafting_input' }, slot: 30, stack_id: -25 },
+        destination: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 22, stack_id: -27 }
+      }]
+    },
+    {
+      request_id: -31,
+      actions: [{
+        type_id: 'place',
+        count: 1,
+        source: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 22, stack_id: -29 },
+        destination: { slot_type: { container_id: 'crafting_input' }, slot: 28, stack_id: -27 }
+      }]
+    },
+    {
+      request_id: -33,
+      actions: [{
+        type_id: 'place',
+        count: 1,
+        source: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 22, stack_id: -31 },
+        destination: { slot_type: { container_id: 'crafting_input' }, slot: 30, stack_id: -29 }
+      }]
+    }
+  ]
+}
+const recipeBookChainOwner = {
+  bridgePredictedItemStackIds: new Map([
+    ['crafting_input:28', 19],
+    ['crafting_input:30', 20],
+    ['inventory:22', 7]
+  ]),
+  pendingBridgeToRealmItemStackRequests: new Map()
+}
+assert(
+  bridgeItemStackRequestSourcePreflightDropDiagnosis(recipeBookChainOwner, recipeBookFirstMoveBatch) === null,
+  'preflight must follow negative stack-id chains between requests in one recipe-book move packet'
+)
+for (const request of recipeBookFirstMoveBatch.requests) {
+  recipeBookChainOwner.pendingBridgeToRealmItemStackRequests.set(String(request.request_id), { request })
+}
+assert(
+  bridgeItemStackRequestSourcePreflightDropDiagnosis(recipeBookChainOwner, recipeBookSecondMoveBatch) === null,
+  'preflight must allow a second recipe-book move packet chained from still-unacknowledged request IDs'
+)
+const unknownCrossPacketPrediction = JSON.parse(JSON.stringify(recipeBookSecondMoveBatch))
+unknownCrossPacketPrediction.requests[0].actions[0].source.stack_id = -999
+const unknownCrossPacketDrop = bridgeItemStackRequestSourcePreflightDropDiagnosis(recipeBookChainOwner, unknownCrossPacketPrediction)
+assert(unknownCrossPacketDrop?.reason === 'source_stack_id_mismatch_after_sanitize', 'preflight must still reject an unknown negative stack id')
+assert(unknownCrossPacketDrop?.tracked_stack_id === 19, 'unknown prediction diagnostics must retain the last authoritative stack id')
+
+for (const request of recipeBookSecondMoveBatch.requests) {
+  recipeBookChainOwner.pendingBridgeToRealmItemStackRequests.set(String(request.request_id), { request })
+}
+bridgeTrackClientboundInventoryStacks(recipeBookChainOwner, 'item_stack_response', {
+  responses: recipeBookFirstMoveBatch.requests.map(request => ({
+    status: 'ok',
+    request_id: request.request_id,
+    containers: []
+  }))
+})
+const thirdMoveWhileSecondPending = {
+  requests: [{
+    request_id: -35,
+    actions: [{
+      type_id: 'place',
+      count: 1,
+      source: { slot_type: { container_id: 'crafting_input' }, slot: 28, stack_id: -31 },
+      destination: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 22, stack_id: -33 }
+    }]
+  }]
+}
+assert(
+  bridgeItemStackRequestSourcePreflightDropDiagnosis(recipeBookChainOwner, thirdMoveWhileSecondPending) === null,
+  'accepted older responses must not erase the newer unacknowledged stack-id chain'
+)
+
 console.log('[smoke] item_stack_response normalization, trusted crafting rewrite, and opt-in inventory rewrite smoke passed')

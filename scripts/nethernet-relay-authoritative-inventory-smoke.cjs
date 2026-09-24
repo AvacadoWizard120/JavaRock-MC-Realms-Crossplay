@@ -8,6 +8,7 @@ const {
   ViaBedrockRelayPlayer,
   bridgeCraftingDrainRequestIds,
   bridgeTrackClientboundInventoryStacks,
+  bridgeTrackLegacyCrossContainerPlayerStateTransaction,
   bridgeItemStackRequestSourcePreflightDropDiagnosis,
   bridgeSanitizedItemStackRequestParams,
   clientboundInventoryTransactionDropDiagnosis,
@@ -20,6 +21,103 @@ const {
 
 const inventorySerializer = createSerializer('1.26.45')
 const inventoryDeserializer = createDeserializer('1.26.45')
+
+{
+  const nativeSwap = {
+    requests: [{
+      request_id: -19,
+      actions: [{
+        type_id: 'swap',
+        legacy_type_id: 2,
+        source: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 21 },
+        destination: { slot_type: { container_id: 'hotbar' }, slot: 4, stack_id: 18 }
+      }],
+      custom_names: [],
+      cause: -1
+    }]
+  }
+  const buffer = inventorySerializer.createPacketBuffer({ name: 'item_stack_request', params: nativeSwap })
+  const decoded = inventoryDeserializer.parsePacketBuffer(buffer)
+  assert.strictEqual(decoded.metadata.size, buffer.length)
+  const action = decoded.data.params.requests[0].actions[0]
+  assert.strictEqual(action.type_id, 'swap')
+  assert.strictEqual(action.legacy_type_id, 2)
+  assert.strictEqual(action.count, undefined, 'native Swap must not encode a move count')
+  assert.strictEqual(action.source.stack_id, 21)
+  assert.strictEqual(action.destination.stack_id, 18)
+}
+
+{
+  // Captured failure: the legacy chest/player swap omitted stack identity for
+  // hotbar 4 while the relay still held #7; ViaBedrock's following native
+  // cursor request supplied #18. Invalidate the legacy state, then exercise the
+  // real relay path and prove #18 reaches the upstream queue unchanged.
+  const relay = Object.create(ViaBedrockRelayPlayer.prototype)
+  const queued = []
+  relay.externalContainerWindowId = 4
+  relay.realmInventoryScreenWindowId = 4
+  relay.bridgePredictedItemStackIds = new Map([
+    ['cursor:0', 21],
+    ['hotbar:4', 7]
+  ])
+  relay.pendingBridgeToRealmItemStackRequests = new Map()
+  relay.pendingCraftingDrainRequestIds = new Set()
+  relay.pendingBridgeSyntheticItemStackPlaces = new Map()
+  relay.pendingBridgeCursorDependentTakeRequests = new Map()
+  relay.pendingRealmInventoryOpenItemStackRequests = []
+  relay.bridgeAuthInputItemStackEmbeddingDisabled = true
+  relay.server = { debugBridgeRelay: false }
+  relay.upstream = {
+    options: { version: '1.26.45' },
+    queue: (name, params) => queued.push({ name, params })
+  }
+  relay.usesViaBedrockDownstream = () => true
+  relay.rememberServerboundTerrainRequest = () => {}
+  relay.recordBridgeToRealm = () => {}
+  relay.scheduleAuthoritativeInventoryReplay = () => {}
+  relay.predictServerboundItemUseInventoryDeltas = () => {}
+  relay.predictServerboundItemUseBlockPlacement = () => {}
+
+  const legacyChestSwap = {
+    transaction: {
+      transaction_type: 'normal',
+      actions: [{
+        source_type: 'container',
+        window_id: 4,
+        slot: 10,
+        old_item: { network_id: -590, count: 1, has_stack_id: false },
+        new_item: { network_id: 323, count: 4, has_stack_id: false }
+      }, {
+        source_type: 'container',
+        window_id: 0,
+        slot: 4,
+        old_item: { network_id: 323, count: 4, has_stack_id: false },
+        new_item: { network_id: -590, count: 1, has_stack_id: false }
+      }]
+    }
+  }
+  assert.strictEqual(bridgeTrackLegacyCrossContainerPlayerStateTransaction(relay, 'inventory_transaction', legacyChestSwap), true)
+  assert.strictEqual(relay.bridgePredictedItemStackIds.has('hotbar:4'), false, 'legacy chest swap without identity must invalidate stale hotbar #7')
+
+  const capturedCursorPlace = {
+    requests: [{
+      request_id: -17,
+      actions: [{
+        type_id: 'place',
+        legacy_type_id: 1,
+        count: 3,
+        source: { slot_type: { container_id: 'cursor' }, slot: 0, stack_id: 21 },
+        destination: { slot_type: { container_id: 'hotbar' }, slot: 4, stack_id: 18 }
+      }],
+      custom_names: [],
+      cause: -1
+    }]
+  }
+  assert.strictEqual(relay.relayServerboundToUpstream('item_stack_request', capturedCursorPlace, 'captured_chest_stale_id_smoke'), true)
+  assert.strictEqual(queued.length, 1, 'captured request must reach the upstream queue')
+  assert.strictEqual(queued[0].name, 'item_stack_request')
+  assert.strictEqual(queued[0].params.requests[0].actions[0].destination.stack_id, 18, 'fresh #18 must not be rewritten to stale #7')
+}
 
 {
   const drain = {

@@ -432,16 +432,26 @@ public class InventoryContainer extends Container {
 
         BedrockItem slotBefore = safeCopy(clickSlot.container.getItem(clickSlot.bedrockSlot));
         BedrockItem hotbarBefore = safeCopy(hotbar.container.getItem(hotbar.bedrockSlot));
-        BedrockItem slotAfter = hotbarBefore.copy();
-        BedrockItem hotbarAfter = slotBefore.copy();
+        if (this.bridgeTrySendNativeSlotSwap(
+                clickSlot.container,
+                clickSlot.sourceContainerId,
+                clickSlot.bedrockSlot,
+                slotBefore,
+                hotbar.container,
+                hotbar.sourceContainerId,
+                hotbar.bedrockSlot,
+                hotbarBefore,
+                "player_number_key_swap")) {
+            this.publishJavaInventorySnapshot("player_number_key_swap_native_stack_request");
+            return true;
+        }
 
-        List<InventoryActionData> actions = new ArrayList<>();
-        actions.add(containerAction(clickSlot, slotBefore, slotAfter));
-        actions.add(containerAction(hotbar, hotbarBefore, hotbarAfter));
-        clickSlot.container.setItem(clickSlot.bedrockSlot, slotAfter.copy());
-        hotbar.container.setItem(hotbar.bedrockSlot, hotbarAfter.copy());
-        this.sendNormalInventoryTransaction(actions, "swap");
-        this.publishJavaInventorySnapshot("swap");
+        this.publishJavaInventorySnapshot("player_number_key_swap_blocked_no_native_stack_request");
+        ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                "[BedrockRealmBridge] blocked unsafe legacy player number-key swap" +
+                        " javaSlot=" + javaSlot +
+                        " bedrockSlot=" + clickSlot.bedrockSlot +
+                        " hotbarSlot=" + hotbarSlot);
         return true;
     }
 
@@ -1553,7 +1563,7 @@ public class InventoryContainer extends Container {
         ItemStackRequestActionType actionType;
         BridgeNativeStackSlot source;
         BridgeNativeStackSlot destination;
-        int count;
+        int count = 0;
 
         int slotBeforeAmount = amountOrZero(slotBefore);
         int slotAfterAmount = amountOrZero(slotAfter);
@@ -1561,6 +1571,14 @@ public class InventoryContainer extends Container {
         int cursorAfterAmount = amountOrZero(cursorAfter);
 
         if (!isEmpty(slotBefore) &&
+                !isEmpty(cursorBefore) &&
+                !canStack(slotBefore, cursorBefore) &&
+                bridgeSameItemAndAmount(slotAfter, cursorBefore) &&
+                bridgeSameItemAndAmount(cursorAfter, slotBefore)) {
+            source = BridgeNativeStackSlot.cursor(cursorBefore);
+            destination = bridgeStackSlotFromClickSlot(clickSlot, slotBefore);
+            actionType = ItemStackRequestActionType.Swap;
+        } else if (!isEmpty(slotBefore) &&
                 (isEmpty(slotAfter) || canStack(slotBefore, slotAfter)) &&
                 (isEmpty(cursorBefore) || canStack(cursorBefore, slotBefore)) &&
                 !isEmpty(cursorAfter) && canStack(cursorAfter, slotBefore) &&
@@ -1570,7 +1588,9 @@ public class InventoryContainer extends Container {
             source = bridgeStackSlotFromClickSlot(clickSlot, slotBefore);
             destination = BridgeNativeStackSlot.cursor(cursorBefore);
             actionType = ItemStackRequestActionType.Take;
-        } else if (!isEmpty(cursorBefore) && !isEmpty(slotAfter) && canStack(cursorBefore, slotAfter)) {
+        } else if (!isEmpty(cursorBefore) &&
+                (isEmpty(slotBefore) || canStack(cursorBefore, slotBefore)) &&
+                !isEmpty(slotAfter) && canStack(cursorBefore, slotAfter)) {
             count = slotAfterAmount - slotBeforeAmount;
             if (count <= 0 || cursorBeforeAmount - cursorAfterAmount != count) return false;
             source = BridgeNativeStackSlot.cursor(cursorBefore);
@@ -1581,13 +1601,15 @@ public class InventoryContainer extends Container {
         }
 
         boolean sourceReady = bridgeCanUseStackRequestSource(actionType, source);
-        if (source == null || destination == null || !sourceReady) {
+        boolean destinationReady = actionType != ItemStackRequestActionType.Swap ||
+                bridgeCanUseStackRequestSwapSlot(destination, slotBefore);
+        if (source == null || destination == null || !sourceReady || !destinationReady) {
             ViaBedrock.getPlatform().getLogger().log(Level.INFO,
                     "[BedrockRealmBridge] native item_stack_request skipped reason=" + reason +
                             " action=" + actionType +
                             " count=" + count +
                             " sourceReady=" + sourceReady +
-                            " destinationReady=" + (destination != null));
+                            " destinationReady=" + destinationReady);
             return false;
         }
 
@@ -1604,7 +1626,11 @@ public class InventoryContainer extends Container {
                 Collections.singletonList(slotAfter),
                 cursorBefore,
                 cursorAfter);
-        this.sendItemStackRequestMove(requestId, actionType, count, source, destination, reason);
+        if (actionType == ItemStackRequestActionType.Swap) {
+            this.sendItemStackRequestSwap(requestId, source, destination);
+        } else {
+            this.sendItemStackRequestMove(requestId, actionType, count, source, destination, reason);
+        }
         clickSlot.container.setItem(clickSlot.bedrockSlot, safeCopy(slotAfter));
         this.bridgeRememberCraftingGridSlotIfApplicable(clickSlot.sourceContainerId, clickSlot.bedrockSlot, slotAfter);
         this.bridgeSetSharedCarriedItem(cursorAfter);
@@ -1622,6 +1648,59 @@ public class InventoryContainer extends Container {
         return true;
     }
 
+    public boolean bridgeTrySendNativeSlotSwap(
+            Container firstContainer,
+            int firstSourceContainerId,
+            int firstBedrockSlot,
+            BedrockItem firstBefore,
+            Container secondContainer,
+            int secondSourceContainerId,
+            int secondBedrockSlot,
+            BedrockItem secondBefore,
+            String reason) {
+        if (firstContainer == null || secondContainer == null) return false;
+        if (firstBedrockSlot < 0 || firstBedrockSlot >= firstContainer.size()) return false;
+        if (secondBedrockSlot < 0 || secondBedrockSlot >= secondContainer.size()) return false;
+        if (firstContainer == secondContainer && firstBedrockSlot == secondBedrockSlot) return false;
+        if (isEmpty(firstBefore) && isEmpty(secondBefore)) return false;
+
+        ClickSlot first = new ClickSlot(firstContainer, firstSourceContainerId, firstBedrockSlot);
+        ClickSlot second = new ClickSlot(secondContainer, secondSourceContainerId, secondBedrockSlot);
+        BridgeNativeStackSlot source = bridgeStackSlotFromClickSlot(first, firstBefore);
+        BridgeNativeStackSlot destination = bridgeStackSlotFromClickSlot(second, secondBefore);
+        boolean sourceReady = bridgeCanUseStackRequestSwapSlot(source, firstBefore);
+        boolean destinationReady = bridgeCanUseStackRequestSwapSlot(destination, secondBefore);
+        if (!sourceReady || !destinationReady) {
+            ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                    "[BedrockRealmBridge] native slot swap skipped reason=" + reason +
+                            " sourceReady=" + sourceReady +
+                            " destinationReady=" + destinationReady);
+            return false;
+        }
+
+        BedrockItem firstAfter = safeCopy(secondBefore);
+        BedrockItem secondAfter = safeCopy(firstBefore);
+        int requestId = this.nextItemStackRequestId();
+        this.bridgeRememberPendingNativeRequest(
+                requestId,
+                List.of(first, second),
+                List.of(firstAfter, secondAfter),
+                this.carriedItem,
+                this.carriedItem);
+        this.sendItemStackRequestSwap(requestId, source, destination);
+        firstContainer.setItem(firstBedrockSlot, safeCopy(firstAfter));
+        secondContainer.setItem(secondBedrockSlot, safeCopy(secondAfter));
+        this.bridgeRememberCraftingGridSlotIfApplicable(firstSourceContainerId, firstBedrockSlot, firstAfter);
+        this.bridgeRememberCraftingGridSlotIfApplicable(secondSourceContainerId, secondBedrockSlot, secondAfter);
+        this.bridgeClearPendingCraft();
+        ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                "[BedrockRealmBridge] sent native slot swap item_stack_request reason=" + reason +
+                        " requestId=" + requestId +
+                        " source=" + source.describe() +
+                        " destination=" + destination.describe());
+        return true;
+    }
+
     private static BridgeNativeStackSlot bridgeStackSlotFromClickSlot(ClickSlot clickSlot, BedrockItem item) {
         if (clickSlot != null && clickSlot.container != null &&
                 clickSlot.container.type() == ContainerType.CONTAINER && clickSlot.bedrockSlot >= 0) {
@@ -1629,7 +1708,7 @@ public class InventoryContainer extends Container {
                     ? 0
                     : clickSlot.container.bridgeAuthoritativeStackId(clickSlot.bedrockSlot);
             return new BridgeNativeStackSlot(
-                    ContainerEnumName.LevelEntityContainer,
+                    clickSlot.container.bridgeNativeStackRequestContainerName(),
                     clickSlot.bedrockSlot,
                     stackId);
         }
@@ -1670,6 +1749,12 @@ public class InventoryContainer extends Container {
                 source.stackId < 0;
     }
 
+    private static boolean bridgeCanUseStackRequestSwapSlot(BridgeNativeStackSlot slot, BedrockItem item) {
+        if (slot == null) return false;
+        if (isEmpty(item)) return slot.stackId == 0;
+        return slot.stackId > 0;
+    }
+
     private int nextItemStackRequestId() {
         InventoryContainer owner = this.bridgeCanonicalInventory;
         int requestId = owner.bridgeNextItemStackRequestId;
@@ -1705,6 +1790,20 @@ public class InventoryContainer extends Container {
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
         this.writeItemStackRequestActionType(wrapper, actionType);
         wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, count)));
+        this.writeStackRequestSlot(wrapper, source);
+        this.writeStackRequestSlot(wrapper, destination);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0);
+        wrapper.write(BedrockTypes.INT_LE, -1);
+        wrapper.sendToServer(BedrockProtocol.class);
+    }
+
+    private void sendItemStackRequestSwap(int requestId, BridgeNativeStackSlot source, BridgeNativeStackSlot destination) {
+        PacketWrapper wrapper = PacketWrapper.create(ServerboundBedrockPackets.ITEM_STACK_REQUEST, this.user);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
+        wrapper.write(BedrockTypes.VAR_INT, requestId);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
+        this.writeItemStackRequestActionType(wrapper, ItemStackRequestActionType.Swap);
+        // Swap has no count field: its two slot descriptors immediately follow the action type.
         this.writeStackRequestSlot(wrapper, source);
         this.writeStackRequestSlot(wrapper, destination);
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0);
@@ -2584,6 +2683,11 @@ public class InventoryContainer extends Container {
         if (isEmpty(a) && isEmpty(b)) return true;
         if (isEmpty(a) || isEmpty(b)) return false;
         return a.equals(b);
+    }
+
+    private static boolean bridgeSameItemAndAmount(BedrockItem a, BedrockItem b) {
+        if (isEmpty(a) || isEmpty(b)) return false;
+        return canStack(a, b) && amountOrZero(a) == amountOrZero(b);
     }
 
     private static String bridgeItemDebug(BedrockItem item) {

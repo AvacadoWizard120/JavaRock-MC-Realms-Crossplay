@@ -290,6 +290,49 @@ withQuietRelayLogs(() => {
   serializer.createPacketBuffer({ name: sentDownstream[1].name, params: sentDownstream[1].packet })
 })
 
+withQuietRelayLogs(() => {
+  const sentUpstream = []
+  const { relayPlayer } = makeRelayPlayerHarness((name, params) => sentUpstream.push({ name, params }))
+  const sentDownstream = []
+  relayPlayer.queue = (name, packet) => sentDownstream.push({ name, packet })
+
+  // Captured from support 0.3.107. The patched ViaBedrock item-frame path
+  // deliberately insets the face-axis click coordinate by one pixel (1/16),
+  // unlike an ordinary block-surface click. It is an entity-style insertion,
+  // not a request to render the held block in the adjacent world position.
+  const itemFrameInsertion = {
+    transaction: {
+      transaction_type: 'item_use',
+      actions: [{
+        source_type: 'container',
+        window_id: 0,
+        slot: 0,
+        old_item: { network_id: 58, count: 1, metadata: 0, block_runtime_id: 1752181952 },
+        new_item: { network_id: 0, count: 0, metadata: 0, block_runtime_id: 0 }
+      }],
+      transaction_data: {
+        action_type: 'click_block',
+        trigger_type: 'player_input',
+        block_position: { x: 189, y: 73, z: 14 },
+        face: 2,
+        hotbar_slot: 0,
+        held_item: { network_id: 58, count: 1, metadata: 0, block_runtime_id: 1752181952 },
+        player_pos: { x: 188.9534454345703, y: 73.62, z: 13.415749549865723 },
+        click_pos: { x: 0.452145516872406, y: 0.48980650305747986, z: 0.9375 },
+        block_runtime_id: -407719800,
+        client_prediction: 'success'
+      }
+    }
+  }
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('inventory_transaction', itemFrameInsertion, 'live'), true)
+  assert.strictEqual(sentUpstream.length, 1)
+  assert.strictEqual(sentUpstream[0].name, 'inventory_transaction')
+  assert.strictEqual(sentDownstream.length, 1)
+  assert.strictEqual(sentDownstream[0].name, 'inventory_slot')
+  assert.strictEqual(sentDownstream.some(entry => entry.name === 'update_block'), false, 'item-frame insertion must not synthesize an adjacent crafting-table block')
+})
+
 const equipmentOwner = {
   upstream: { entityId: 1 },
   bridgeItemNameByNetworkId: new Map([

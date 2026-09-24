@@ -1277,6 +1277,7 @@ function clientboundSpawnRuntimeId (name, params = {}) {
 }
 
 function clientboundUniqueId (name, params = {}) {
+  if (name === 'start_game') return entityRuntimeIdKey(firstNonEmpty(params.entity_id, params.entityId, params.unique_id, params.uniqueId))
   if (name === 'add_entity') return entityRuntimeIdKey(firstNonEmpty(params.unique_id, params.uniqueId, params.entity_id_self, params.entityIdSelf))
   if (name === 'add_item_entity') return entityRuntimeIdKey(firstNonEmpty(params.entity_id_self, params.entityIdSelf, params.unique_id, params.uniqueId))
   if (name === 'add_player') return entityRuntimeIdKey(firstNonEmpty(params.unique_id, params.uniqueId, params.entity_id_self, params.entityIdSelf))
@@ -1286,6 +1287,22 @@ function clientboundUniqueId (name, params = {}) {
 function clientboundRemoveUniqueId (name, params = {}) {
   if (name !== 'remove_entity') return undefined
   return entityRuntimeIdKey(firstNonEmpty(params.entity_id_self, params.entityIdSelf, params.unique_id, params.uniqueId))
+}
+
+function clientboundEntityLinkUniqueIds (params = {}) {
+  const link = params.link || {}
+  return [
+    entityRuntimeIdKey(firstNonEmpty(link.ridden_entity_id, link.riddenEntityId)),
+    entityRuntimeIdKey(firstNonEmpty(link.rider_entity_id, link.riderEntityId))
+  ].filter(Boolean)
+}
+
+function clientboundEntityLinkKey (params = {}) {
+  // Keep one pending state per entity pair. If a mount changes state more than
+  // once before both spawns arrive (for example Riding -> None -> Riding), only
+  // the latest link is authoritative; retaining every type would replay stale
+  // transitions after the newer state and leave Java on the wrong final link.
+  return clientboundEntityLinkUniqueIds(params).join('|')
 }
 
 function isClientboundEntitySpawnPacket (name) {
@@ -1304,9 +1321,6 @@ function isClientboundEntityRemovePacket (name) {
 function firstClientboundReferencedRuntimeId (name, params = {}) {
   if (name === 'move_player') return entityRuntimeIdKey(firstNonEmpty(params.runtime_id, params.runtimeId, params.runtime_entity_id, params.runtimeEntityId))
   if (name === 'take_item_entity') return entityRuntimeIdKey(firstNonEmpty(params.runtime_entity_id, params.runtimeEntityId))
-  if (name === 'set_entity_link' && params.link) {
-    return entityRuntimeIdKey(firstNonEmpty(params.link.ridden_entity_id, params.link.riddenEntityId, params.link.rider_entity_id, params.link.riderEntityId))
-  }
 
   return entityRuntimeIdKey(firstNonEmpty(
     params.runtime_entity_id,
@@ -1325,12 +1339,9 @@ function clientboundReferencedRuntimeIds (name, params = {}) {
     return params.runtime_entity_ids.map(entityRuntimeIdKey).filter(Boolean)
   }
 
-  if (name === 'set_entity_link' && params.link) {
-    return [
-      entityRuntimeIdKey(firstNonEmpty(params.link.ridden_entity_id, params.link.riddenEntityId)),
-      entityRuntimeIdKey(firstNonEmpty(params.link.rider_entity_id, params.link.riderEntityId))
-    ].filter(Boolean)
-  }
+  // set_entity_link references Bedrock unique ids, not runtime ids. It is
+  // resolved against downstreamEntityUniqueToRuntime immediately before send.
+  if (name === 'set_entity_link') return []
 
   const one = firstClientboundReferencedRuntimeId(name, params)
   return one ? [one] : []
@@ -1490,6 +1501,31 @@ function isServerboundBlockOrItemInteraction (name, params = {}) {
       protocolInputFlagEnabled(input, 'block_action')) return true
   if (params.transaction || params.item_stack_request || params.block_action) return true
   return false
+}
+
+function isViaBedrockItemFrameInteraction (transactionData = {}, context = '') {
+  if (String(context).toLowerCase().includes('item_frame')) return true
+
+  const clickPosition = transactionData.click_pos || transactionData.clickPos
+  const face = Number(transactionData.face)
+  if (!clickPosition || !Number.isInteger(face)) return false
+
+  // Java item frames are block entities in Bedrock. The patched ViaBedrock
+  // interaction path marks their face hit one pixel inside the block so it can
+  // address the frame without producing an out-of-bounds hit vector. Ordinary
+  // block clicks use the actual face boundary (0 or 1), so this fingerprint
+  // keeps the relay's visual block-placement prediction away from item frames.
+  const faceCoordinate = [
+    ['y', 0.9375],
+    ['y', 0.0625],
+    ['z', 0.9375],
+    ['z', 0.0625],
+    ['x', 0.9375],
+    ['x', 0.0625]
+  ][face]
+  if (!faceCoordinate) return false
+  const coordinate = Number(clickPosition[faceCoordinate[0]])
+  return Number.isFinite(coordinate) && Math.abs(coordinate - faceCoordinate[1]) < 1e-6
 }
 
 function summarizeServerboundInteraction (name, params = {}) {
@@ -2463,6 +2499,60 @@ function bridgeRewriteSlotStackIdFromTrackedState (owner, slot) {
   return true
 }
 
+const BRIDGE_PENDING_PREDICTION_CONTAINERS = new Set([
+  'hotbar',
+  'inventory',
+  'crafting_input'
+])
+
+function bridgePendingPredictionSlotDescriptor (slot = {}) {
+  const normalized = bridgeSlotDescriptorFromContainerIdAndSlot(
+    bridgeSlotContainerId(slot),
+    slot.slot
+  )
+  if (!normalized || !BRIDGE_PENDING_PREDICTION_CONTAINERS.has(bridgeSlotContainerId(normalized))) return null
+  return normalized
+}
+
+function bridgePreflightTrackedSlotDescriptor (slot = {}) {
+  const normalized = bridgeSlotDescriptorFromContainerIdAndSlot(
+    bridgeSlotContainerId(slot),
+    slot.slot
+  )
+  if (normalized && bridgeIsOwnInventorySlot(normalized)) return normalized
+  return bridgeIsOwnInventorySlot(slot) ? slot : null
+}
+
+function bridgeApplyPendingRequestPredictions (predictedByLocation, request = {}) {
+  const requestId = numberOrDefault(bridgeRequestIdForItemStackEntry(request), 0)
+  if (!(predictedByLocation instanceof Map) || requestId >= 0) return
+
+  const actions = Array.isArray(request.actions) ? request.actions : []
+  for (const action of actions) {
+    if (!['consume', 'place', 'take', 'swap'].includes(bridgeActionType(action))) continue
+    for (const field of ['source', 'destination']) {
+      const normalized = bridgePendingPredictionSlotDescriptor(action?.[field])
+      const key = bridgeSlotLocationKey(normalized)
+      if (key) predictedByLocation.set(key, requestId)
+    }
+  }
+}
+
+function bridgePendingPredictedStackIdsByLocation (owner) {
+  const predictedByLocation = new Map()
+  if (!(owner?.pendingBridgeToRealmItemStackRequests instanceof Map)) return predictedByLocation
+
+  // Bedrock lets a later request use an earlier, still-unacknowledged negative
+  // request id as the stack id for a slot that request changed. ViaBedrock's
+  // recipe-book mover can emit another packet before the Realm acknowledges the
+  // previous batch, so rebuild the exact location lineage from the pending
+  // requests instead of mistaking those references for stale authoritative ids.
+  for (const pending of owner.pendingBridgeToRealmItemStackRequests.values()) {
+    bridgeApplyPendingRequestPredictions(predictedByLocation, pending?.request)
+  }
+  return predictedByLocation
+}
+
 function bridgeSanitizedItemStackRequestParams (owner, params = {}) {
   const out = clonePacketForCensusDiagnostic(params)
   const requests = bridgeItemStackRequestEntries(out)
@@ -2524,45 +2614,62 @@ function bridgeItemStackRequestSourcePreflightDropDiagnosis (owner, params = {})
   const requests = bridgeItemStackRequestEntries(params)
   if (!requests.length) return null
 
+  const pendingPredictedStackIds = bridgePendingPredictedStackIdsByLocation(owner)
+
   for (const request of requests) {
     const requestId = bridgeRequestIdForItemStackEntry(request)
     const actions = Array.isArray(request.actions) ? request.actions : []
     for (const action of actions) {
       const actionType = bridgeActionType(action)
-      if (!['consume', 'place', 'take'].includes(actionType)) continue
+      const slots = []
+      if (['consume', 'place', 'take', 'swap'].includes(actionType)) {
+        slots.push({ role: 'source', value: action?.source })
+      }
+      if (actionType === 'swap') {
+        // Swap consumes the identity of both occupied slots. Checking only the
+        // first descriptor lets a stale destination reach the Realm and fail
+        // FailedToValidateDstSlot.
+        slots.push({ role: 'destination', value: action?.destination })
+      }
 
-      const source = action?.source
-      if (!bridgeIsOwnInventorySlot(source)) continue
-      const sourceKey = bridgeSlotLocationKey(source)
-      if (!sourceKey) continue
+      for (const slot of slots) {
+        const trackedSlot = bridgePreflightTrackedSlotDescriptor(slot.value)
+        if (!trackedSlot) continue
+        const slotKey = bridgeSlotLocationKey(trackedSlot)
+        if (!slotKey) continue
 
-      const sentStackId = numberOrDefault(firstNonNull(
-        source.stack_id,
-        source.stackId,
-        source.stack_network_id,
-        source.stackNetworkId,
-        source.item_stack_id,
-        source.itemStackId
-      ), 0)
-      if (!sentStackId) continue
+        const sentStackId = bridgeSlotStackId(slot.value, 0)
+        if (!sentStackId) continue
 
-      const trackedStackId = bridgeTrackedStackIdForLocation(owner, source)
-      if (trackedStackId == null) continue
+        // A matching negative id is authoritative for this in-flight chain even
+        // though the last acknowledged slot state still carries a positive id.
+        // Unknown negatives continue through the normal mismatch check below.
+        if (sentStackId < 0 && pendingPredictedStackIds.get(slotKey) === sentStackId) continue
 
-      const numericTrackedStackId = numberOrDefault(trackedStackId, 0)
-      if (numericTrackedStackId === sentStackId) continue
+        const trackedStackId = bridgeTrackedStackIdForLocation(owner, trackedSlot)
+        if (trackedStackId == null) continue
 
-      return {
-        reason: numericTrackedStackId === 0
-          ? 'source_slot_authoritatively_empty'
-          : 'source_stack_id_mismatch_after_sanitize',
-        request_id: requestId,
-        action_type: actionType,
-        source: sourceKey,
-        sent_stack_id: sentStackId,
-        tracked_stack_id: numericTrackedStackId
+        const numericTrackedStackId = numberOrDefault(trackedStackId, 0)
+        if (numericTrackedStackId === sentStackId) continue
+
+        return {
+          reason: numericTrackedStackId === 0
+            ? `${slot.role}_slot_authoritatively_empty`
+            : `${slot.role}_stack_id_mismatch_after_sanitize`,
+          request_id: requestId,
+          action_type: actionType,
+          [slot.role]: slotKey,
+          sent_stack_id: sentStackId,
+          tracked_stack_id: numericTrackedStackId
+        }
       }
     }
+
+    // Subsequent entries in the same packet may chain from this request id.
+    // Keeping the transient map packet-local avoids publishing predictions until
+    // the packet has actually been queued to the Realm; cross-packet state comes
+    // only from pendingBridgeToRealmItemStackRequests above.
+    bridgeApplyPendingRequestPredictions(pendingPredictedStackIds, request)
   }
 
   return null
@@ -2762,6 +2869,42 @@ function bridgeTrackTrustedLegacyPlayerStateTransaction (owner, name, params = {
     bridgeRememberPredictedCursorItem(owner, cursor.newItem, cursorStackId)
   }
 
+  return true
+}
+
+function bridgeTrackLegacyCrossContainerPlayerStateTransaction (owner, name, params = {}) {
+  if (!owner || name !== 'inventory_transaction' || owner.externalContainerWindowId == null) return false
+  const transaction = params.transaction || {}
+  if (String(transaction.transaction_type || '').toLowerCase() !== 'normal') return false
+  const actions = Array.isArray(transaction.actions) ? transaction.actions : []
+  const externalWindowId = String(owner.externalContainerWindowId)
+  let touchesExternalWindow = false
+  const ownActions = []
+
+  for (const action of actions) {
+    const sourceType = String(firstNonNull(action.source_type, action.sourceType, '') || '').toLowerCase()
+    const inventoryId = bridgeInventoryActionContainerId(action)
+    if (sourceType.includes('container') && String(inventoryId) === externalWindowId) {
+      touchesExternalWindow = true
+    }
+
+    const slot = bridgeInventoryActionSlotDescriptor(action)
+    if (slot && bridgeIsOwnInventorySlot(slot)) ownActions.push({ action, slot })
+  }
+
+  if (!touchesExternalWindow || ownActions.length === 0) return false
+
+  // A legacy cross-container transaction may mint a new stack id for the
+  // player slot, but ViaBedrock's legacy item frequently omits that identity.
+  // Refresh it when supplied; otherwise invalidate the old tracked id so the
+  // following native request is not rewritten against a stale clientbound
+  // snapshot.
+  for (const entry of ownActions) {
+    const newItem = entry.action.new_item || entry.action.newItem || entry.action.to || {}
+    const newCount = bridgeItemCount(newItem)
+    const newStackId = bridgeItemStackId(newItem, 0)
+    bridgeRememberPredictedStackId(owner, entry.slot, newCount > 0 && newStackId > 0 ? newStackId : 0)
+  }
   return true
 }
 
@@ -3770,6 +3913,7 @@ class ViaBedrockRelayPlayer extends Player {
     this.startGameChunkFlushTimer = null
     this.respawnPacket = []
     this.upstreamPlayerInitializedSent = false
+    this.downstreamProtocolPlayReady = !this.usesViaBedrockDownstream()
     this.downstreamPlayReady = !this.usesViaBedrockDownstream()
     this.downstreamPlayReadyTimer = null
     this.delayedClientboundPlayPackets = []
@@ -3787,6 +3931,7 @@ class ViaBedrockRelayPlayer extends Player {
     this.downstreamKnownEntityRuntimeIds = new Set()
     this.downstreamEntitySpawnCache = new Map()
     this.downstreamEntityUniqueToRuntime = new Map()
+    this.pendingClientboundEntityLinks = new Map()
     this.localPlayerRuntimeIdKey = undefined
     this.entityTrackerResetCount = 0
     this.entityTrackerRespawnReplayTimer = null
@@ -4793,21 +4938,45 @@ class ViaBedrockRelayPlayer extends Player {
     return false
   }
 
+  markDownstreamProtocolPlayReady (reason) {
+    if (!this.usesViaBedrockDownstream()) {
+      this.downstreamProtocolPlayReady = true
+      this.downstreamPlayReady = true
+      this.delayedClientboundPlayPackets = []
+      this.delayedClientboundEntityStateIndexes?.clear?.()
+      return false
+    }
+    if (this.downstreamProtocolPlayReady) return false
+
+    this.downstreamProtocolPlayReady = true
+    const delayedCount = Array.isArray(this.delayedClientboundPlayPackets)
+      ? this.delayedClientboundPlayPackets.length
+      : 0
+    console.log(`[bedrock-relay] Downstream ViaBedrock protocol PLAY confirmed (${reason}). Flushing ${delayedCount} delayed clientbound gameplay packet(s) before final gameplay release.`)
+    this.flushDelayedClientboundPlayPackets()
+    return true
+  }
+
   markDownstreamPlayReady (reason) {
     if (!this.usesViaBedrockDownstream()) {
+      this.downstreamProtocolPlayReady = true
       this.downstreamPlayReady = true
       this.delayedClientboundPlayPackets = []
       this.delayedClientboundEntityStateIndexes?.clear?.()
       return
     }
     if (this.downstreamPlayReady) return
-    this.downstreamPlayReady = true
     if (this.downstreamPlayReadyTimer) {
       clearTimeout(this.downstreamPlayReadyTimer)
       this.downstreamPlayReadyTimer = null
     }
-    console.log(`[bedrock-relay] Downstream ViaBedrock PLAY gate opened (${reason}). Flushing ${this.delayedClientboundPlayPackets.length} delayed gameplay packet(s).`)
-    this.flushDelayedClientboundPlayPackets()
+    // Normally the first real player_auth_input has already proved protocol
+    // PLAY and released clientbound state beneath the Loading Terrain screen.
+    // Keep this fallback for a client that reaches PLAYER_LOADED without first
+    // emitting an auth-input heartbeat.
+    this.markDownstreamProtocolPlayReady(`final readiness fallback: ${reason}`)
+    this.downstreamPlayReady = true
+    console.log(`[bedrock-relay] Downstream ViaBedrock gameplay gate opened (${reason}).`)
     this.scheduleLocalInventoryScreenShim(`play_ready:${reason}`, 25)
   }
 
@@ -4874,13 +5043,37 @@ class ViaBedrockRelayPlayer extends Player {
   }
 
   flushDelayedClientboundPlayPackets () {
-    if (!this.delayedClientboundPlayPackets.length) return
+    if (!Array.isArray(this.delayedClientboundPlayPackets) || !this.delayedClientboundPlayPackets.length) return 0
     const queued = this.delayedClientboundPlayPackets
     this.delayedClientboundPlayPackets = []
     this.delayedClientboundEntityStateIndexes?.clear?.()
+
+    // The local player attribute baseline must beat the rest of the bootstrap
+    // flood. ViaBedrock otherwise constructs Java's initial movement state from
+    // its fallback before this authoritative Realm value arrives, which can
+    // expose the player with the wrong FOV/movement speed for the first ticks.
+    const localPlayerRuntimeId = entityRuntimeIdKey(this.localPlayerRuntimeIdKey)
+    const localPlayerAttributes = []
+    const remaining = []
     for (const entry of queued) {
+      const entryRuntimeId = entityRuntimeIdKey(
+        entry?.params?.runtime_entity_id ??
+        entry?.params?.runtimeEntityId ??
+        entry?.params?.runtime_id ??
+        entry?.params?.runtimeId
+      )
+      if (entry?.name === 'update_attributes' &&
+        localPlayerRuntimeId && entryRuntimeId === localPlayerRuntimeId) {
+        localPlayerAttributes.push(entry)
+      } else {
+        remaining.push(entry)
+      }
+    }
+
+    for (const entry of [...localPlayerAttributes, ...remaining]) {
       this.queueClientbound(entry.name, entry.params, `delayed_play_flush:${entry.context || 'unknown'}`)
     }
+    return queued.length
   }
 
   shouldUseLocalInventoryScreenShim () {
@@ -5180,6 +5373,7 @@ class ViaBedrockRelayPlayer extends Player {
     const transactionData = transaction.transaction_data || transaction.data || {}
     if (String(transaction.transaction_type || '').toLowerCase() !== 'item_use') return false
     if (String(transactionData.action_type || transactionData.actionType || '').toLowerCase() !== 'click_block') return false
+    if (isViaBedrockItemFrameInteraction(transactionData, context)) return false
 
     const heldItem = transactionData.held_item || transactionData.heldItem || {}
     const blockRuntimeId = numberOrDefault(firstNonEmpty(
@@ -5436,12 +5630,16 @@ class ViaBedrockRelayPlayer extends Player {
       else this.downstreamEntitySpawnCache.set(runtimeId, { name, params })
 
       const uniqueId = clientboundUniqueId(name, params)
-      if (uniqueId) this.downstreamEntityUniqueToRuntime.set(uniqueId, runtimeId)
+      if (uniqueId) {
+        this.downstreamEntityUniqueToRuntime.set(uniqueId, runtimeId)
+        this.flushPendingClientboundEntityLinks(`spawned_unique_id:${uniqueId}`)
+      }
       return
     }
 
     const removedUniqueId = clientboundRemoveUniqueId(name, params)
     if (removedUniqueId) {
+      this.discardPendingClientboundEntityLinksForUniqueId(removedUniqueId)
       const removedRuntimeId = this.downstreamEntityUniqueToRuntime.get(removedUniqueId)
       if (removedRuntimeId) {
         this.downstreamKnownEntityRuntimeIds.delete(removedRuntimeId)
@@ -5527,8 +5725,57 @@ class ViaBedrockRelayPlayer extends Player {
     for (const runtimeId of this.downstreamEntitySpawnCache.keys()) {
       if (this.replayCachedEntitySpawnForDownstream(runtimeId, context, { quiet: true })) replayed++
     }
+    this.flushPendingClientboundEntityLinks(context)
     console.log(`[bedrock-relay] Replayed ${replayed}/${this.downstreamEntitySpawnCache.size} cached entity spawn(s) after ${context}; passive and idle mobs no longer wait for a movement packet to reappear.`)
     return replayed
+  }
+
+  isClientboundEntityLinkReady (params = {}, context = 'live') {
+    const uniqueIds = clientboundEntityLinkUniqueIds(params)
+    if (uniqueIds.length !== 2) return false
+
+    for (const uniqueId of uniqueIds) {
+      const runtimeId = this.downstreamEntityUniqueToRuntime.get(uniqueId)
+      if (!runtimeId) return false
+      if (this.downstreamKnownEntityRuntimeIds.has(runtimeId)) continue
+      if (this.replayCachedEntitySpawnForDownstream(runtimeId, `set_entity_link/${context}`)) continue
+      return false
+    }
+    return true
+  }
+
+  deferClientboundEntityLink (name, params = {}, context = 'live') {
+    if (!(this.pendingClientboundEntityLinks instanceof Map)) this.pendingClientboundEntityLinks = new Map()
+    const key = clientboundEntityLinkKey(params)
+    this.pendingClientboundEntityLinks.set(key, {
+      name,
+      params: { ...params, link: params.link ? { ...params.link } : params.link },
+      context
+    })
+  }
+
+  discardPendingClientboundEntityLinksForUniqueId (uniqueId) {
+    if (!(this.pendingClientboundEntityLinks instanceof Map) || !this.pendingClientboundEntityLinks.size) return
+    for (const [key, pending] of this.pendingClientboundEntityLinks) {
+      if (clientboundEntityLinkUniqueIds(pending.params).includes(uniqueId)) {
+        this.pendingClientboundEntityLinks.delete(key)
+      }
+    }
+  }
+
+  flushPendingClientboundEntityLinks (reason = 'entity_spawn') {
+    if (!(this.pendingClientboundEntityLinks instanceof Map) || !this.pendingClientboundEntityLinks.size) return 0
+    let flushed = 0
+    for (const [key, pending] of Array.from(this.pendingClientboundEntityLinks.entries())) {
+      if (!this.isClientboundEntityLinkReady(pending.params, `deferred:${reason}`)) continue
+      this.pendingClientboundEntityLinks.delete(key)
+      if (this.queueClientbound(pending.name, pending.params, `deferred_entity_link:${pending.context || reason}`)) {
+        flushed++
+      } else if (!this.pendingClientboundEntityLinks.has(key)) {
+        this.pendingClientboundEntityLinks.set(key, pending)
+      }
+    }
+    return flushed
   }
 
   logUnknownEntityPacketDrop (name, runtimeId, context) {
@@ -5566,6 +5813,13 @@ class ViaBedrockRelayPlayer extends Player {
     if (!this.usesViaBedrockDownstream()) return true
     if (isClientboundEntitySpawnPacket(name) || isClientboundEntityRemovePacket(name)) return true
     if (!isEntityTrackerSensitiveClientboundPacket(name)) return true
+
+    if (name === 'set_entity_link') {
+      if (clientboundEntityLinkUniqueIds(params).length !== 2) return false
+      if (this.isClientboundEntityLinkReady(params, context)) return true
+      this.deferClientboundEntityLink(name, params, context)
+      return 'deferred_entity_link'
+    }
 
     const runtimeIds = clientboundReferencedRuntimeIds(name, params)
     if (!runtimeIds.length) return true
@@ -5723,13 +5977,15 @@ class ViaBedrockRelayPlayer extends Player {
       return this.queueClientboundNativeBedrock(name, params, context)
     }
 
-    if (!this.downstreamPlayReady &&
+    const downstreamProtocolPlayReady = this.downstreamProtocolPlayReady === true || this.downstreamPlayReady === true
+
+    if (!downstreamProtocolPlayReady &&
       !String(context).startsWith('delayed_play_flush') &&
       isClientboundDelayedUntilDownstreamPlay(name)) {
       return this.delayClientboundUntilDownstreamPlay(name, params, context)
     }
 
-    if (!this.downstreamPlayReady &&
+    if (!downstreamProtocolPlayReady &&
       !String(context).startsWith('delayed_play_flush') &&
       isClientboundTransientBeforeDownstreamPlay(name)) {
       return this.dropClientboundTransientBeforeDownstreamPlay(name, params, context)
@@ -5778,10 +6034,12 @@ class ViaBedrockRelayPlayer extends Player {
       console.log(`[bedrock-relay] Realm -> ViaBedrock authoritative inventory update: ${safeStringify(summarizeClientboundInventoryForLog(name, translated), 0)}`)
     }
 
-    if (!this.prepareClientboundEntityPacketForViaBedrock(name, translated, context)) {
-      this.recordBridgeToViaBedrock(name, translated, 'dropped', {
+    const entityPacketPreparation = this.prepareClientboundEntityPacketForViaBedrock(name, translated, context)
+    if (entityPacketPreparation !== true) {
+      const deferredEntityLink = entityPacketPreparation === 'deferred_entity_link'
+      this.recordBridgeToViaBedrock(name, translated, deferredEntityLink ? 'deferred' : 'dropped', {
         context,
-        translation_status: 'dropped_unknown_entity'
+        translation_status: deferredEntityLink ? 'deferred_until_linked_entities_spawn' : 'dropped_unknown_entity'
       })
       return false
     }
@@ -6162,6 +6420,14 @@ class ViaBedrockRelayPlayer extends Player {
       return this.relayNativeBedrockServerboundToUpstream(name, params, context)
     }
 
+    if (name === 'player_auth_input') {
+      // ViaBedrock cannot emit this packet until its Java connection has
+      // entered protocol PLAY. Release Realm attributes/entities/inventory now,
+      // under Loading Terrain, but keep the Realm initialization and movement
+      // gates closed until the guarded PLAYER_LOADED acknowledgement arrives.
+      this.markDownstreamProtocolPlayReady('first real ViaBedrock player_auth_input')
+    }
+
     if (!this.upstreamPlayerInitializedSent && name === 'player_auth_input') {
       // CLIENT_TICK_END exists while vanilla's loading screen is still open.
       // Preserve only the latest heartbeat and release it after the real
@@ -6269,6 +6535,7 @@ class ViaBedrockRelayPlayer extends Player {
     }
 
     bridgeTrackTrustedLegacyPlayerStateTransaction(this, name, params)
+    bridgeTrackLegacyCrossContainerPlayerStateTransaction(this, name, params)
 
     const hasInventoryOpenGatedStackRequests =
       Array.isArray(this.pendingRealmInventoryOpenItemStackRequests) &&
@@ -6637,8 +6904,10 @@ class ViaBedrockRelayPlayer extends Player {
       this.authoritativeInventoryReplayTimer = null
     }
     this.clearLocalInventoryScreenShimTimers()
+    this.downstreamProtocolPlayReady = false
     this.delayedClientboundPlayPackets = []
     this.delayedClientboundEntityStateIndexes?.clear?.()
+    this.pendingClientboundEntityLinks?.clear?.()
     this.pendingInitialJoinAuthInput = null
     this.deferredCraftingContainerClose = null
     this.pendingCraftingDrainRequestIds?.clear?.()
@@ -7079,6 +7348,7 @@ module.exports = {
   bridgeLegacyCraftingTransactionDropDiagnosis,
   bridgeLegacyPlayerStateTransactionDropDiagnosis,
   bridgeTrackTrustedLegacyPlayerStateTransaction,
+  bridgeTrackLegacyCrossContainerPlayerStateTransaction,
   bridgeRememberPredictedCursorItem,
   bridgePredictedCursorStorageItem,
   bridgeOverlayPredictedCursorStorageItem,
@@ -7090,6 +7360,7 @@ module.exports = {
   normalizeClientboundTargetMetadataForLocalViaBedrock,
   entityRuntimeIdKey,
   clientboundSpawnRuntimeId,
+  clientboundEntityLinkUniqueIds,
   clientboundReferencedRuntimeIds,
   isEntityTrackerSensitiveClientboundPacket,
   isServerboundRespawnAction,
