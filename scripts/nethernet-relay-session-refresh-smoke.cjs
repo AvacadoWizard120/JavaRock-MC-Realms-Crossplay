@@ -11,6 +11,7 @@ const {
 const {
   NetherNetRealmRelay,
   isRetryableNetherNetOpeningFailure,
+  realmUpstreamDisconnectMessage,
   realmUpstreamConnectRetryDelayMs,
   realmUpstreamConnectRetryOptions
 } = require('../src/nethernetBedrockRelay')
@@ -50,6 +51,20 @@ assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('Timed out conne
 assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('WebSocket upgrade failed: 503 Service Unavailable')), true)
 assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('WebSocket upgrade failed: 401 Unauthorized')), false)
 assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('Invalid Bedrock login token')), false)
+assert.strictEqual(
+  realmUpstreamDisconnectMessage(new Error('NetherNet signaling WebSocket closed before WebRTC connected.'), 3, false),
+  "JavaRock couldn't connect to the Realm after 3 attempts. Try joining again in a moment."
+)
+assert.strictEqual(
+  realmUpstreamDisconnectMessage(new Error('Timed out connecting to WebSocket wss://signal.example/ws'), 2, false),
+  "JavaRock couldn't connect to the Realm after 2 attempts. Try joining again in a moment."
+)
+assert.strictEqual(
+  realmUpstreamDisconnectMessage(Object.assign(new Error('closed'), { code: 'NETHERNET_SIGNALING_CLOSED' }), 2, false),
+  "JavaRock couldn't connect to the Realm after 2 attempts. Try joining again in a moment."
+)
+assert.strictEqual(realmUpstreamDisconnectMessage('closed', 1, true), 'Bedrock Realm connection closed')
+assert.strictEqual(realmUpstreamDisconnectMessage('', 1, true), 'Bedrock Realm connection closed')
 assert.deepStrictEqual(realmUpstreamConnectRetryOptions(), {
   maxAttempts: 3,
   baseDelayMs: 500,
@@ -218,6 +233,10 @@ async function main () {
     assert.strictEqual(exhaustedRelay.created.length, 2, 'retry exceeded or missed its configured client bound')
     assert.strictEqual(exhaustedRelay.upstreams.size, 0)
     assert.strictEqual(exhaustedRelay.upstreamStates.size, 0)
+    assert.strictEqual(
+      exhaustedDownstream.disconnects[0],
+      "JavaRock couldn't connect to the Realm after 2 attempts. Try joining again in a moment."
+    )
   } finally {
     for (const [name, value] of Object.entries({
       NETHERNET_RELAY_UPSTREAM_CONNECT_MAX_ATTEMPTS: savedEnvironment.maxAttempts,

@@ -424,6 +424,10 @@ assert.strictEqual(summary.raw_packets_written, 2)
 assert.strictEqual(summary.raw_bytes_written, unknownClientboundRaw.length + unknownServerboundRaw.length)
 assert.strictEqual(path.basename(summary.raw_journal_file), 'raw-packets-smoke-run.jsonl')
 assert.strictEqual(path.basename(summary.focus_trace_file), 'inventory-trace-smoke-run.jsonl')
+const firstRunResponseSummary = summary.top_packet_kinds_this_run.find(kind =>
+  kind.name === 'item_stack_response' && kind.direction === 'realm_to_bridge'
+)
+assert.strictEqual(firstRunResponseSummary.count_seen, 3, 'run summary should count only this run\'s matching packets')
 
 const sampleRefs = Object.values(db.packet_kinds).flatMap(kind => kind.samples || [])
 assert.ok(sampleRefs.length >= 1, 'high-value packets should store samples')
@@ -472,6 +476,11 @@ secondRun.record({
   params: { responses: [{ request_id: 10, result: 'ok', containers: [] }] }
 })
 secondRun.close('second run sample smoke complete')
+const secondRunSummary = JSON.parse(fs.readFileSync(path.join(dir, 'run-summary-smoke-run-2.json'), 'utf8'))
+const secondRunResponseSummary = secondRunSummary.top_packet_kinds_this_run.find(kind =>
+  kind.name === 'item_stack_response' && kind.direction === 'realm_to_bridge'
+)
+assert.strictEqual(secondRunResponseSummary.count_seen, 1, 'current-run summary must not reuse cumulative packet counts')
 const secondRunDb = JSON.parse(fs.readFileSync(dbFile, 'utf8'))
 const secondRunResponseKind = Object.values(secondRunDb.packet_kinds).find(kind =>
   kind.name === 'item_stack_response' && kind.direction === 'realm_to_bridge'

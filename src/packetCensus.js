@@ -972,6 +972,7 @@ class PacketCensus {
     this.highValueNames = new Set(DEFAULT_HIGH_VALUE_PACKET_NAMES)
     this.eventAlwaysNames = new Set(DEFAULT_EVENT_ALWAYS_PACKET_NAMES)
     this.highVolumeEventNames = new Set(DEFAULT_HIGH_VOLUME_EVENT_PACKET_NAMES)
+    this.packetKindsThisRun = new Map()
     this.firstSeenThisRun = new Set()
     this.eventVariantsSeenThisRun = new Set()
     this.eventsSeen = 0
@@ -1507,6 +1508,24 @@ class PacketCensus {
     kind.phases[event.phase] = (kind.phases[event.phase] || 0) + 1
     kind.translation_statuses[event.translation_status] = (kind.translation_statuses[event.translation_status] || 0) + 1
 
+    let runKind = this.packetKindsThisRun.get(key)
+    if (!runKind) {
+      runKind = {
+        name: kind.name,
+        direction: kind.direction,
+        lane: kind.lane,
+        count_seen: 0,
+        phases: {},
+        translation_statuses: {},
+        last_error: undefined
+      }
+      this.packetKindsThisRun.set(key, runKind)
+    }
+    runKind.count_seen++
+    runKind.phases[event.phase] = (runKind.phases[event.phase] || 0) + 1
+    runKind.translation_statuses[event.translation_status] = (runKind.translation_statuses[event.translation_status] || 0) + 1
+    if (event.error) runKind.last_error = event.error
+
     const sample = this.writeSample(key, event, params)
     if (sample) event.sample = sample
 
@@ -1576,8 +1595,7 @@ class PacketCensus {
     this.flushSqliteEvents()
     this.persistence?.drain()
 
-    const topKinds = Object.values(this.db.packet_kinds)
-      .filter(kind => kind.last_seen_run_id === this.runId)
+    const topKinds = Array.from(this.packetKindsThisRun.values())
       .sort((a, b) => b.count_seen - a.count_seen)
       .slice(0, 50)
       .map(kind => ({

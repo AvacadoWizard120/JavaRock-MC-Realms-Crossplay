@@ -196,6 +196,7 @@ function createNetherNetBedrockClient (config, info, options = {}) {
   client.connection = new NetherNetRealmTransport(config, info, {
     timeoutMs: Math.max(config.connectTimeoutMs || 0, 15000),
     logger: message => console.log(message),
+    signalHost: options.signalHost,
     identityProvider: createNetherNetIdentityProvider(client)
   })
   forwardEarlyTransportCloseToClient(client, client.connection)

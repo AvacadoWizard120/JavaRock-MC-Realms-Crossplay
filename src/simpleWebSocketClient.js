@@ -112,17 +112,18 @@ class SimpleWebSocketClient extends EventEmitter {
     this.fragmentOpcode = null
     this.fragmentChunks = []
     this.fragmentLength = 0
+    this.closing = false
     this.closeEmitted = false
 
     socket.on('data', chunk => this.handleData(chunk))
-    socket.on('close', hadError => this.emitClose(hadError))
+    socket.on('close', hadError => this.emitClose(1006, '', hadError))
     socket.on('error', error => this.emit('error', error))
   }
 
-  emitClose (hadError) {
+  emitClose (code = 1006, reason = '', hadError = false) {
     if (this.closeEmitted) return
     this.closeEmitted = true
-    this.emit('close', hadError)
+    this.emit('close', code, reason, hadError)
   }
 
   emitMessage (opcode, payload) {
@@ -152,6 +153,7 @@ class SimpleWebSocketClient extends EventEmitter {
   }
 
   handleData (chunk) {
+    if (this.closing || this.closeEmitted) return
     this.buffer = Buffer.concat([this.buffer, chunk])
 
     while (true) {
@@ -184,8 +186,23 @@ class SimpleWebSocketClient extends EventEmitter {
           this.appendFragment(payload)
         }
       } else if (opcode === 0x8) {
-        this.socket.end()
-        this.emitClose(false)
+        if (payload.length === 1) {
+          this.protocolError('close frame contained an incomplete status code')
+          return
+        }
+        this.closing = true
+        this.buffer = Buffer.alloc(0)
+        const code = payload.length >= 2 ? payload.readUInt16BE(0) : 1005
+        const reason = payload.length > 2 ? payload.subarray(2).toString('utf8') : ''
+        if (!this.socket.destroyed) {
+          this.socket.write(encodeFrame(payload, 0x8), () => {
+            this.socket.end()
+            this.emitClose(code, reason, false)
+          })
+        } else {
+          this.emitClose(code, reason, false)
+        }
+        return
       } else if (opcode === 0x9) {
         this.socket.write(encodeFrame(payload, 0x0a))
       } else if (opcode !== 0x0a) {
@@ -200,7 +217,9 @@ class SimpleWebSocketClient extends EventEmitter {
   }
 
   close () {
-    if (this.socket.destroyed) return
+    if (this.socket.destroyed || this.closing) return
+    this.closing = true
+    this.buffer = Buffer.alloc(0)
     this.socket.write(encodeFrame(Buffer.alloc(0), 0x8), () => this.socket.end())
   }
 

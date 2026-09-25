@@ -2,10 +2,13 @@
 
 const assert = require('assert')
 const {
+  extractRealmSessionRegion,
   extractNetworkProtocol,
   getRealmJoinEndpointInfo,
   isTransientRealmJoinError,
   makeRealmJoinEndpointInfo,
+  normalizeRealmSessionRegion,
+  realmSignalHostForRegion,
   realmJoinRetryDelayMs,
   realmJoinRetryOptions
 } = require('../src/realmJoinInfo')
@@ -30,13 +33,16 @@ async function main () {
 
   const netherNetInfo = makeRealmJoinEndpointInfo({
     address: '123e4567-e89b-42d3-a456-426614174000',
-    networkProtocol: 'NETHERNET_JSONRPC'
+    networkProtocol: 'NETHERNET_JSONRPC',
+    sessionRegionData: { regionName: 'Central-US' }
   })
   assert.strictEqual(netherNetInfo.transport, 'nethernet')
   assert.strictEqual(netherNetInfo.networkProtocol, 'NETHERNET_JSONRPC')
   assert.strictEqual(netherNetInfo.normalized.host, '123e4567-e89b-42d3-a456-426614174000')
   assert.strictEqual(netherNetInfo.normalized.port, 19132)
   assert.strictEqual(netherNetInfo.isUuidLikeHost, true)
+  assert.strictEqual(netherNetInfo.regionName, 'central-us')
+  assert.strictEqual(netherNetInfo.signalHost, 'signal-central-us.franchise.minecraft-services.net')
 
   const rakNetInfo = makeRealmJoinEndpointInfo({
     address: 'bedrock.example.net:19133',
@@ -52,6 +58,11 @@ async function main () {
   assert.strictEqual(legacyFallbackInfo.networkProtocol, undefined)
 
   assert.strictEqual(extractNetworkProtocol({ network_protocol: 'raknet' }), 'RAKNET')
+  assert.strictEqual(extractRealmSessionRegion({ sessionRegionData: { regionName: ' West-US ' } }), 'west-us')
+  assert.strictEqual(extractRealmSessionRegion({ session_region_data: { region_name: 'eastus' } }), 'eastus')
+  assert.strictEqual(normalizeRealmSessionRegion('bad region/name'), undefined)
+  assert.strictEqual(realmSignalHostForRegion('north-europe'), 'signal-north-europe.franchise.minecraft-services.net')
+  assert.strictEqual(realmSignalHostForRegion(''), undefined)
   assert.strictEqual(classifyRealmEndpointTransport({ host: 'server.example.net', port: 19132 }, { port: 19132 }, undefined), 'raknet')
   assert.strictEqual(isTransientRealmJoinError(new Error('503 Service Unavailable Retry again later')), true)
   assert.strictEqual(isTransientRealmJoinError(Object.assign(new Error('request timed out'), { code: 'OPERATION_TIMEOUT' })), true)
