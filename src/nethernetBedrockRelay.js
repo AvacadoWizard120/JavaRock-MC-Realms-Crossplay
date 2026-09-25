@@ -93,6 +93,16 @@ function isRetryableNetherNetOpeningFailure (failure) {
     /(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up)/i.test(text)
 }
 
+function realmUpstreamDisconnectMessage (failure, attempt = 1, upstreamJoined = false) {
+  const reason = String(failure?.message || failure || '').trim()
+  if (!upstreamJoined && isRetryableNetherNetOpeningFailure(failure)) {
+    const attempts = Math.max(1, Number(attempt) || 1)
+    return `JavaRock couldn't connect to the Realm after ${attempts} attempt${attempts === 1 ? '' : 's'}. Try joining again in a moment.`
+  }
+  if (!reason || /^closed$/i.test(reason)) return 'Bedrock Realm connection closed'
+  return `Bedrock Realm connection closed: ${reason}`
+}
+
 function isRelayDownstreamOpen (ds) {
   return Boolean(ds) && ds.status !== ClientStatus.Disconnected && ds.connection?.closed !== true
 }
@@ -7850,7 +7860,9 @@ class NetherNetRealmRelay extends Relay {
               upstreamMaxAttempts: context.retryOptions.maxAttempts
             }
           })
-          if (isRelayDownstreamOpen(ds)) ds.disconnect(`Realm relay upstream error: ${reason}`)
+          if (isRelayDownstreamOpen(ds)) {
+            ds.disconnect(realmUpstreamDisconnectMessage(failure, context.attempt, upstreamJoined))
+          }
           try { upstream.close?.('upstream_error') } catch {}
           return
         }
@@ -7865,7 +7877,9 @@ class NetherNetRealmRelay extends Relay {
             upstreamMaxAttempts: context.retryOptions.maxAttempts
           }
         })
-        if (isRelayDownstreamOpen(ds)) ds.disconnect('Bedrock Realm connection closed')
+        if (isRelayDownstreamOpen(ds)) {
+          ds.disconnect(realmUpstreamDisconnectMessage(failure, context.attempt, upstreamJoined))
+        }
       }
 
       // The transport emits its terminal event after readPacket returns. Since
@@ -8034,6 +8048,7 @@ module.exports = {
   nativeBedrockRawActionDiagnostic,
   downstreamBedrockVersionForMode,
   isRetryableNetherNetOpeningFailure,
+  realmUpstreamDisconnectMessage,
   normalizeRelayHostForViaProxy,
   realmUpstreamConnectRetryDelayMs,
   realmUpstreamConnectRetryOptions,

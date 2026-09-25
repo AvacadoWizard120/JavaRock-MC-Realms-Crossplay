@@ -3,6 +3,7 @@
 const assert = require('assert')
 const { EventEmitter } = require('events')
 const {
+  NetherNetJsonRpcDataChannelSession,
   addTurnCredentials,
   candidateType,
   jsonRpcSignalingUrl,
@@ -19,8 +20,10 @@ const {
   parseSignalPayload,
   parseTurnCredentialsMessage,
   randomUint64DecimalString,
+  realmJsonRpcSignalHost,
   sanitizeSignalFrame,
   signalMatchesNethernetClient,
+  startJsonRpcSignalKeepalive,
   summarizeSdpOffer
 } = require('../src/nethernetJsonRpcSignal')
 const {
@@ -54,7 +57,7 @@ function makeFakeSocket () {
   return socket
 }
 
-function main () {
+async function main () {
   const nethernetPackage = require('nethernet/package.json')
   const nethernet = loadNethernet()
   assert.strictEqual(nethernetPackage.version, '1.1.1')
@@ -65,6 +68,19 @@ function main () {
     jsonRpcSignalingUrl('signal.example.net'),
     'wss://signal.example.net/ws/v1.0/messaging/connect'
   )
+  const savedSignalHost = process.env.NETHERNET_SIGNAL_HOST
+  delete process.env.NETHERNET_SIGNAL_HOST
+  assert.strictEqual(
+    realmJsonRpcSignalHost({ endpoint: { signalHost: 'signal-central-us.franchise.minecraft-services.net' } }),
+    'signal-central-us.franchise.minecraft-services.net'
+  )
+  process.env.NETHERNET_SIGNAL_HOST = 'signal-override.example.net'
+  assert.strictEqual(
+    realmJsonRpcSignalHost({ endpoint: { signalHost: 'signal-central-us.franchise.minecraft-services.net' } }),
+    'signal-override.example.net'
+  )
+  if (savedSignalHost == null) delete process.env.NETHERNET_SIGNAL_HOST
+  else process.env.NETHERNET_SIGNAL_HOST = savedSignalHost
 
   assert.deepStrictEqual(makeJsonRpcRequest('Method', { ok: true }, 'id-1'), {
     params: { ok: true },
@@ -211,6 +227,92 @@ function main () {
   fragmentedSocket.emit('data', encodeServerFrame('"2.0"}', 0x0, true))
   assert.deepStrictEqual(fragmentedMessages, ['{"jsonrpc":"2.0"}'])
 
+  const closeSocket = makeFakeSocket()
+  const closeClient = new SimpleWebSocketClient(closeSocket)
+  const closeEvents = []
+  const messagesAfterClose = []
+  closeClient.on('close', (...args) => closeEvents.push(args))
+  closeClient.on('message', message => messagesAfterClose.push(message))
+  closeSocket.emit('data', Buffer.concat([
+    encodeServerFrame(Buffer.concat([
+      Buffer.from([0x03, 0xf3]),
+      Buffer.from('realm unavailable')
+    ]), 0x8, true),
+    encodeServerFrame('must not be delivered')
+  ]))
+  assert.deepStrictEqual(closeEvents, [[1011, 'realm unavailable', false]])
+  assert.deepStrictEqual(messagesAfterClose, [], 'client processed a data frame after the close frame')
+  assert.strictEqual(closeSocket.writes.length, 1, 'client did not acknowledge the close frame')
+
+  const delayedCloseSocket = makeFakeSocket()
+  let acknowledgeClose
+  delayedCloseSocket.write = (buffer, callback) => {
+    delayedCloseSocket.writes.push(Buffer.from(buffer))
+    acknowledgeClose = callback
+    return true
+  }
+  const delayedCloseClient = new SimpleWebSocketClient(delayedCloseSocket)
+  const delayedCloseMessages = []
+  const delayedCloseEvents = []
+  delayedCloseClient.on('message', message => delayedCloseMessages.push(message))
+  delayedCloseClient.on('close', (...args) => delayedCloseEvents.push(args))
+  delayedCloseSocket.emit('data', Buffer.concat([
+    encodeServerFrame(Buffer.from([0x03, 0xe8]), 0x8, true),
+    encodeServerFrame('after-close')
+  ]))
+  delayedCloseSocket.emit('data', encodeServerFrame('', 0x9, true))
+  assert.deepStrictEqual(delayedCloseMessages, [], 'client processed buffered data while the close acknowledgement was pending')
+  assert.deepStrictEqual(delayedCloseEvents, [], 'client emitted close before flushing its acknowledgement')
+  acknowledgeClose()
+  assert.deepStrictEqual(delayedCloseEvents, [[1000, '', false]])
+
+  const sessionSocket = {
+    closeCount: 0,
+    close () { this.closeCount++ },
+    terminate () {}
+  }
+  const sessionPeer = {
+    closeReasons: [],
+    close (reason) { this.closeReasons.push(reason) }
+  }
+  const session = new NetherNetJsonRpcDataChannelSession({
+    ws: sessionSocket,
+    nethernetClient: sessionPeer,
+    localNetworkId: 'local',
+    remoteNetworkId: 'remote',
+    cleanupOnClose: false
+  })
+  session.connected = true
+  const sessionCloseReasons = []
+  session.on('close', reason => sessionCloseReasons.push(reason))
+  assert.strictEqual(session._markPeerDisconnected('connection-id', 'peer connection failed'), 'peer connection failed')
+  assert.strictEqual(session.closed, true)
+  assert.strictEqual(session.connected, false)
+  assert.deepStrictEqual(sessionPeer.closeReasons, ['peer connection failed'])
+  assert.strictEqual(sessionSocket.closeCount, 1)
+  assert.deepStrictEqual(sessionCloseReasons, ['peer connection failed'])
+
+  const keepaliveSocket = {
+    sent: [],
+    send (payload) { this.sent.push(JSON.parse(payload)) }
+  }
+  const stopKeepalive = startJsonRpcSignalKeepalive(keepaliveSocket, {
+    intervalMs: 100,
+    idFactory: () => 'keepalive-id'
+  })
+  await new Promise(resolve => setTimeout(resolve, 125))
+  stopKeepalive()
+  assert(keepaliveSocket.sent.length >= 1, 'signaling keepalive was not sent')
+  assert.deepStrictEqual(keepaliveSocket.sent[0], {
+    params: [],
+    jsonrpc: '2.0',
+    method: 'System_Ping_v1_0',
+    id: 'keepalive-id'
+  })
+  const sentAfterStop = keepaliveSocket.sent.length
+  await new Promise(resolve => setTimeout(resolve, 125))
+  assert.strictEqual(keepaliveSocket.sent.length, sentAfterStop, 'signaling keepalive continued after stop')
+
   const key = 'dGhlIHNhbXBsZSBub25jZQ=='
   assert.strictEqual(expectedAcceptKey(key), 's3pPLMBiTxaQ9kYGzzhZRbK+xOo=')
 
@@ -222,4 +324,7 @@ function main () {
   console.log('NetherNet JSON-RPC format smoke check passed.')
 }
 
-main()
+main().catch(error => {
+  console.error(error.stack || error.message || error)
+  process.exit(1)
+})

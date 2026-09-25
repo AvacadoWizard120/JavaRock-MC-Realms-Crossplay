@@ -21,6 +21,7 @@ const RPC_INNER_METHOD_DELIVERY = 'Signaling_DeliveryNotification_V1_0'
 
 const DEFAULT_HANDSHAKE_ATTEMPT_TIMEOUT_MS = 3000
 const DEFAULT_MAX_HANDSHAKE_ATTEMPTS = 4
+const DEFAULT_SIGNAL_KEEPALIVE_INTERVAL_MS = 5000
 
 function randomUint64DecimalString () {
   const positive63Bit = crypto.randomBytes(8).readBigUInt64BE(0) & 0x7fffffffffffffffn
@@ -102,6 +103,12 @@ class NetherNetJsonRpcDataChannelSession extends EventEmitter {
     this.emit('connected')
   }
 
+  _markPeerDisconnected (connectionId, reason) {
+    const disconnectReason = String(reason || connectionId || 'NetherNet peer disconnected')
+    this._markClosed(disconnectReason)
+    return disconnectReason
+  }
+
   _markClosed (reason = 'closed') {
     if (this.closed) return
     this.closed = true
@@ -155,6 +162,37 @@ function makeJsonRpcRequest (method, params = {}, id = crypto.randomUUID()) {
     method,
     id
   }
+}
+
+function startJsonRpcSignalKeepalive (ws, options = {}) {
+  const intervalMs = Math.max(100, Number(options.intervalMs) || DEFAULT_SIGNAL_KEEPALIVE_INTERVAL_MS)
+  const idFactory = typeof options.idFactory === 'function' ? options.idFactory : crypto.randomUUID
+  let stopped = false
+  const timer = setInterval(() => {
+    if (stopped) return
+    try {
+      ws.send(JSON.stringify(makeJsonRpcRequest(RPC_METHOD_PING, [], idFactory())))
+    } catch (error) {
+      stop()
+      options.onError?.(error)
+    }
+  }, intervalMs)
+  timer.unref?.()
+
+  function stop () {
+    if (stopped) return
+    stopped = true
+    clearInterval(timer)
+  }
+
+  return stop
+}
+
+function realmJsonRpcSignalHost (info, explicitHost) {
+  return explicitHost ||
+    process.env.NETHERNET_SIGNAL_HOST ||
+    info?.endpoint?.signalHost ||
+    DEFAULT_SIGNAL_HOST
 }
 
 function makeWebRtcInnerMessage (localNetworkId, signalData) {
@@ -471,7 +509,7 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
   const { Client, SignalStructure, SignalType } = loadNethernet()
   const localNetworkId = String(options.localNetworkId || process.env.NETHERNET_LOCAL_NETWORK_ID || randomUint64DecimalString())
   const remoteNetworkId = String(options.remoteNetworkId || info.endpoint.host)
-  const signalHost = options.signalHost || process.env.NETHERNET_SIGNAL_HOST || DEFAULT_SIGNAL_HOST
+  const signalHost = realmJsonRpcSignalHost(info, options.signalHost)
   const timeoutMs = Number(options.timeoutMs) ||
     Number.parseInt(process.env.NETHERNET_CONNECT_SECONDS || '45', 10) * 1000
   const handshakeAttemptTimeoutMs = Math.max(1000,
@@ -526,6 +564,7 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
   let handshakeAttemptTimer = null
   let currentAttemptDiagnostics = null
   let finishRejectConnect = null
+  let stopSignalKeepalive = () => {}
   let peerSignalCount = 0
   let emptyReceivePollCount = 0
   const attemptDiagnostics = []
@@ -624,7 +663,12 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
     })
 
     client.on('disconnect', (connectionId, reason) => {
-      if (client !== nethernetClient || session.closed || session.connected) return
+      if (client !== nethernetClient || session.closed) return
+      if (session.connected) {
+        const disconnectReason = session._markPeerDisconnected(connectionId, reason)
+        log(`[nethernet-jsonrpc] WebRTC data channel disconnected after opening (${disconnectReason}).`)
+        return
+      }
       log(`[nethernet-jsonrpc] WebRTC attempt ${handshakeAttempt} disconnected before opening (${reason || connectionId || 'unknown'}).`)
       setTimeout(() => beginHandshakeAttempt('peer connection closed'), 0)
     })
@@ -767,6 +811,7 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
       settled = true
       clearTimeout(timer)
       clearHandshakeAttemptTimer()
+      stopSignalKeepalive()
       detachAbortHandler()
       if (error?.diagnostics) {
         log(`[nethernet-jsonrpc] Handshake diagnostics: ${safeStringify(error.diagnostics, 0)}`)
@@ -803,25 +848,49 @@ async function connectNetherNetJsonRpcDataChannel (config, info, options = {}) {
       }
     })
 
-    ws.once('close', () => {
+    ws.once('close', (closeCode = 1006, closeReason = '', hadError = false) => {
+      stopSignalKeepalive()
+      const detail = [
+        `code ${closeCode}`,
+        closeReason ? `reason ${String(closeReason)}` : '',
+        hadError ? 'socket error' : ''
+      ].filter(Boolean).join(', ')
       if (session?.connected) {
         // Once the WebRTC data channel is established, the JSON-RPC signaling
         // socket is no longer the gameplay transport.  Some Realms close the
         // signaling WebSocket after the offer/candidate exchange settles; do
         // not tear down the Bedrock data channel just because signaling ended.
         session.signalingClosed = true
-        session.emit('warning', new Error('NetherNet signaling WebSocket closed after WebRTC connected; keeping data channel alive.'))
+        session.emit('warning', new Error(`NetherNet signaling WebSocket closed after WebRTC connected (${detail}); keeping data channel alive.`))
         return
       }
 
-      const error = new Error('NetherNet signaling WebSocket closed before WebRTC connected.')
+      const error = new Error(`NetherNet signaling WebSocket closed before WebRTC connected (${detail}).`)
       error.code = 'NETHERNET_SIGNALING_CLOSED'
+      error.closeCode = closeCode
+      error.closeReason = String(closeReason || '')
+      error.hadSocketError = Boolean(hadError)
+      error.diagnostics = {
+        ...noResponseError().diagnostics,
+        signalHost,
+        closeCode,
+        closeReason: String(closeReason || ''),
+        hadSocketError: Boolean(hadError)
+      }
       finishReject(error)
     })
 
     ws.on('error', finishReject)
 
-    if (!settled) sendJsonRpcRequest(RPC_METHOD_TURN_AUTH, {})
+    if (!settled) {
+      stopSignalKeepalive = startJsonRpcSignalKeepalive(ws, {
+        onError: error => {
+          if (!session?.connected) finishReject(error)
+          else session.emit('warning', error)
+        }
+      })
+      sendJsonRpcRequest(RPC_METHOD_TURN_AUTH, {})
+    }
   })
 }
 
@@ -836,7 +905,7 @@ async function runNetherNetJsonRpcProbe (config) {
 
   const { Client, SignalStructure } = loadNethernet()
   const localNetworkId = process.env.NETHERNET_LOCAL_NETWORK_ID || randomUint64DecimalString()
-  const signalHost = process.env.NETHERNET_SIGNAL_HOST || DEFAULT_SIGNAL_HOST
+  const signalHost = realmJsonRpcSignalHost(info)
   const probeSeconds = Number.parseInt(process.env.NETHERNET_SIGNAL_SECONDS || '20', 10)
   const url = jsonRpcSignalingUrl(signalHost)
 
@@ -857,6 +926,7 @@ async function runNetherNetJsonRpcProbe (config) {
   })
 
   console.log('[nethernet-jsonrpc] WebSocket connected. Requesting TURN credentials.')
+  const stopSignalKeepalive = startJsonRpcSignalKeepalive(ws)
 
   const messages = []
   const pendingMethods = new Map()
@@ -960,9 +1030,13 @@ async function runNetherNetJsonRpcProbe (config) {
       }
     })
 
-    ws.once('close', finish)
+    ws.once('close', () => {
+      stopSignalKeepalive()
+      finish()
+    })
   })
 
+  stopSignalKeepalive()
   ws.close()
   if (nethernetClient) nethernetClient.close('probe complete')
   await delay(500)
@@ -1012,6 +1086,8 @@ module.exports = {
   parseSignalPayload,
   parseTurnCredentialsMessage,
   randomUint64DecimalString,
+  realmJsonRpcSignalHost,
   runNetherNetJsonRpcProbe,
-  sanitizeSignalFrame
+  sanitizeSignalFrame,
+  startJsonRpcSignalKeepalive
 }

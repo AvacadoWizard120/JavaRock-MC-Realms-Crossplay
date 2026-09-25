@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.112 - 2026-09-25
+
+- Realm joins now use the regional NetherNet signaling server supplied by the current Realm session and keep that connection alive while WebRTC negotiates. This fixes the repeated pre-game signaling closures captured in 0.3.111.
+- Failed signaling connections now retain the WebSocket close code and reason, and Java receives a useful connection message after retries instead of `Unknown`.
+- Support summaries now count packet kinds from the current run only instead of mixing in previous runs.
+
 ## 0.3.111 - 2026-09-24
 
 - Chest and inventory takes now preserve ViaBedrock's explicit empty-cursor stack id while an earlier place is still awaiting its Realm reply. The captured take/place/take chain no longer poisons every move that follows.

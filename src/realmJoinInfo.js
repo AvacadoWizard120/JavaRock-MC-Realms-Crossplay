@@ -10,6 +10,7 @@ const {
 const { withTimeout } = require('./asyncDeadline')
 
 const TRANSIENT_REALM_JOIN_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504])
+const REALM_SIGNAL_HOST_SUFFIX = '.franchise.minecraft-services.net'
 
 function intEnv (name, fallback) {
   const raw = process.env[name]
@@ -49,11 +50,34 @@ function extractNetworkProtocol (joinResponse) {
   )
 }
 
+function normalizeRealmSessionRegion (value) {
+  const region = String(value || '').trim().toLowerCase()
+  if (!region || region.length > 63 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(region)) return undefined
+  return region
+}
+
+function extractRealmSessionRegion (joinResponse) {
+  if (!joinResponse || typeof joinResponse !== 'object') return undefined
+  const regionData = joinResponse.sessionRegionData ?? joinResponse.session_region_data
+  return normalizeRealmSessionRegion(
+    regionData?.regionName ??
+      regionData?.region_name ??
+      joinResponse.sessionRegion ??
+      joinResponse.session_region
+  )
+}
+
+function realmSignalHostForRegion (region) {
+  const normalized = normalizeRealmSessionRegion(region)
+  return normalized ? `signal-${normalized}${REALM_SIGNAL_HOST_SUFFIX}` : undefined
+}
+
 function makeRealmJoinEndpointInfo (joinResponse, fallbackAddress) {
   const rawAddress = extractRealmJoinAddress(joinResponse) ?? fallbackAddress
   const normalized = normalizeRealmAddress(rawAddress)
   const networkProtocol = extractNetworkProtocol(joinResponse)
   const transport = classifyRealmEndpointTransport(normalized, rawAddress, networkProtocol)
+  const regionName = extractRealmSessionRegion(joinResponse)
 
   return {
     rawJoinResponse: joinResponse,
@@ -61,6 +85,8 @@ function makeRealmJoinEndpointInfo (joinResponse, fallbackAddress) {
     normalized,
     networkProtocol,
     transport,
+    regionName,
+    signalHost: transport === 'nethernet' ? realmSignalHostForRegion(regionName) : undefined,
     isUuidLikeHost: isUuidLike(normalized.host)
   }
 }
@@ -173,12 +199,15 @@ async function getRealmJoinEndpointInfo (api, realm, options = {}) {
 }
 
 module.exports = {
+  extractRealmSessionRegion,
   extractRealmJoinAddress,
   extractNetworkProtocol,
   fetchRealmJoinResponse,
   getRealmJoinEndpointInfo,
   isTransientRealmJoinError,
   makeRealmJoinEndpointInfo,
+  normalizeRealmSessionRegion,
+  realmSignalHostForRegion,
   realmJoinRetryDelayMs,
   realmJoinRetryOptions
 }

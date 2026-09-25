@@ -49,7 +49,8 @@ async function inspectRealmNetherNetInfoOnce (config, options = {}) {
     },
     join: {
       raw: joinInfo.rawJoinResponse,
-      networkProtocol: joinInfo.networkProtocol
+      networkProtocol: joinInfo.networkProtocol,
+      regionName: joinInfo.regionName
     },
     endpoint: {
       raw: joinInfo.rawAddress,
@@ -57,7 +58,9 @@ async function inspectRealmNetherNetInfoOnce (config, options = {}) {
       port: joinInfo.normalized.port,
       isUuidLikeHost: joinInfo.isUuidLikeHost,
       networkProtocol: joinInfo.networkProtocol,
-      transport: joinInfo.transport
+      transport: joinInfo.transport,
+      regionName: joinInfo.regionName,
+      signalHost: joinInfo.signalHost
     }
   }
 }
