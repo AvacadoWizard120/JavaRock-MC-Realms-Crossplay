@@ -48,6 +48,7 @@ assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('NetherNet signa
 assert.strictEqual(isRetryableNetherNetOpeningFailure(Object.assign(new Error('closed'), { code: 'NETHERNET_SIGNALING_CLOSED' })), true)
 assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('Realm peer did not answer 4 WebRTC offers (signaling online).')), true)
 assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('Timed out connecting to WebSocket wss://signal.example/ws')), true)
+assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('getaddrinfo ENOTFOUND signal-northcentralus.franchise.minecraft-services.net')), true)
 assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('WebSocket upgrade failed: 503 Service Unavailable')), true)
 assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('WebSocket upgrade failed: 401 Unauthorized')), false)
 assert.strictEqual(isRetryableNetherNetOpeningFailure(new Error('Invalid Bedrock login token')), false)

@@ -7,6 +7,8 @@ const { forwardEarlyTransportCloseToClient } = require('../src/nethernetBedrockP
 const {
   NetherNetRealmTransport,
   bedrockRakNetBatchToNetherNetPayload,
+  globalSignalFallbackHost,
+  isRegionalSignalFallbackFailure,
   netherNetPayloadToBedrockRakNetBatch
 } = require('../src/nethernetRealmTransport')
 
@@ -19,6 +21,12 @@ function fakeInfo () {
       networkProtocol: 'NETHERNET_JSONRPC'
     }
   }
+}
+
+function fakeRegionalInfo () {
+  const info = fakeInfo()
+  info.endpoint.signalHost = 'signal-northcentralus.franchise.minecraft-services.net'
+  return info
 }
 
 async function main () {
@@ -69,6 +77,43 @@ async function main () {
   assert.strictEqual(receivedSessionOptions.maxHandshakeAttempts, 5)
   assert.strictEqual(receivedSessionOptions.logSignalFrames, true)
   assert.strictEqual(receivedSessionOptions.identity, identity)
+
+  const dnsFailure = Object.assign(new Error('getaddrinfo ENOTFOUND signal-northcentralus.franchise.minecraft-services.net'), {
+    code: 'ENOTFOUND'
+  })
+  const originalSignalHost = process.env.NETHERNET_SIGNAL_HOST
+  delete process.env.NETHERNET_SIGNAL_HOST
+  assert.strictEqual(isRegionalSignalFallbackFailure(dnsFailure), true)
+  assert.strictEqual(isRegionalSignalFallbackFailure(new Error('WebSocket upgrade failed: 401 Unauthorized')), false)
+  assert.strictEqual(isRegionalSignalFallbackFailure(new Error('WebSocket upgrade failed: 403 Forbidden')), false)
+  assert.strictEqual(isRegionalSignalFallbackFailure(new Error('WebSocket upgrade failed: 429 Too Many Requests')), true)
+  assert.strictEqual(isRegionalSignalFallbackFailure(new Error('WebSocket upgrade failed: 503 Service Unavailable')), true)
+  assert.strictEqual(
+    globalSignalFallbackHost(fakeRegionalInfo(), {}, dnsFailure),
+    'signal.franchise.minecraft-services.net'
+  )
+  assert.strictEqual(globalSignalFallbackHost(fakeRegionalInfo(), { signalHost: 'signal.override.example' }, dnsFailure), null)
+  process.env.NETHERNET_SIGNAL_HOST = 'signal.env-override.example'
+  assert.strictEqual(globalSignalFallbackHost(fakeRegionalInfo(), {}, dnsFailure), null)
+  if (originalSignalHost === undefined) delete process.env.NETHERNET_SIGNAL_HOST
+  else process.env.NETHERNET_SIGNAL_HOST = originalSignalHost
+
+  const fallbackSession = new EventEmitter()
+  fallbackSession.send = () => 0
+  fallbackSession.close = reason => fallbackSession.emit('close', reason)
+  const fallbackHosts = []
+  const fallbackTransport = new NetherNetRealmTransport({}, fakeRegionalInfo(), {
+    logger: () => {},
+    sessionFactory: async (config, info, options) => {
+      fallbackHosts.push(options.signalHost)
+      if (fallbackHosts.length === 1) throw dnsFailure
+      return fallbackSession
+    }
+  })
+  await fallbackTransport.connect()
+  assert.deepStrictEqual(fallbackHosts, [undefined, 'signal.franchise.minecraft-services.net'])
+  assert.strictEqual(fallbackTransport.connected, true)
+  fallbackTransport.close('fallback smoke complete')
 
   const sent = Buffer.from([0xfe, 0x01, 0x02])
   assert.deepStrictEqual(bedrockRakNetBatchToNetherNetPayload(sent), Buffer.from([0x01, 0x02]))
