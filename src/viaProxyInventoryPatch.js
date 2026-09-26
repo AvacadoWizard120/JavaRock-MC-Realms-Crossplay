@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.110-viaproxy-3.4.13-door-ack-fix'
+const PATCH_ID = 'v0.3.114-viaproxy-3.4.13-interaction-fix'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/rewriter/BlockStateRewriter.class',
   'net/raphimc/viabedrock/protocol/packet/JoinPackets.class',
@@ -41,6 +41,8 @@ const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$BlockLightData.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$SubChunkPosition.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$BiomeAggregator.class',
+  'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingDoorInteractionAck.class',
+  'net/raphimc/viabedrock/protocol/task/ChunkTrackerTickTask.class',
   'net/raphimc/viabedrock/experimental/ExperimentalFeatures.class',
   'net/raphimc/viabedrock/experimental/ExperimentalFeatures$1.class',
   'net/raphimc/viabedrock/protocol/storage/BedrockBlockStateCompatibility.class',
@@ -68,6 +70,7 @@ const PATCH_SOURCE_RELATIVE_PATHS = [
   'BedrockBlockStateCompatibility.java',
   'JoinPackets.java',
   'ChunkTracker.java',
+  'ChunkTrackerTickTask.java',
   'ClientPlayerEntity.java',
   'ClientPlayerPackets.java',
   'Container.java',

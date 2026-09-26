@@ -55,6 +55,7 @@ import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
 import net.raphimc.viabedrock.protocol.storage.BreakingTracker;
 import net.raphimc.viabedrock.protocol.storage.ChunkTracker;
 import net.raphimc.viabedrock.protocol.storage.EntityTracker;
+import net.raphimc.viabedrock.protocol.storage.InventoryTracker;
 import net.raphimc.viabedrock.protocol.storage.ResourcePackStorage;
 import net.raphimc.viabedrock.protocol.types.BedrockTypes;
 
@@ -648,6 +649,10 @@ public class WorldEffectPackets {
             switch (tag) {
                 case CustomBlockTags.CHEST, CustomBlockTags.TRAPPED_CHEST -> {
                     if (type == 1) { // open / close
+                        if (wrapper.user().get(InventoryTracker.class).bridgeObserveChestBlockEvent(position, data)) {
+                            wrapper.cancel();
+                            return;
+                        }
                         wrapper.write(Types.UNSIGNED_BYTE, (short) type); // event type
                         wrapper.write(Types.UNSIGNED_BYTE, (short) MathUtil.clamp(data, 0, 255)); // event data
                         pairedChestPosition = chunkTracker.getPairedChestPosition(position);

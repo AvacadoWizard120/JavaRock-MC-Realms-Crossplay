@@ -21,6 +21,7 @@ import net.raphimc.viabedrock.api.util.PacketFactory;
 import net.raphimc.viabedrock.api.util.TextUtil;
 import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.ClientboundBedrockPackets;
+import net.raphimc.viabedrock.protocol.ServerboundBedrockPackets;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
 import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
 import net.raphimc.viabedrock.protocol.storage.ChunkTracker;
@@ -54,7 +55,10 @@ public class UnhandledPackets {
             final BlockPosition position = wrapper.read(BedrockTypes.BLOCK_POSITION);
             wrapper.read(BedrockTypes.VAR_LONG);
 
-            if (inventoryTracker.isAnyScreenOpen()) {
+            // A pending close is only an ACK bookkeeping state: Java has
+            // already closed that screen.  Do not reject a newer Realm
+            // container solely because the older ACK is delayed.
+            if (inventoryTracker.getCurrentContainer() != null || inventoryTracker.getCurrentForm() != null) {
                 ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Server tried to open container while another container is open");
                 PacketFactory.sendBedrockContainerClose(wrapper.user(), (byte) -1, ContainerType.NONE);
                 wrapper.cancel();
@@ -121,6 +125,31 @@ public class UnhandledPackets {
                 wrapper.user().getChannel().eventLoop().execute(
                         () -> workbench.bridgePublishJavaInventorySnapshot("crafting_table_open"));
             }
+        }, true);
+
+        // Override ViaBedrock's generic close mapper. Java window 0 is a local
+        // player-inventory screen, not a Bedrock external container. Forwarding
+        // that close after a chest session makes Realms echo a stale close for
+        // the last external window several seconds later.
+        protocol.registerServerbound(ServerboundPackets26_1.CONTAINER_CLOSE, ServerboundBedrockPackets.CONTAINER_CLOSE, wrapper -> {
+            final int javaContainerId = wrapper.read(Types.VAR_INT);
+            final InventoryTracker inventoryTracker = wrapper.user().get(InventoryTracker.class);
+            final Container container = inventoryTracker.getContainerServerbound((byte) javaContainerId);
+            if (container == null) {
+                wrapper.cancel();
+                return;
+            }
+
+            if (container == inventoryTracker.getInventoryContainer()) {
+                inventoryTracker.markPendingClose(container);
+                wrapper.cancel();
+                return;
+            }
+
+            wrapper.write(Types.BYTE, container.containerId());
+            wrapper.write(Types.BYTE, (byte) ContainerType.NONE.getValue());
+            wrapper.write(Types.BOOLEAN, false);
+            inventoryTracker.markPendingClose(container);
         }, true);
 
         protocol.registerClientbound(ClientboundBedrockPackets.ITEM_STACK_RESPONSE, null, wrapper -> {

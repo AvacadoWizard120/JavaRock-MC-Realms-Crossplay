@@ -266,6 +266,7 @@ public abstract class Container {
         this.bridgeChestStorage = bridgeIsChestStorageBlockTag(blockTag);
         this.bridgeGenericStorageBlockTag = this.bridgeChestStorage ? null : blockTag;
     }
+    public boolean bridgeIsChestStorage() { return this.bridgeChestStorage; }
     public ContainerEnumName bridgeNativeStackRequestContainerName() {
         if (this.type != ContainerType.CONTAINER) return null;
         String blockTag = this.bridgeConfiguredStorageBlockTag;

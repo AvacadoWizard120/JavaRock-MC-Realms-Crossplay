@@ -281,7 +281,8 @@ public class ExperimentalFeatures {
             // This is the main packet that the bedrock client use to interact with block.The rest of the
             final PacketWrapper transactionPacket = PacketWrapper.create(ServerboundBedrockPackets.INVENTORY_TRANSACTION, wrapper.user());
 
-            BedrockItem predictedToItem = inventoryTracker.getInventoryContainer().getSelectedHotbarItem().copy();
+            final BedrockItem selectedHotbarItem = inventoryTracker.getInventoryContainer().getSelectedHotbarItem();
+            BedrockItem predictedToItem = selectedHotbarItem.copy();
             // This is not entirely correct, but at least it's more accurate than not sending actions or sending the original item data.
             if (predictedToItem.blockRuntimeId() != 0 && clientPlayer.javaGameMode() != GameMode.CREATIVE) {
                 predictedToItem.setAmount(predictedToItem.amount() - 1);
@@ -289,18 +290,24 @@ public class ExperimentalFeatures {
             if (predictedToItem.amount() <= 0) {
                 predictedToItem = BedrockItem.empty();
             }
+            // Empty-hand interactions (and tools/items which are not consumed)
+            // must not claim a Container_Inventory mutation. The old translator
+            // emitted empty -> empty actions for doors and chests; Realms then
+            // answered with full authoritative inventory replays for every
+            // click, delaying the actual block/container response downstream.
+            final List<InventoryActionData> actions = selectedHotbarItem.equals(predictedToItem)
+                    ? List.of()
+                    : List.of(new InventoryActionData(
+                            new InventorySource(InventorySourceType.Container_Inventory, ContainerID.CONTAINER_ID_INVENTORY.getValue(), InventorySource_InventorySourceFlags.No_Flag),
+                            inventoryTracker.getInventoryContainer().getSelectedHotbarSlot(),
+                            selectedHotbarItem,
+                            predictedToItem
+                    ));
 
             BedrockInventoryTransaction inventoryTransaction = new BedrockInventoryTransaction(
                     0, // legacy request id
                     null,
-                    List.of(
-                            new InventoryActionData(
-                                    new InventorySource(InventorySourceType.Container_Inventory, ContainerID.CONTAINER_ID_INVENTORY.getValue(), InventorySource_InventorySourceFlags.No_Flag),
-                                    inventoryTracker.getInventoryContainer().getSelectedHotbarSlot(),
-                                    inventoryTracker.getInventoryContainer().getSelectedHotbarItem(),
-                                    predictedToItem
-                            )
-                    ),
+                    actions,
                     ComplexInventoryTransaction_Type.ItemUseTransaction,
                     new InventoryTransactionData.UseItemTransactionData(
                             ItemUseInventoryTransaction_ActionType.Place,
@@ -308,7 +315,7 @@ public class ExperimentalFeatures {
                             position,
                             faceInt,
                             inventoryTracker.getInventoryContainer().getSelectedHotbarSlot(),
-                            inventoryTracker.getInventoryContainer().getSelectedHotbarItem(),
+                            selectedHotbarItem,
                             clientPlayer.position(),
                             clickPosition,
                             chunkTracker.getBlockState(position),
