@@ -1,9 +1,43 @@
 'use strict'
 
 const { EventEmitter } = require('node:events')
-const { connectNetherNetJsonRpcDataChannel } = require('./nethernetJsonRpcSignal')
+const {
+  DEFAULT_SIGNAL_HOST,
+  connectNetherNetJsonRpcDataChannel
+} = require('./nethernetJsonRpcSignal')
 
 const RAKNET_MCPE_MESSAGE_ID = 0xfe
+const REGIONAL_SIGNAL_FALLBACK_CODES = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'NETHERNET_SIGNALING_CLOSED',
+  'NETHERNET_PEER_NO_RESPONSE'
+])
+
+function isRegionalSignalFallbackFailure (error) {
+  if (error?.code === 'NETHERNET_CONNECT_ABORTED') return false
+  const code = String(error?.code || '').toUpperCase()
+  if (REGIONAL_SIGNAL_FALLBACK_CODES.has(code)) return true
+
+  const message = String(error?.message || error || '')
+  const upgradeStatus = message.match(/WebSocket upgrade failed:\s*(\d{3})\b/i)
+  if (upgradeStatus) {
+    const status = Number(upgradeStatus[1])
+    return status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599)
+  }
+
+  return /(?:getaddrinfo|dns|socket hang up|timed out|websocket closed|realm peer did not answer)/i.test(message)
+}
+
+function globalSignalFallbackHost (info, options, error) {
+  const configuredHost = options?.signalHost || process.env.NETHERNET_SIGNAL_HOST
+  const regionalHost = info?.endpoint?.signalHost
+  if (configuredHost || !regionalHost || regionalHost === DEFAULT_SIGNAL_HOST) return null
+  return isRegionalSignalFallbackFailure(error) ? DEFAULT_SIGNAL_HOST : null
+}
 
 function bedrockRakNetBatchToNetherNetPayload (buffer) {
   const payload = Buffer.from(buffer)
@@ -61,7 +95,7 @@ class NetherNetRealmTransport extends EventEmitter {
       ? await this.options.identityProvider()
       : this.options.identity
 
-    this.session = await this.sessionFactory(this.config, this.info, {
+    const sessionOptions = {
       log: message => this.logger(message),
       timeoutMs: this.options.timeoutMs,
       signalHost: this.options.signalHost,
@@ -73,7 +107,22 @@ class NetherNetRealmTransport extends EventEmitter {
       logSignalFrames: this.options.logSignalFrames,
       identity,
       signal: this.abortController?.signal
-    })
+    }
+
+    try {
+      this.session = await this.sessionFactory(this.config, this.info, sessionOptions)
+    } catch (error) {
+      const fallbackHost = globalSignalFallbackHost(this.info, this.options, error)
+      if (!fallbackHost || this.closed || this.abortController?.signal.aborted) throw error
+      this.logger(
+        `[nethernet-transport] Regional signaling host ${this.info.endpoint.signalHost} failed ` +
+        `(${error.message || error}); retrying through ${fallbackHost}.`
+      )
+      this.session = await this.sessionFactory(this.config, this.info, {
+        ...sessionOptions,
+        signalHost: fallbackHost
+      })
+    }
 
     this.session.on('encapsulated', (buffer, address) => {
       if (!this.connected) return
@@ -148,5 +197,7 @@ class NetherNetRealmTransport extends EventEmitter {
 module.exports = {
   NetherNetRealmTransport,
   bedrockRakNetBatchToNetherNetPayload,
+  globalSignalFallbackHost,
+  isRegionalSignalFallbackFailure,
   netherNetPayloadToBedrockRakNetBatch
 }

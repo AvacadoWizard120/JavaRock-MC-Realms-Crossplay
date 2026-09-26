@@ -90,7 +90,7 @@ function isRetryableNetherNetOpeningFailure (failure) {
     /Timed out connecting to WebSocket/i.test(text) ||
     /WebSocket upgrade failed: (?:408|425|429|5\d\d)\b/i.test(text) ||
     /NetherNet data channel closed before connect/i.test(text) ||
-    /(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up)/i.test(text)
+    /(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up)/i.test(text)
 }
 
 function realmUpstreamDisconnectMessage (failure, attempt = 1, upstreamJoined = false) {

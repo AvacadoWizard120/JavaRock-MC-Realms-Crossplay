@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.113 - 2026-09-26
+
+- Realm joins now fall back to Minecraft's global NetherNet signaling service when a session's regional hostname does not resolve or fails before connection.
+- DNS `ENOTFOUND` failures are retryable, so an unavailable regional signaling hostname no longer ends the Java connection on attempt 1 of 3.
+
 ## 0.3.112 - 2026-09-25
 
 - Realm joins now use the regional NetherNet signaling server supplied by the current Realm session and keep that connection alive while WebRTC negotiates. This fixes the repeated pre-game signaling closures captured in 0.3.111.
