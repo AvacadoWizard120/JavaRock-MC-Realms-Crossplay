@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.114 - 2026-09-26
+
+- Removed synchronous chunk lighting from the ViaBedrock packet thread. Complete terrain columns are sent in bounded, player-first batches, so entity updates, movement, doors, chests, and sounds no longer queue behind multi-second chunk work.
+- Door prediction now settles one click per authoritative open-state transition. Rapid clicks cannot share one acknowledgement, and empty-hand block interactions no longer trigger fake inventory mutations and full inventory replays.
+- Missing chest lid events get a short local fallback. Late Realm echoes are deduplicated per chest and per lifecycle, and stale close replies cannot clear a newer container window.
+- Repeated mining swings no longer become empty attacks or `MissedSwing` noise while breaking a block. Client-authoritative crack progress is still sent.
+- Support captures now retain the world-interaction packets needed to time block changes, animations, sounds, and block events.
+
 ## 0.3.113 - 2026-09-26
 
 - Realm joins now fall back to Minecraft's global NetherNet signaling service when a session's regional hostname does not resolve or fails before connection.

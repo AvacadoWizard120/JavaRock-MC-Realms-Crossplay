@@ -148,7 +148,18 @@ const DEFAULT_FOCUS_TRACE_PACKET_NAMES = new Set([
   'mob_equipment',
   'player_hotbar',
   'crafting_data',
-  'unlocked_recipes'
+  'unlocked_recipes',
+  // Keep the packets surrounding world interactions in the focused trace too.
+  // These are modest in volume, but without their individual timestamps a
+  // support bundle cannot distinguish Realm latency from Java prediction,
+  // paired-block translation, or delayed sound playback.
+  'player_action',
+  'update_block',
+  'update_block_synced',
+  'block_event',
+  'level_event',
+  'level_sound_event',
+  'animate'
 ])
 
 const DEFAULT_FOCUS_TRACE_FULL_PACKET_NAMES = new Set([
@@ -164,7 +175,14 @@ const DEFAULT_FOCUS_TRACE_FULL_PACKET_NAMES = new Set([
   'item_stack_response',
   'inventory_transaction',
   'mob_equipment',
-  'player_hotbar'
+  'player_hotbar',
+  'player_action',
+  'update_block',
+  'update_block_synced',
+  'block_event',
+  'level_event',
+  'level_sound_event',
+  'animate'
 ])
 
 function boolEnv (name, fallback = false) {

@@ -185,7 +185,7 @@ function assertRenderingBytecode () {
   const chunkTrackerClass = bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/ChunkTracker.class')
   const result = run('javap', ['-c', '-p', chunkTrackerClass])
   const text = `${result.stdout || ''}${result.stderr || ''}`
-  for (const marker of ['getSkyLight', 'createSkyLightData', 'getBlockLight', 'resolveDerivedJavaBlockState', 'resolveDoorBlockState', 'queueDoorUpdate', 'flushPendingDoorUpdates', 'sendPairedDoorUpdate', 'PacketFactory.sendJavaBlockUpdate', 'syncItemFramesAfterChunkSend', 'getPairedChestPosition', 'spawnSafetyPosition', 'BridgeBlockRendering.emission', 'BlockLightData.mask']) {
+  for (const marker of ['getSkyLight', 'createSkyLightData', 'getBlockLight', 'resolveDerivedJavaBlockState', 'resolveDoorBlockState', 'queueDoorUpdate', 'flushPendingDoorUpdates', 'sendPairedDoorUpdate', 'PacketFactory.sendJavaBlockUpdate', 'syncItemFramesAfterChunkSend', 'getPairedChestPosition', 'spawnSafetyPosition', 'BridgeBlockRendering.emission', 'FULL_LIGHT']) {
     if (!text.includes(marker)) throw new Error(`patched ChunkTracker.class is missing rendering marker: ${marker}`)
   }
 
@@ -223,9 +223,8 @@ function assertItemFrameMetadata () {
     'entityTracker.spawnItemFrame(position, blockState, frameTag)',
     'entityTracker.updateItemFrame(position, blockState, frameTag)',
     'this.user().get(EntityTracker.class).updateItemFrame(',
-    'final BlockLightData skyLight = this.getSkyLight(chunk)',
-    'skyLight.emptyMask()',
-    'private BlockLightData createSkyLightData'
+    'levelChunkWithLight.write(Types.BYTE_ARRAY_PRIMITIVE, FULL_LIGHT.clone())',
+    'levelChunkWithLight.write(Types.VAR_INT, 0); // block light length'
   ]) {
     if (!chunkSource.includes(marker)) throw new Error(`patched ChunkTracker.java is missing frame/light marker: ${marker}`)
   }
@@ -434,7 +433,7 @@ function assertChunkLifecycleFixes () {
     'spawnSafetyPosition',
     'BlockState.fromString("minecraft:barrier")',
     '!this.isSubChunkReady(chunkX, (feetY - 1) >> 4, chunkZ)',
-    'private final Set<BlockPosition> pendingDoorUpdates',
+    'private final Map<BlockPosition, Integer> pendingDoorUpdates',
     'private final LongSet warnedBlockEntityBeforeChunk',
     'Block entity arrived before its chunk and was ignored:',
     'this.queueDoorUpdate(blockPosition, previousJavaBlockState, nextJavaBlockState)',
@@ -454,18 +453,19 @@ function assertChunkLifecycleFixes () {
   }
 
   const tickStart = source.indexOf('public void tick()')
-  const dirtySnapshot = source.indexOf('final long[] dirtyChunks = this.dirtyChunks.toLongArray()', tickStart)
+  const dirtyDrain = source.indexOf('this.drainDirtyChunks()', tickStart)
   const doorFlush = source.indexOf('this.flushPendingDoorUpdates()', tickStart)
-  if (tickStart < 0 || doorFlush < tickStart || dirtySnapshot < 0 || doorFlush > dirtySnapshot) {
-    throw new Error('paired door updates must flush before the dirty-chunk fallback snapshot')
+  if (tickStart < 0 || doorFlush < tickStart || dirtyDrain < 0 || doorFlush > dirtyDrain) {
+    throw new Error('paired door updates must flush before the bounded dirty-chunk drain')
   }
 
   const doorFlushStart = source.indexOf('private void flushPendingDoorUpdates()')
   const doorSendStart = source.indexOf('private boolean sendPairedDoorUpdate', doorFlushStart)
-  const doorHelpersEnd = source.indexOf('private void syncItemFramesAfterChunkSend', doorSendStart)
+  const doorStateStart = source.indexOf('private boolean sendPairedDoorState', doorSendStart)
+  const doorStateEnd = source.indexOf('private void acknowledgeDoorInteractions', doorStateStart)
   const doorFlushSource = source.slice(doorFlushStart, doorSendStart)
-  const doorSendSource = source.slice(doorSendStart, doorHelpersEnd)
-  if (!doorFlushSource.includes('if (this.sendPairedDoorUpdate(lowerPosition)) continue') ||
+  const doorSendSource = source.slice(doorStateStart, doorStateEnd)
+  if (!doorFlushSource.includes('this.sendPairedDoorUpdate(lowerPosition, doorUpdate.getValue())') ||
       !doorFlushSource.includes('this.markLoadedChunksDirtyAround(chunkX, chunkZ, true)')) {
     throw new Error('paired door update must retain a dirty-chunk fallback when either half is unsafe')
   }
@@ -510,6 +510,197 @@ function assertChunkLifecycleFixes () {
   }
 }
 
+function assertBoundedDirtyChunkDrain () {
+  const source = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
+  for (const marker of [
+    'private static final int MAX_DIRTY_CHUNK_SENDS_PER_TICK = 4',
+    'private static final long DIRTY_CHUNK_SEND_TIME_BUDGET_NANOS = 8_000_000L',
+    'static boolean hasDirtyChunkSendBudget(final int sentChunkCount, final long elapsedNanos)',
+    'static long selectClosestDirtyChunk(final LongSet dirtyChunks',
+    'final Position3f playerPosition = entityTracker.getClientPlayer().position()',
+    'selectClosestDirtyChunk(this.dirtyChunks, priorityChunkX, priorityChunkZ)'
+  ]) {
+    if (!source.includes(marker)) throw new Error(`ChunkTracker is missing dirty-column budget marker: ${marker}`)
+  }
+
+  const tickStart = source.indexOf('public void tick()')
+  const tickEnd = source.indexOf('private void drainDirtyChunks()', tickStart)
+  const tick = source.slice(tickStart, tickEnd)
+  const spawnSchedule = tick.indexOf('this.scheduleInitialPlayerChunkAfterSpawn()')
+  const dirtyDrain = tick.indexOf('this.drainDirtyChunks()')
+  if (spawnSchedule < 0 || dirtyDrain < spawnSchedule) {
+    throw new Error('ready initial-player terrain must enter the prioritized dirty queue before its bounded drain')
+  }
+  for (const unboundedMarker of [
+    'this.dirtyChunks.toLongArray()',
+    'this.dirtyChunks.clear()'
+  ]) {
+    if (tick.includes(unboundedMarker)) throw new Error(`ChunkTracker.tick() still contains unbounded dirty drain: ${unboundedMarker}`)
+  }
+
+  const drainStart = source.indexOf('private void drainDirtyChunks()')
+  const drainEnd = source.indexOf('static boolean hasDirtyChunkSendBudget', drainStart)
+  const drain = source.slice(drainStart, drainEnd)
+  if ((drain.match(/hasDirtyChunkSendBudget\(/g) || []).length < 2) {
+    throw new Error('dirty-column drain must enforce its budget both before and after priority selection')
+  }
+  const remove = drain.indexOf('this.dirtyChunks.remove(nextChunkKey)')
+  const send = drain.indexOf('this.sendChunk(chunkPosition.chunkX(), chunkPosition.chunkZ())')
+  if (remove < 0 || send < remove) {
+    throw new Error('dirty-column drain must remove only the selected work item before sending it')
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-dirty-chunk-budget-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const smokeSource = path.join(packageDir, 'DirtyChunkBudgetSmoke.java')
+    fs.writeFileSync(smokeSource, `
+package net.raphimc.viabedrock.protocol.storage;
+
+import com.viaversion.viaversion.api.minecraft.ChunkPosition;
+import com.viaversion.viaversion.libs.fastutil.longs.LongOpenHashSet;
+import com.viaversion.viaversion.libs.fastutil.longs.LongSet;
+
+public final class DirtyChunkBudgetSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        check(ChunkTracker.hasDirtyChunkSendBudget(0, Long.MAX_VALUE),
+                "the first dirty column must always make progress");
+        check(ChunkTracker.hasDirtyChunkSendBudget(3, 7_999_999L),
+                "work below both budgets must continue");
+        check(!ChunkTracker.hasDirtyChunkSendBudget(4, 0L),
+                "the per-tick dirty-column count cap must be hard");
+        check(!ChunkTracker.hasDirtyChunkSendBudget(1, 8_000_000L),
+                "the per-tick dirty-column time cap must be hard after the first send");
+
+        final LongSet dirtyChunks = new LongOpenHashSet();
+        final long playerChunk = ChunkPosition.chunkKey(12, -7);
+        dirtyChunks.add(ChunkPosition.chunkKey(-20, 30));
+        dirtyChunks.add(ChunkPosition.chunkKey(13, -7));
+        dirtyChunks.add(playerChunk);
+        check(ChunkTracker.selectClosestDirtyChunk(dirtyChunks, 12, -7) == playerChunk,
+                "the current player/spawn column must outrank distant dirty terrain");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, smokeSource])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.DirtyChunkBudgetSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+function assertUpstreamSafeChunkLighting () {
+  const source = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
+  const sendStart = source.indexOf('public void sendChunk(final int chunkX, final int chunkZ)')
+  const sendEnd = source.indexOf('public Dimension getDimension()', sendStart)
+  const sendChunk = source.slice(sendStart, sendEnd)
+  for (const expensiveCall of ['this.getSkyLight(chunk)', 'this.getBlockLight(chunk)']) {
+    if (sendChunk.includes(expensiveCall)) {
+      throw new Error(`ChunkTracker.sendChunk() still invokes the reverted synchronous light engine: ${expensiveCall}`)
+    }
+  }
+  for (const marker of [
+    'final int lightSectionCount = remappedChunk.getSections().length + 2',
+    'final BitSet lightMask = new BitSet(lightSectionCount)',
+    'lightMask.set(0, lightSectionCount)',
+    'levelChunkWithLight.write(Types.VAR_INT, lightSectionCount)',
+    'levelChunkWithLight.write(Types.BYTE_ARRAY_PRIMITIVE, FULL_LIGHT.clone())',
+    'levelChunkWithLight.write(Types.VAR_INT, 0); // block light length'
+  ]) {
+    if (!sendChunk.includes(marker)) throw new Error(`ChunkTracker.sendChunk() is missing upstream-safe light marker: ${marker}`)
+  }
+  if ((sendChunk.match(/lightMask\.toLongArray\(\)/g) || []).length !== 2 ||
+      (sendChunk.match(/new long\[0\]/g) || []).length !== 2) {
+    throw new Error('ChunkTracker.sendChunk() must use full sky/empty block light masks in the 26_1 long-array wire format')
+  }
+
+  const chunkTrackerClass = bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/ChunkTracker.class')
+  const bytecode = run('javap', ['-c', '-p', chunkTrackerClass]).stdout
+  const bytecodeSendStart = bytecode.indexOf('public void sendChunk(int, int);')
+  const bytecodeSendEnd = bytecode.indexOf('public net.raphimc.viabedrock.protocol.data.enums.Dimension getDimension();', bytecodeSendStart)
+  const sendChunkBytecode = bytecode.slice(bytecodeSendStart, bytecodeSendEnd)
+  if (sendChunkBytecode.includes('getSkyLight') || sendChunkBytecode.includes('getBlockLight')) {
+    throw new Error('compiled ChunkTracker.sendChunk bytecode still invokes the reverted light engine')
+  }
+  if (!sendChunkBytecode.includes('FULL_LIGHT')) {
+    throw new Error('compiled ChunkTracker.sendChunk bytecode does not write the upstream full-sky fallback')
+  }
+}
+
+function assertCompleteChunkSendGate () {
+  const source = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
+  const queueStart = source.indexOf('public void sendChunkInNextTick(final int chunkX, final int chunkZ)')
+  const sendStart = source.indexOf('public void sendChunk(final int chunkX, final int chunkZ)', queueStart)
+  const sendEnd = source.indexOf('public Dimension getDimension()', sendStart)
+  const queueChunk = source.slice(queueStart, sendStart)
+  const sendChunk = source.slice(sendStart, sendEnd)
+  for (const [method, body, protectedWork] of [
+    ['sendChunkInNextTick', queueChunk, 'this.dirtyChunks.add('],
+    ['sendChunk', sendChunk, 'final Chunk remappedChunk = this.remapChunk(chunk)']
+  ]) {
+    const completeGuard = body.indexOf('chunk == null || !isChunkFullyLoaded(chunk)')
+    const work = body.indexOf(protectedWork)
+    if (completeGuard < 0 || work < completeGuard) {
+      throw new Error(`ChunkTracker.${method} must reject incomplete Bedrock columns before Java send work`)
+    }
+  }
+  if (!source.includes('static boolean isChunkFullyLoaded(final BedrockChunk chunk)')) {
+    throw new Error('ChunkTracker is missing the complete Bedrock-column predicate')
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-complete-chunk-gate-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const smokeSource = path.join(packageDir, 'CompleteChunkGateSmoke.java')
+    fs.writeFileSync(smokeSource, `
+package net.raphimc.viabedrock.protocol.storage;
+
+import net.raphimc.viabedrock.api.chunk.BedrockChunk;
+import net.raphimc.viabedrock.api.chunk.section.BedrockChunkSection;
+import net.raphimc.viabedrock.api.chunk.section.BedrockChunkSectionImpl;
+
+public final class CompleteChunkGateSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        final BedrockChunkSection pending = new BedrockChunkSectionImpl();
+        final BedrockChunk incomplete = new BedrockChunk(0, 0, new BedrockChunkSection[]{
+                pending,
+                new BedrockChunkSectionImpl(true)
+        });
+        check(!ChunkTracker.isChunkFullyLoaded(incomplete),
+                "a requested placeholder must block the Java chunk send");
+
+        pending.mergeWith(new BedrockChunkSectionImpl());
+        pending.applyPendingBlockUpdates(0);
+        check(ChunkTracker.isChunkFullyLoaded(incomplete),
+                "the final successful subchunk merge must unlock the Java chunk send");
+
+        final BedrockChunk knownAir = new BedrockChunk(1, 1, new BedrockChunkSection[]{
+                new BedrockChunkSectionImpl(true)
+        });
+        check(ChunkTracker.isChunkFullyLoaded(knownAir),
+                "resolved known-air sections must not hold the terrain gate closed");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, smokeSource])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.CompleteChunkGateSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
 function assertDeferredDoorInteractionAck () {
   const experimentalSourceName = 'ExperimentalFeatures.java'
   const experimentalClassName = 'net/raphimc/viabedrock/experimental/ExperimentalFeatures.class'
@@ -532,7 +723,10 @@ function assertDeferredDoorInteractionAck () {
     'if (hand != InteractionHand.MAIN_HAND)',
     'chunkTracker.shouldDeferDoorInteractionAck(position)',
     'chunkTracker.deferDoorInteractionAck(position, sequence)',
-    'chunkTracker.acknowledgeBlockInteraction(sequence)'
+    'chunkTracker.acknowledgeBlockInteraction(sequence)',
+    'final List<InventoryActionData> actions = selectedHotbarItem.equals(predictedToItem)',
+    'new BedrockInventoryTransaction(',
+    'actions,'
   ]) {
     if (!useItemOn.includes(marker)) throw new Error(`USE_ITEM_ON is missing deferred-door marker: ${marker}`)
   }
@@ -547,6 +741,12 @@ function assertDeferredDoorInteractionAck () {
   }
   if ((useItemOn.match(/chunkTracker\.acknowledgeBlockInteraction\(sequence\)/g) || []).length !== 2) {
     throw new Error('USE_ITEM_ON must route exactly the off-hand and non-door immediate paths through the ordered gate')
+  }
+  const actionFilter = useItemOn.indexOf('final List<InventoryActionData> actions = selectedHotbarItem.equals(predictedToItem)')
+  const transaction = useItemOn.indexOf('new BedrockInventoryTransaction(', actionFilter)
+  const actionArgument = useItemOn.indexOf('actions,', transaction)
+  if (actionFilter < 0 || transaction < actionFilter || actionArgument < transaction) {
+    throw new Error('USE_ITEM_ON must omit identical inventory actions before serializing the Bedrock transaction')
   }
 
   // ExperimentalFeatures is replaced as one class. Preserve the unrelated
@@ -574,16 +774,28 @@ function assertDeferredDoorInteractionAck () {
 
   const chunkSource = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
   for (const marker of [
-    'private static final int DOOR_INTERACTION_ACK_FALLBACK_TICKS = 6',
+    'private static final long DOOR_INTERACTION_ACK_FALLBACK_NANOS = 5_000_000_000L',
     'public boolean shouldDeferDoorInteractionAck(final BlockPosition blockPosition)',
     'public void acknowledgeBlockInteraction(final int sequence)',
     'public void deferDoorInteractionAck(final BlockPosition blockPosition, final int sequence)',
-    'this.acknowledgeDoorInteraction(lowerPosition, upperPosition)',
+    'static long doorInteractionAckDeadlineNanos(final long nowNanos)',
+    'static boolean doorInteractionAckDeadlineReached(final long nowNanos, final long deadlineNanos)',
+    'static boolean tryAcquireChunkTrackerTick(final AtomicBoolean gate)',
+    'static void releaseChunkTrackerTick(final AtomicBoolean gate)',
+    'this.acknowledgeDoorInteractions(lowerPosition, observedTransitions)',
     'private void flushExpiredDoorInteractionAcks()',
+    'private void sendAuthoritativeDoorFallbackState(final BlockPosition lowerPosition)',
     'private void flushReadyBlockInteractionAcks()',
     'return readySequences.lower(deferredSequences.first())'
   ]) {
     if (!chunkSource.includes(marker)) throw new Error(`ChunkTracker is missing deferred-door marker: ${marker}`)
+  }
+  for (const removed of [
+    'DOOR_INTERACTION_ACK_FALLBACK_TICKS',
+    'pendingDoorInteractionAckTicks',
+    'doorInteractionAckTick'
+  ]) {
+    if (chunkSource.includes(removed)) throw new Error(`ChunkTracker retained callback-count door timeout state: ${removed}`)
   }
 
   const playerSource = fs.readFileSync(path.join(patchRoot, 'ClientPlayerPackets.java'), 'utf8')
@@ -601,18 +813,103 @@ function assertDeferredDoorInteractionAck () {
   }
 
   const doorSendStart = chunkSource.indexOf('private boolean sendPairedDoorUpdate')
-  const doorSendEnd = chunkSource.indexOf('private void acknowledgeDoorInteraction', doorSendStart)
+  const doorSendEnd = chunkSource.indexOf('private boolean sendPairedDoorState', doorSendStart)
   const doorSend = chunkSource.slice(doorSendStart, doorSendEnd)
-  const lowerUpdate = doorSend.indexOf('PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition')
-  const upperUpdate = doorSend.indexOf('PacketFactory.sendJavaBlockUpdate(this.user(), upperPosition')
-  const acknowledgement = doorSend.indexOf('this.acknowledgeDoorInteraction(lowerPosition, upperPosition)')
-  if (lowerUpdate < 0 || upperUpdate < lowerUpdate || acknowledgement < upperUpdate) {
-    throw new Error('door prediction acknowledgement must follow both authoritative Java block updates')
+  const pairedStateSend = doorSend.indexOf('this.sendPairedDoorState(lowerPosition)')
+  const acknowledgement = doorSend.indexOf('this.acknowledgeDoorInteractions(lowerPosition, observedTransitions)')
+  if (pairedStateSend < 0 || acknowledgement < pairedStateSend) {
+    throw new Error('door prediction acknowledgement must follow the authoritative paired Java block update')
+  }
+
+  const pairedStateStart = chunkSource.indexOf('private boolean sendPairedDoorState', doorSendEnd)
+  const pairedStateEnd = chunkSource.indexOf('private void acknowledgeDoorInteractions', pairedStateStart)
+  const pairedState = chunkSource.slice(pairedStateStart, pairedStateEnd)
+  const lowerUpdate = pairedState.indexOf('PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition')
+  const upperUpdate = pairedState.indexOf('PacketFactory.sendJavaBlockUpdate(this.user(), upperPosition')
+  if (lowerUpdate < 0 || upperUpdate < lowerUpdate || (pairedState.match(/PacketFactory\.sendJavaBlockUpdate/g) || []).length !== 2) {
+    throw new Error('paired door state must send exactly the lower and upper authoritative Java updates in order')
+  }
+
+  const expiryStart = chunkSource.indexOf('private void flushExpiredDoorInteractionAcks()')
+  const fallbackStart = chunkSource.indexOf('private void sendAuthoritativeDoorFallbackState', expiryStart)
+  const expiry = chunkSource.slice(expiryStart, fallbackStart)
+  const fallbackSend = expiry.indexOf('this.sendAuthoritativeDoorFallbackState(pending.lowerPosition())')
+  const makeReady = expiry.indexOf('this.readyBlockInteractionAcks.add(entry.getKey())')
+  const flushReady = expiry.indexOf('this.flushReadyBlockInteractionAcks()')
+  if (fallbackSend < 0 || makeReady < fallbackSend || flushReady < makeReady) {
+    throw new Error('door timeout must restore authoritative paired state before making and flushing the cumulative acknowledgement')
+  }
+  const fallbackEnd = chunkSource.indexOf('private void flushReadyBlockInteractionAcks()', fallbackStart)
+  const fallback = chunkSource.slice(fallbackStart, fallbackEnd)
+  if ((fallback.match(/PacketFactory\.sendJavaBlockUpdate/g) || []).length !== 2) {
+    throw new Error('door timeout fallback must send exactly two authoritative Java block updates')
+  }
+  for (const forbidden of [
+    'acknowledgeDoorInteraction',
+    'acknowledgeBlockInteraction',
+    'flushReadyBlockInteractionAcks',
+    'sendPairedDoorUpdate'
+  ]) {
+    if (fallback.includes(forbidden)) throw new Error(`door timeout state resend must be acknowledgement-free: ${forbidden}`)
+  }
+
+  const lowerDoorStart = chunkSource.indexOf('private BlockPosition lowerDoorPosition')
+  const lowerDoorEnd = chunkSource.indexOf('private void flushPendingDoorUpdates', lowerDoorStart)
+  const lowerDoor = chunkSource.slice(lowerDoorStart, lowerDoorEnd)
+  if (!lowerDoor.includes('state.hasProperty("half", "upper")') || !lowerDoor.includes('position.y() - 1')) {
+    throw new Error('deferred upper-half door interactions must normalize to the lower door position')
+  }
+
+  const tickTaskSourceName = 'ChunkTrackerTickTask.java'
+  const tickTaskClassName = 'net/raphimc/viabedrock/protocol/task/ChunkTrackerTickTask.class'
+  const pendingAckClassName = 'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingDoorInteractionAck.class'
+  if (!PATCH_SOURCE_RELATIVE_PATHS.includes(tickTaskSourceName)) {
+    throw new Error('ChunkTrackerTickTask.java is not registered in the ViaProxy patch source set')
+  }
+  for (const className of [tickTaskClassName, pendingAckClassName]) {
+    if (!CLASS_RELATIVE_PATHS.includes(className)) throw new Error(`door/tick patch class is not registered: ${className}`)
+  }
+  const tickTaskSource = fs.readFileSync(path.join(patchRoot, tickTaskSourceName), 'utf8')
+  for (const marker of [
+    '!chunkTracker.tryQueueTick()',
+    'info.get(ChunkTracker.class) != chunkTracker',
+    '} finally {',
+    'chunkTracker.completeQueuedTick()'
+  ]) {
+    if (!tickTaskSource.includes(marker)) throw new Error(`ChunkTrackerTickTask is missing coalescing marker: ${marker}`)
   }
 
   const experimentalBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(experimentalClassName)]).stdout
   for (const marker of ['shouldDeferDoorInteractionAck', 'deferDoorInteractionAck', 'acknowledgeBlockInteraction']) {
     if (!experimentalBytecode.includes(marker)) throw new Error(`compiled ExperimentalFeatures.class is missing deferred-door bytecode: ${marker}`)
+  }
+  for (const marker of [
+    'BedrockItem.equals',
+    'java/util/List.of:()Ljava/util/List;',
+    'InventoryActionData."<init>"'
+  ]) {
+    if (!experimentalBytecode.includes(marker)) throw new Error(`compiled ExperimentalFeatures.class is missing no-op inventory-action filter bytecode: ${marker}`)
+  }
+  const equalsInstruction = experimentalBytecode.indexOf('BedrockItem.equals')
+  const transactionConstructor = experimentalBytecode.indexOf('BedrockInventoryTransaction."<init>"', equalsInstruction)
+  const actionBranchBytecode = experimentalBytecode.slice(equalsInstruction, transactionConstructor)
+  const branchMarkers = [
+    'ifeq',
+    'java/util/List.of:()Ljava/util/List;',
+    'class net/raphimc/viabedrock/experimental/model/inventory/InventoryActionData',
+    'InventoryActionData."<init>"',
+    'java/util/List.of:(Ljava/lang/Object;)Ljava/util/List;',
+    'class net/raphimc/viabedrock/experimental/model/inventory/BedrockInventoryTransaction'
+  ]
+  let branchCursor = 0
+  for (const marker of branchMarkers) {
+    branchCursor = actionBranchBytecode.indexOf(marker, branchCursor)
+    if (branchCursor < 0) throw new Error(`compiled USE_ITEM_ON action branch is missing ordered bytecode: ${marker}`)
+    branchCursor += marker.length
+  }
+  const storedActions = actionBranchBytecode.match(/\bastore\s+(\d+)\b/)
+  if (!storedActions || !new RegExp(`\\baload\\s+${storedActions[1]}\\b`).test(actionBranchBytecode.slice(storedActions.index + storedActions[0].length))) {
+    throw new Error('compiled USE_ITEM_ON does not feed the branched empty/singleton action list into BedrockInventoryTransaction')
   }
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-door-ack-order-'))
@@ -623,14 +920,22 @@ function assertDeferredDoorInteractionAck () {
     fs.writeFileSync(sourcePath, `
 package net.raphimc.viabedrock.protocol.storage;
 
+import java.util.List;
+import java.util.NavigableMap;
 import java.util.NavigableSet;
+import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class DoorAckOrderSmoke {
     private static void check(Integer actual, Integer expected, String message) {
         if (actual == null ? expected != null : !actual.equals(expected)) {
             throw new AssertionError(message + ": expected=" + expected + " actual=" + actual);
         }
+    }
+
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
     }
 
     private static NavigableSet<Integer> sequences(int... values) {
@@ -654,6 +959,59 @@ public final class DoorAckOrderSmoke {
                 "older ready work may still advance without crossing the deferred door");
         check(ChunkTracker.highestReadyBlockInteractionAck(sequences(5, 6, 7, 8), sequences()), 8,
                 "resolving all doors releases the newest cumulative acknowledgement");
+
+        final NavigableMap<Integer, String> pendingDoorAcks = new TreeMap<>();
+        final NavigableSet<Integer> readyDoorAcks = new TreeSet<>();
+        pendingDoorAcks.put(5, "same-door");
+        pendingDoorAcks.put(7, "same-door");
+        pendingDoorAcks.put(8, "other-door");
+        check(ChunkTracker.resolveMatchingInteractionAcks(
+                        pendingDoorAcks, readyDoorAcks, "same-door"::equals, 1).equals(List.of(5)),
+                "one observed door transition resolves only the oldest matching interaction");
+        check(pendingDoorAcks.containsKey(7) && pendingDoorAcks.containsKey(8),
+                "newer same-door and unrelated interactions remain deferred after one transition");
+        check(ChunkTracker.resolveMatchingInteractionAcks(
+                        pendingDoorAcks, readyDoorAcks, "same-door"::equals, 2).equals(List.of(7)),
+                "a later transition resolves the next same-door interaction without crossing doors");
+        check(pendingDoorAcks.size() == 1 && pendingDoorAcks.containsKey(8),
+                "matching resolution leaves an unrelated door interaction pending");
+
+        final NavigableMap<Integer, String> coalescedDoorAcks = new TreeMap<>();
+        final NavigableSet<Integer> coalescedReadyAcks = new TreeSet<>();
+        coalescedDoorAcks.put(11, "same-door");
+        coalescedDoorAcks.put(12, "same-door");
+        check(ChunkTracker.resolveMatchingInteractionAcks(
+                        coalescedDoorAcks, coalescedReadyAcks, "same-door"::equals, 2).equals(List.of(11, 12)),
+                "two coalesced authoritative transitions resolve two matching clicks in sequence order");
+        check(coalescedDoorAcks.isEmpty() && coalescedReadyAcks.equals(sequences(11, 12)),
+                "coalesced transition resolution moves exactly those sequences to the ready set");
+
+        final long start = 1_000_000L;
+        final long deadline = ChunkTracker.doorInteractionAckDeadlineNanos(start);
+        check(deadline - start == 5_000_000_000L, "door fallback uses a five-second monotonic deadline");
+        check(!ChunkTracker.doorInteractionAckDeadlineReached(deadline - 1L, deadline),
+                "deadline must not expire one nanosecond early");
+        check(ChunkTracker.doorInteractionAckDeadlineReached(deadline, deadline),
+                "deadline expires exactly on time");
+        check(ChunkTracker.doorInteractionAckDeadlineReached(deadline + 1L, deadline),
+                "deadline remains expired afterward");
+        for (int i = 0; i < 100; i++) {
+            check(!ChunkTracker.doorInteractionAckDeadlineReached(deadline - 1L, deadline),
+                    "queued callbacks cannot advance a monotonic deadline");
+        }
+
+        final long wrappedStart = Long.MAX_VALUE - 100L;
+        final long wrappedDeadline = ChunkTracker.doorInteractionAckDeadlineNanos(wrappedStart);
+        check(!ChunkTracker.doorInteractionAckDeadlineReached(wrappedDeadline - 1L, wrappedDeadline),
+                "nanoTime wraparound remains before the deadline");
+        check(ChunkTracker.doorInteractionAckDeadlineReached(wrappedDeadline, wrappedDeadline),
+                "nanoTime wraparound expires at the deadline");
+
+        final AtomicBoolean gate = new AtomicBoolean();
+        check(ChunkTracker.tryAcquireChunkTrackerTick(gate), "the first tracker tick acquires the gate");
+        check(!ChunkTracker.tryAcquireChunkTrackerTick(gate), "a duplicate tracker tick is coalesced");
+        ChunkTracker.releaseChunkTrackerTick(gate);
+        check(ChunkTracker.tryAcquireChunkTrackerTick(gate), "the tracker tick gate is reusable after release");
     }
 }
 `)
@@ -663,6 +1021,25 @@ public final class DoorAckOrderSmoke {
     run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.DoorAckOrderSmoke'])
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
+  }
+
+  const chunkBytecode = run('javap', [
+    '-c',
+    '-p',
+    bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/ChunkTracker.class')
+  ]).stdout
+  for (const marker of [
+    'doorInteractionAckDeadlineNanos',
+    'doorInteractionAckDeadlineReached',
+    'tryAcquireChunkTrackerTick',
+    'releaseChunkTrackerTick',
+    'sendAuthoritativeDoorFallbackState'
+  ]) {
+    if (!chunkBytecode.includes(marker)) throw new Error(`compiled ChunkTracker.class is missing door/tick bytecode: ${marker}`)
+  }
+  const tickTaskBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(tickTaskClassName)]).stdout
+  for (const marker of ['tryQueueTick', 'completeQueuedTick', 'ChunkTracker.tick']) {
+    if (!tickTaskBytecode.includes(marker)) throw new Error(`compiled ChunkTrackerTickTask.class is missing coalescing bytecode: ${marker}`)
   }
 
   const bundledExperimentalBytecode = run('javap', [
@@ -734,6 +1111,33 @@ public final class DoorAckOrderSmoke {
   }
   if (canonicalSwitchInitializer(bundledSwitchBytecode) !== canonicalSwitchInitializer(patchedSwitchBytecode)) {
     throw new Error('ExperimentalFeatures$1 changed the bundled enum-switch mappings or guards')
+  }
+}
+
+function assertMiningSwingSuppression () {
+  const source = fs.readFileSync(path.join(patchRoot, 'ClientPlayerPackets.java'), 'utf8')
+  const abortStart = source.indexOf('case ABORT_DESTROY_BLOCK ->')
+  const abortEnd = source.indexOf('case STOP_DESTROY_BLOCK ->', abortStart)
+  const abortHandler = source.slice(abortStart, abortEnd)
+  if (abortHandler.indexOf('clientPlayer.cancelNextSwingPacket()') < 0 ||
+      abortHandler.indexOf('clientPlayer.cancelNextSwingPacket()') > abortHandler.indexOf('clientPlayer.setBlockBreakingInfo(null)')) {
+    throw new Error('ABORT_DESTROY_BLOCK must suppress its trailing Java swing before clearing mining state')
+  }
+  const swingStart = source.indexOf('protocol.registerServerbound(ServerboundPackets26_1.SWING')
+  const swingEnd = source.indexOf('\n    }\n\n    private static void writeItemFrameInteraction', swingStart)
+  const handler = source.slice(swingStart, swingEnd)
+  const breakingCheck = handler.indexOf('if (clientPlayer.blockBreakingInfo() != null)')
+  const cancellation = handler.indexOf('wrapper.cancel()', breakingCheck)
+  const authorityCheck = handler.indexOf('if (!gameSession.isBlockBreakingServerAuthoritative())', cancellation)
+  const crackProgress = handler.indexOf('PlayerActionType.CrackBlock', authorityCheck)
+  const breakingReturn = handler.indexOf('return', crackProgress)
+  const bedrockAnimate = handler.indexOf('AnimatePacketPayload_Action.Swing')
+  if (breakingCheck < 0 || cancellation < breakingCheck || authorityCheck < cancellation ||
+      crackProgress < authorityCheck || breakingReturn < crackProgress || bedrockAnimate < breakingReturn) {
+    throw new Error('mining SWING must preserve client-authoritative CrackBlock progress, then return before Bedrock Attack animation')
+  }
+  if ((handler.match(/PlayerAuthInputPacketPayload_InputData\.MissedSwing/g) || []).length !== 1) {
+    throw new Error('only a genuine non-mining Java swing should set Bedrock MissedSwing')
   }
 }
 
@@ -1323,6 +1727,277 @@ public final class BridgeGenericStorageSmoke {
   }
 }
 
+function assertChestBlockEventLifecycleFallback () {
+  const trackerSource = fs.readFileSync(path.join(patchRoot, 'InventoryTracker.java'), 'utf8')
+  for (const marker of [
+    'BRIDGE_CHEST_BLOCK_EVENT_FALLBACK_MS = 250L',
+    'BRIDGE_CHEST_BLOCK_EVENT_DEDUPE_LIMIT = 32',
+    'private BlockPosition bridgeOpenedExternalContainerPosition',
+    'private ContainerType bridgeOpenedExternalContainerType',
+    'Map<BlockPosition, Map<Integer, ArrayDeque<Long>>> bridgeLocallyResolvedChestOpenEvents',
+    'Map<BlockPosition, Map<Integer, ArrayDeque<Long>>> bridgeLocallyResolvedChestCloseEvents',
+    'bridgeLocallyResolvedChestOpenEvents',
+    'bridgeLocallyResolvedChestCloseEvents',
+    'private int bridgePendingChestOpenData',
+    'private int bridgePendingChestCloseData',
+    'this.bridgeExpectChestBlockEvent(container, true)',
+    'this.bridgeExpectChestBlockEvent(container, false)',
+    'public boolean bridgeObserveChestBlockEvent',
+    'bridgeChestViewerCountMoved(',
+    'bridgeChestViewerCountAfterEvent(',
+    'eventLoop().schedule(',
+    'PacketWrapper.create(ClientboundPackets26_1.BLOCK_EVENT, this.user())',
+    'blockEvent.write(Types.BLOCK_POSITION1_14, position)',
+    'blockEvent.write(Types.UNSIGNED_BYTE, (short) 1)',
+    'chunkTracker.getPairedChestPosition(position)',
+    'suppressed late authoritative chest block event',
+    'synthesized missing chest block event'
+  ]) {
+    if (!trackerSource.includes(marker)) throw new Error(`InventoryTracker is missing chest lifecycle fallback marker: ${marker}`)
+  }
+  for (const staleSingleEventField of [
+    'bridgeLastSyntheticChestOpenPosition',
+    'bridgeLastSyntheticChestClosePosition'
+  ]) {
+    if (trackerSource.includes(staleSingleEventField)) {
+      throw new Error(`chest lifecycle dedupe must retain rapid A/B events instead of one global stamp: ${staleSingleEventField}`)
+    }
+  }
+
+  const worldEffectSource = fs.readFileSync(path.join(patchRoot, 'WorldEffectPackets.java'), 'utf8')
+  const chestCase = worldEffectSource.indexOf('case CustomBlockTags.CHEST, CustomBlockTags.TRAPPED_CHEST')
+  const observe = worldEffectSource.indexOf('bridgeObserveChestBlockEvent(position, data)', chestCase)
+  const duplicateCancel = worldEffectSource.indexOf('wrapper.cancel()', observe)
+  const authoritativeWrite = worldEffectSource.indexOf('wrapper.write(Types.UNSIGNED_BYTE, (short) type)', observe)
+  if (chestCase < 0 || observe < chestCase || duplicateCancel < observe || authoritativeWrite < duplicateCancel) {
+    throw new Error('authoritative chest BLOCK_EVENT must satisfy/dedupe the fallback before Java serialization')
+  }
+
+  const unhandledSource = fs.readFileSync(path.join(patchRoot, 'UnhandledPackets.java'), 'utf8')
+  for (const marker of [
+    'registerServerbound(ServerboundPackets26_1.CONTAINER_CLOSE, ServerboundBedrockPackets.CONTAINER_CLOSE',
+    'inventoryTracker.getCurrentContainer() != null || inventoryTracker.getCurrentForm() != null',
+    'if (container == inventoryTracker.getInventoryContainer())',
+    'inventoryTracker.markPendingClose(container)',
+    'wrapper.cancel()'
+  ]) {
+    if (!unhandledSource.includes(marker)) throw new Error(`CONTAINER_CLOSE lifecycle override is missing marker: ${marker}`)
+  }
+  if (unhandledSource.includes('if (inventoryTracker.isAnyScreenOpen())')) {
+    throw new Error('a delayed close ACK must not make the container-open handler reject the newer Realm window')
+  }
+  const closeOverrideStart = unhandledSource.indexOf(
+    'registerServerbound(ServerboundPackets26_1.CONTAINER_CLOSE, ServerboundBedrockPackets.CONTAINER_CLOSE'
+  )
+  const closeOverrideEnd = unhandledSource.indexOf(
+    'protocol.registerClientbound(ClientboundBedrockPackets.ITEM_STACK_RESPONSE',
+    closeOverrideStart
+  )
+  const closeOverride = unhandledSource.slice(closeOverrideStart, closeOverrideEnd)
+  if (!closeOverride.includes('        }, true);')) {
+    throw new Error('CONTAINER_CLOSE lifecycle registration must explicitly override InventoryPackets')
+  }
+
+  const markPendingStart = trackerSource.indexOf('public void markPendingClose(Container container)')
+  const markPendingEnd = trackerSource.indexOf('public void setCurrentContainerClosed', markPendingStart)
+  const markPending = trackerSource.slice(markPendingStart, markPendingEnd)
+  const closeFallback = markPending.indexOf('this.bridgeExpectChestBlockEvent(container, false)')
+  const overlapGuard = markPending.indexOf('if (this.pendingCloseContainer != null)')
+  if (closeFallback < 0 || overlapGuard < 0 || closeFallback > overlapGuard) {
+    throw new Error('overlapping container closes must schedule the chest lifecycle fallback before ACK arbitration')
+  }
+
+  const closedStart = trackerSource.indexOf('public void setCurrentContainerClosed(boolean sendBedrockClose)')
+  const closedEnd = trackerSource.indexOf('public void closeCurrentForm()', closedStart)
+  const closedMethod = trackerSource.slice(closedStart, closedEnd)
+  const ackStart = closedMethod.indexOf('if (!sendBedrockClose)')
+  const ackEnd = closedMethod.indexOf('            return;', ackStart)
+  const ackBranch = closedMethod.slice(ackStart, ackEnd)
+  if (!ackBranch.includes('this.pendingCloseContainer = null') ||
+      !ackBranch.includes('if (this.currentContainer == null && this.bridgePendingChestCloseSequence == 0L)') ||
+      ackBranch.includes('this.currentContainer = null')) {
+    throw new Error('a delayed client-close ACK must clear only pending state and preserve a newer current container')
+  }
+
+  const setCurrentStart = trackerSource.indexOf('public void setCurrentContainer(Container container)')
+  const setCurrentEnd = trackerSource.indexOf('public Container getPendingCloseContainer()', setCurrentStart)
+  const setCurrent = trackerSource.slice(setCurrentStart, setCurrentEnd)
+  if (setCurrent.includes('if (this.isContainerOpen())') ||
+      !setCurrent.includes('superseded delayed container-close ACK while opening a newer window') ||
+      !setCurrent.includes('this.bridgeChestViewerCount = 0')) {
+    throw new Error('a newer container open must supersede only stale pending-close ACK state and reset its viewer count')
+  }
+
+  if (trackerSource.includes('final boolean opening = data > 0')) {
+    throw new Error('chest BLOCK_EVENT data is a viewer count and must not be classified as an open/close boolean')
+  }
+  const observeStart = trackerSource.indexOf('public boolean bridgeObserveChestBlockEvent')
+  const observeEnd = trackerSource.indexOf('private boolean bridgeResolveDirectionalPendingChestEvent', observeStart)
+  const observeMethod = trackerSource.slice(observeStart, observeEnd)
+  const exactPendingResolution = observeMethod.indexOf('this.bridgePendingChestOpenSequence != 0L')
+  const directionalPendingResolution = observeMethod.indexOf('final boolean resolvedDirectionalOpen')
+  const oldFallbackDedupe = observeMethod.indexOf('this.bridgeSuppressLocallyResolvedChestEvent')
+  if (exactPendingResolution < 0 || directionalPendingResolution < exactPendingResolution ||
+      oldFallbackDedupe < directionalPendingResolution) {
+    throw new Error('the active exact/directional chest lifecycle must claim an interchangeable event before old-fallback dedupe')
+  }
+  const suppressStart = trackerSource.indexOf('private boolean bridgeSuppressLocallyResolvedChestEvent')
+  const suppressEnd = trackerSource.indexOf('private void bridgeRunChestBlockEventFallback', suppressStart)
+  const suppressMethod = trackerSource.slice(suppressStart, suppressEnd)
+  if (!suppressMethod.includes('this.bridgePairedChestPosition(entry.getKey())') ||
+      !suppressMethod.includes('bridgeChestPositionMatches(')) {
+    throw new Error('late-event FIFO dedupe must match either half of a paired chest')
+  }
+
+  const protocolBytecode = run('javap', [
+    '-classpath',
+    viaProxyJar,
+    '-c',
+    '-p',
+    'net.raphimc.viabedrock.protocol.BedrockProtocol'
+  ]).stdout
+  const inventoryRegistration = protocolBytecode.indexOf('InventoryPackets.register')
+  const unhandledRegistration = protocolBytecode.indexOf('UnhandledPackets.register')
+  if (inventoryRegistration < 0 || unhandledRegistration <= inventoryRegistration) {
+    throw new Error('UnhandledPackets must register after InventoryPackets so override=true replaces its close mapper')
+  }
+
+  const trackerBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/protocol/storage/InventoryTracker.class'
+  )]).stdout
+  for (const marker of [
+    'bridgeExpectChestBlockEvent',
+    'bridgeObserveChestBlockEvent',
+    'ClientboundPackets26_1.BLOCK_EVENT',
+    'io/netty/channel/EventLoop.schedule',
+    'ChunkTracker.getPairedChestPosition',
+    'bridgeLocallyResolvedChestCloseEvents',
+    'java/util/Iterator.remove',
+    'java/util/ArrayDeque.addLast',
+    'java/util/ArrayDeque.removeFirst'
+  ]) {
+    if (!trackerBytecode.includes(marker)) throw new Error(`compiled InventoryTracker.class is missing chest fallback bytecode: ${marker}`)
+  }
+  const compiledObserveStart = trackerBytecode.indexOf('public boolean bridgeObserveChestBlockEvent')
+  const compiledObserveEnd = trackerBytecode.indexOf('private boolean bridgeResolveDirectionalPendingChestEvent', compiledObserveStart)
+  const compiledObserve = trackerBytecode.slice(compiledObserveStart, compiledObserveEnd)
+  const compiledExactPending = compiledObserve.indexOf('bridgeChestLifecycleEventMatches')
+  const compiledDirectionalPending = compiledObserve.indexOf('bridgeResolveDirectionalPendingChestEvent')
+  const compiledOldFallbackDedupe = compiledObserve.indexOf('bridgeSuppressLocallyResolvedChestEvent')
+  if (compiledObserveStart < 0 || compiledObserveEnd <= compiledObserveStart || compiledExactPending < 0 ||
+      compiledDirectionalPending < compiledExactPending ||
+      compiledOldFallbackDedupe < compiledDirectionalPending) {
+    throw new Error('compiled chest lifecycle resolves exact/directional current events after old-fallback dedupe')
+  }
+
+  const worldEffectBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/protocol/packet/WorldEffectPackets.class'
+  )]).stdout
+  if (!worldEffectBytecode.includes('InventoryTracker.bridgeObserveChestBlockEvent')) {
+    throw new Error('compiled WorldEffectPackets.class does not dedupe authoritative chest block events')
+  }
+
+  const unhandledBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/protocol/packet/UnhandledPackets.class'
+  )]).stdout
+  for (const marker of [
+    'ServerboundPackets26_1.CONTAINER_CLOSE',
+    'ServerboundBedrockPackets.CONTAINER_CLOSE',
+    'InventoryTracker.markPendingClose'
+  ]) {
+    if (!unhandledBytecode.includes(marker)) throw new Error(`compiled UnhandledPackets.class is missing close lifecycle bytecode: ${marker}`)
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-chest-event-fallback-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const sourcePath = path.join(packageDir, 'ChestBlockEventFallbackSmoke.java')
+    fs.writeFileSync(sourcePath, `
+package net.raphimc.viabedrock.protocol.storage;
+
+import com.viaversion.viaversion.api.minecraft.BlockPosition;
+import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.Map;
+
+public final class ChestBlockEventFallbackSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        final BlockPosition primary = new BlockPosition(10, 64, 10);
+        final BlockPosition paired = new BlockPosition(11, 64, 10);
+        final BlockPosition other = new BlockPosition(12, 64, 10);
+
+        check(InventoryTracker.bridgeChestLifecycleEventMatches(primary, paired, 1, primary, 1),
+                "authoritative open on the primary half satisfies the fallback");
+        check(InventoryTracker.bridgeChestLifecycleEventMatches(primary, paired, 2, paired, 2),
+                "authoritative open on the paired half satisfies the fallback");
+        check(!InventoryTracker.bridgeChestLifecycleEventMatches(primary, paired, 1, primary, 2),
+                "a changed positive viewer count must not consume an exact pending lifecycle");
+        check(!InventoryTracker.bridgeChestLifecycleEventMatches(primary, paired, 0, other, 0),
+                "another chest must not consume a pending close");
+        check(InventoryTracker.bridgeChestViewerCountMoved(0, 2, true),
+                "a multi-viewer 0-to-2 authoritative event must resolve an open");
+        check(InventoryTracker.bridgeChestViewerCountMoved(2, 1, false),
+                "a multi-viewer 2-to-1 event must resolve a close even though data stays positive");
+        check(!InventoryTracker.bridgeChestViewerCountMoved(1, 1, true),
+                "an unchanged positive viewer count is not an open lifecycle");
+        check(!InventoryTracker.bridgeChestViewerCountMoved(1, 2, false),
+                "an increasing viewer count is not a close lifecycle");
+        check(InventoryTracker.bridgeChestViewerCountAfterEvent(2, other, null, primary, 0) == 2,
+                "a late close for chest A must not overwrite chest B's viewer count");
+        check(InventoryTracker.bridgeChestViewerCountAfterEvent(2, other, null, other, 1) == 1,
+                "an event for the opened chest must update its viewer count");
+        final Map<BlockPosition, Map<Integer, ArrayDeque<Long>>> resolvedCloses = new HashMap<>();
+        InventoryTracker.bridgeRememberLocallyResolvedChestEvent(resolvedCloses, primary, 0, 10L);
+        InventoryTracker.bridgeRememberLocallyResolvedChestEvent(resolvedCloses, primary, 0, 15L);
+        InventoryTracker.bridgeRememberLocallyResolvedChestEvent(resolvedCloses, other, 0, 20L);
+        check(resolvedCloses.size() == 2 && resolvedCloses.containsKey(primary) && resolvedCloses.containsKey(other),
+                "a B close must not overwrite the exact late-event dedupe stamp for A");
+        check(resolvedCloses.get(primary).get(Integer.valueOf(0)).size() == 2,
+                "two identical locally-resolved closes for A must retain two dedupe stamps");
+        check(InventoryTracker.bridgeConsumeLocallyResolvedChestEvent(resolvedCloses, primary, 0, 20L),
+                "A's first late authoritative close must consume the first A stamp");
+        check(InventoryTracker.bridgeConsumeLocallyResolvedChestEvent(resolvedCloses, primary, 0, 20L),
+                "A's second late authoritative close must consume the second A stamp");
+        check(!InventoryTracker.bridgeConsumeLocallyResolvedChestEvent(resolvedCloses, primary, 0, 20L),
+                "an unmatched third close for A must remain authoritative");
+        check(resolvedCloses.containsKey(other),
+                "consuming A's echoes must preserve B's independent dedupe stamp");
+        final Map<BlockPosition, Map<Integer, ArrayDeque<Long>>> resolvedOpens = new HashMap<>();
+        InventoryTracker.bridgeRememberLocallyResolvedChestEvent(resolvedOpens, primary, 1, 30L);
+        check(InventoryTracker.bridgeChestLifecycleEventMatches(primary, paired, 1, primary, 1),
+                "a legitimate identical reopen event must resolve the current exact pending open");
+        check(resolvedOpens.get(primary).get(Integer.valueOf(1)).size() == 1,
+                "resolving the current reopen must leave the old fallback stamp for its later twin");
+        check(InventoryTracker.bridgeConsumeLocallyResolvedChestEvent(resolvedOpens, primary, 1, 40L),
+                "the later identical open twin must consume the retained old fallback stamp");
+        final Map<BlockPosition, Map<Integer, ArrayDeque<Long>>> oppositeDirection = new HashMap<>();
+        InventoryTracker.bridgeRememberLocallyResolvedChestEvent(oppositeDirection, primary, 2, 50L);
+        check(InventoryTracker.bridgeChestViewerCountMoved(0, 2, true),
+                "a 0-to-2 current open must claim data=2 before an old 3-to-2 close stamp");
+        check(oppositeDirection.get(primary).get(Integer.valueOf(2)).size() == 1,
+                "an opposite-direction same-data stamp must remain for the later interchangeable twin");
+        check(InventoryTracker.bridgeConsumeLocallyResolvedChestEvent(oppositeDirection, primary, 2, 60L),
+                "the later data=2 twin must consume the retained old close stamp");
+        check(InventoryTracker.bridgeChestDuplicateMatches(primary, paired, 0, paired, 0),
+                "the exact paired-half authoritative echo is a duplicate");
+        check(!InventoryTracker.bridgeChestDuplicateMatches(primary, paired, 1, primary, 2),
+                "a changed viewer count must remain authoritative");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.ChestBlockEventFallbackSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
 function assertAuthoritativeContainerSlotCodec () {
   const source = fs.readFileSync(path.join(patchRoot, 'Container.java'), 'utf8')
   for (const marker of [
@@ -1857,7 +2532,11 @@ assertModernMobEquipmentCodec()
 assertModernMobArmorEquipmentCodec()
 assertCanonicalInventoryInteractionState()
 assertChunkLifecycleFixes()
+assertBoundedDirtyChunkDrain()
+assertUpstreamSafeChunkLighting()
+assertCompleteChunkSendGate()
 assertDeferredDoorInteractionAck()
+assertMiningSwingSuppression()
 assertMissingBlockStateWarningDedupe()
 assertAggregatedStartupBlockStateMappingWarnings()
 assertBedrockBlockStateCompatibility()
@@ -1867,6 +2546,7 @@ assertSubChunkRequestWireLayout()
 assertInitialJoinReadinessLifecycle()
 assertDoubleChestUpgrade()
 assertGenericStorageLifecycle()
+assertChestBlockEventLifecycleFallback()
 assertAuthoritativeContainerSlotCodec()
 assertMouseActionStateMachine()
 assertRenderingBehavior()

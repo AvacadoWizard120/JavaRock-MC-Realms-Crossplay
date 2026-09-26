@@ -70,6 +70,8 @@ import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
 import net.raphimc.viabedrock.protocol.types.BedrockTypes;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 import java.util.logging.Level;
 
 public class ChunkTracker extends StoredObject {
@@ -81,9 +83,12 @@ public class ChunkTracker extends StoredObject {
     private static final float PLAYER_EYE_HEIGHT = 1.62F;
     private static final int SUB_CHUNK_REQUESTS_PER_TICK = 64;
     private static final int MAX_PENDING_SUB_CHUNKS = 256;
-    // ChunkTrackerTickTask runs every two Java ticks. Six tracker ticks keep the
-    // prediction alive for up to roughly 600 ms if Bedrock never changes the door.
-    private static final int DOOR_INTERACTION_ACK_FALLBACK_TICKS = 6;
+    private static final int MAX_DIRTY_CHUNK_SENDS_PER_TICK = 4;
+    private static final long DIRTY_CHUNK_SEND_TIME_BUDGET_NANOS = 8_000_000L;
+    // Use elapsed monotonic time instead of tracker callbacks. Fixed-rate
+    // scheduler callbacks can queue behind terrain translation and then run in
+    // a burst, so a callback count is not a real timeout.
+    private static final long DOOR_INTERACTION_ACK_FALLBACK_NANOS = 5_000_000_000L;
     private static final String[] HORIZONTAL_DIRECTIONS = {"north", "east", "south", "west"};
     private static final int[] HORIZONTAL_X = {0, 1, 0, -1};
     private static final int[] HORIZONTAL_Z = {-1, 0, 1, 0};
@@ -116,15 +121,18 @@ public class ChunkTracker extends StoredObject {
     private final Set<SubChunkPosition> pendingSubChunks = new HashSet<>();
     private final Set<SubChunkPosition> loadedSubChunks = new HashSet<>();
     private final Set<BlockPosition> spawnedItemFrames = new HashSet<>();
-    private final Set<BlockPosition> pendingDoorUpdates = new HashSet<>();
+    // Value = number of authoritative lower-half open-state transitions seen
+    // before the next tracker tick. Keeping the count prevents two rapid
+    // clicks on the same door from being acknowledged by only the first Realm
+    // response when fixed-rate callbacks were delayed.
+    private final Map<BlockPosition, Integer> pendingDoorUpdates = new HashMap<>();
     private final NavigableSet<Integer> readyBlockInteractionAcks = new TreeSet<>();
-    private final NavigableMap<Integer, BlockPosition> pendingDoorInteractionAcks = new TreeMap<>();
-    private final Map<Integer, Integer> pendingDoorInteractionAckTicks = new HashMap<>();
+    private final NavigableMap<Integer, PendingDoorInteractionAck> pendingDoorInteractionAcks = new TreeMap<>();
+    private final AtomicBoolean chunkTrackerTickQueued = new AtomicBoolean();
 
     private int centerX = 0;
     private int centerZ = 0;
     private int radius;
-    private int doorInteractionAckTick;
 
     public ChunkTracker(final UserConnection user, final Dimension dimension) {
         super(user);
@@ -248,8 +256,39 @@ public class ChunkTracker extends StoredObject {
 
     public void deferDoorInteractionAck(final BlockPosition blockPosition, final int sequence) {
         this.readyBlockInteractionAcks.remove(sequence);
-        this.pendingDoorInteractionAcks.put(sequence, blockPosition);
-        this.pendingDoorInteractionAckTicks.put(sequence, this.doorInteractionAckTick);
+        this.pendingDoorInteractionAcks.put(sequence, new PendingDoorInteractionAck(
+                this.lowerDoorPosition(blockPosition),
+                doorInteractionAckDeadlineNanos(System.nanoTime())
+        ));
+        ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                "[BedrockRealmBridge] deferred door block acknowledgement" +
+                        " sequence=" + sequence + " position=" + blockPosition);
+    }
+
+    static long doorInteractionAckDeadlineNanos(final long nowNanos) {
+        return nowNanos + DOOR_INTERACTION_ACK_FALLBACK_NANOS;
+    }
+
+    static boolean doorInteractionAckDeadlineReached(final long nowNanos, final long deadlineNanos) {
+        // System.nanoTime may wrap; subtraction remains correct for intervals
+        // shorter than half its signed range.
+        return nowNanos - deadlineNanos >= 0L;
+    }
+
+    static boolean tryAcquireChunkTrackerTick(final AtomicBoolean gate) {
+        return gate.compareAndSet(false, true);
+    }
+
+    static void releaseChunkTrackerTick(final AtomicBoolean gate) {
+        gate.set(false);
+    }
+
+    public boolean tryQueueTick() {
+        return tryAcquireChunkTrackerTick(this.chunkTrackerTickQueued);
+    }
+
+    public void completeQueuedTick() {
+        releaseChunkTrackerTick(this.chunkTrackerTickQueued);
     }
 
     private int getRawJavaBlockState(final BlockPosition blockPosition) {
@@ -548,12 +587,14 @@ public class ChunkTracker extends StoredObject {
     }
 
     public void sendChunkInNextTick(final int chunkX, final int chunkZ) {
+        final BedrockChunk chunk = this.getChunk(chunkX, chunkZ);
+        if (chunk == null || !isChunkFullyLoaded(chunk)) return;
         this.dirtyChunks.add(ChunkPosition.chunkKey(chunkX, chunkZ));
     }
 
     public void sendChunk(final int chunkX, final int chunkZ) {
         final BedrockChunk chunk = this.getChunk(chunkX, chunkZ);
-        if (chunk == null) {
+        if (chunk == null || !isChunkFullyLoaded(chunk)) {
             return;
         }
         final long chunkKey = ChunkPosition.chunkKey(chunkX, chunkZ);
@@ -572,26 +613,22 @@ public class ChunkTracker extends StoredObject {
             this.deferredInitialChunkSections.put(chunkKey, requiredSections);
             return;
         }
-        if (firstSend) this.invalidateBlockLightAround(chunkX, chunkZ);
-
         final Chunk remappedChunk = this.remapChunk(chunk);
-        final BlockLightData skyLight = this.getSkyLight(chunk);
-        final BlockLightData blockLight = this.getBlockLight(chunk);
 
         final PacketWrapper levelChunkWithLight = PacketWrapper.create(ClientboundPackets26_1.LEVEL_CHUNK_WITH_LIGHT, this.user());
+        final int lightSectionCount = remappedChunk.getSections().length + 2;
+        final BitSet lightMask = new BitSet(lightSectionCount);
+        lightMask.set(0, lightSectionCount);
         levelChunkWithLight.write(this.chunkType, remappedChunk); // chunk
-        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, skyLight.mask()); // sky light mask
-        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, blockLight.mask()); // block light mask
-        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, skyLight.emptyMask()); // empty sky light mask
-        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, blockLight.emptyMask()); // empty block light mask
-        levelChunkWithLight.write(Types.VAR_INT, skyLight.arrays().length); // sky light length
-        for (byte[] skyLightArray : skyLight.arrays()) {
-            levelChunkWithLight.write(Types.BYTE_ARRAY_PRIMITIVE, skyLightArray);
+        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, lightMask.toLongArray()); // sky light mask
+        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, new long[0]); // block light mask
+        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, new long[0]); // empty sky light mask
+        levelChunkWithLight.write(Types.LONG_ARRAY_PRIMITIVE, lightMask.toLongArray()); // empty block light mask
+        levelChunkWithLight.write(Types.VAR_INT, lightSectionCount); // sky light length
+        for (int i = 0; i < lightSectionCount; i++) {
+            levelChunkWithLight.write(Types.BYTE_ARRAY_PRIMITIVE, FULL_LIGHT.clone()); // sky light
         }
-        levelChunkWithLight.write(Types.VAR_INT, blockLight.arrays().length); // block light length
-        for (byte[] blockLightArray : blockLight.arrays()) {
-            levelChunkWithLight.write(Types.BYTE_ARRAY_PRIMITIVE, blockLightArray);
-        }
+        levelChunkWithLight.write(Types.VAR_INT, 0); // block light length
         levelChunkWithLight.send(BedrockProtocol.class);
         this.syncItemFramesAfterChunkSend(chunkKey, this.pendingItemFramesByChunk.remove(chunkKey));
         if (firstSend) {
@@ -633,17 +670,10 @@ public class ChunkTracker extends StoredObject {
     }
 
     public void tick() {
-        this.doorInteractionAckTick++;
         this.flushPendingDoorUpdates();
         this.flushExpiredDoorInteractionAcks();
         this.scheduleInitialPlayerChunkAfterSpawn();
-
-        final long[] dirtyChunks = this.dirtyChunks.toLongArray();
-        this.dirtyChunks.clear();
-        for (long dirtyChunk : dirtyChunks) {
-            final ChunkPosition chunkPos = new ChunkPosition(dirtyChunk);
-            this.sendChunk(chunkPos.chunkX(), chunkPos.chunkZ());
-        }
+        this.drainDirtyChunks();
 
         if (this.user().get(EntityTracker.class) == null || !this.user().get(EntityTracker.class).getClientPlayer().isInitiallySpawned()) {
             return;
@@ -685,6 +715,78 @@ public class ChunkTracker extends StoredObject {
         subChunkRequest.write(BedrockTypes.INT_LE, basePosition.y());
         subChunkRequest.write(BedrockTypes.INT_LE, basePosition.z());
         subChunkRequest.sendToServer(BedrockProtocol.class);
+    }
+
+    private void drainDirtyChunks() {
+        if (this.dirtyChunks.isEmpty()) return;
+
+        int priorityChunkX = this.centerX;
+        int priorityChunkZ = this.centerZ;
+        final EntityTracker entityTracker = this.user().get(EntityTracker.class);
+        if (entityTracker != null && entityTracker.getClientPlayer() != null) {
+            final Position3f playerPosition = entityTracker.getClientPlayer().position();
+            priorityChunkX = (int) Math.floor(playerPosition.x()) >> 4;
+            priorityChunkZ = (int) Math.floor(playerPosition.z()) >> 4;
+        }
+
+        final long startedAtNanos = System.nanoTime();
+        int sentChunkCount = 0;
+        while (!this.dirtyChunks.isEmpty()
+                && hasDirtyChunkSendBudget(sentChunkCount, System.nanoTime() - startedAtNanos)) {
+            final long nextChunkKey = selectClosestDirtyChunk(this.dirtyChunks, priorityChunkX, priorityChunkZ);
+            // Selecting the closest column is normally cheap, but include that
+            // scan in the time budget before beginning another indivisible send.
+            if (!hasDirtyChunkSendBudget(sentChunkCount, System.nanoTime() - startedAtNanos)) break;
+            if (!this.dirtyChunks.remove(nextChunkKey)) continue;
+
+            final ChunkPosition chunkPosition = new ChunkPosition(nextChunkKey);
+            this.sendChunk(chunkPosition.chunkX(), chunkPosition.chunkZ());
+            sentChunkCount++;
+        }
+    }
+
+    static boolean hasDirtyChunkSendBudget(final int sentChunkCount, final long elapsedNanos) {
+        // sendChunk is indivisible. Always allow one column to make progress,
+        // then do not begin more work after either budget has been exhausted.
+        return sentChunkCount < MAX_DIRTY_CHUNK_SENDS_PER_TICK
+                && (sentChunkCount == 0 || elapsedNanos < DIRTY_CHUNK_SEND_TIME_BUDGET_NANOS);
+    }
+
+    static long selectClosestDirtyChunk(final LongSet dirtyChunks, final int priorityChunkX, final int priorityChunkZ) {
+        long closestChunkKey = 0L;
+        int closestChebyshevDistance = Integer.MAX_VALUE;
+        int closestManhattanDistance = Integer.MAX_VALUE;
+        int closestChunkX = Integer.MAX_VALUE;
+        int closestChunkZ = Integer.MAX_VALUE;
+        for (long chunkKey : dirtyChunks) {
+            final ChunkPosition chunkPosition = new ChunkPosition(chunkKey);
+            final int chunkX = chunkPosition.chunkX();
+            final int chunkZ = chunkPosition.chunkZ();
+            final int deltaX = Math.abs(chunkX - priorityChunkX);
+            final int deltaZ = Math.abs(chunkZ - priorityChunkZ);
+            final int chebyshevDistance = Math.max(deltaX, deltaZ);
+            final int manhattanDistance = deltaX + deltaZ;
+            if (chebyshevDistance < closestChebyshevDistance
+                    || chebyshevDistance == closestChebyshevDistance && manhattanDistance < closestManhattanDistance
+                    || chebyshevDistance == closestChebyshevDistance && manhattanDistance == closestManhattanDistance
+                    && (chunkX < closestChunkX || chunkX == closestChunkX && chunkZ < closestChunkZ)) {
+                closestChunkKey = chunkKey;
+                closestChebyshevDistance = chebyshevDistance;
+                closestManhattanDistance = manhattanDistance;
+                closestChunkX = chunkX;
+                closestChunkZ = chunkZ;
+            }
+        }
+        return closestChunkKey;
+    }
+
+    static boolean isChunkFullyLoaded(final BedrockChunk chunk) {
+        // Requested sections keep pending updates until their successful
+        // subchunk response is merged. Known-air sections are already resolved.
+        for (BedrockChunkSection section : chunk.getSections()) {
+            if (section.hasPendingBlockUpdates()) return false;
+        }
+        return true;
     }
 
     private boolean shouldDeferInitialPlayerChunkSend(final int chunkX, final int chunkZ) {
@@ -1163,16 +1265,32 @@ public class ChunkTracker extends StoredObject {
         final BlockPosition lowerPosition = doorState != null && doorState.hasProperty("half", "upper")
                 ? new BlockPosition(position.x(), position.y() - 1, position.z())
                 : position;
-        this.pendingDoorUpdates.add(lowerPosition);
+        // Java's effective open state comes from the lower half. Count exactly
+        // that transition; upper-half/hinge neighbor updates still request a
+        // paired redraw but cannot resolve another interaction generation.
+        final boolean lowerOpenTransition = doorState != null
+                && doorState.hasProperty("half", "lower")
+                && BridgeBlockRendering.isDoor(previousState)
+                && BridgeBlockRendering.isDoor(nextState)
+                && !Objects.equals(previousState.properties().get("open"), nextState.properties().get("open"));
+        this.pendingDoorUpdates.merge(lowerPosition, lowerOpenTransition ? 1 : 0, Integer::sum);
+    }
+
+    private BlockPosition lowerDoorPosition(final BlockPosition position) {
+        final BlockState state = this.javaBlockState(this.getRawJavaBlockState(position));
+        return BridgeBlockRendering.isDoor(state) && state.hasProperty("half", "upper")
+                ? new BlockPosition(position.x(), position.y() - 1, position.z())
+                : position;
     }
 
     private void flushPendingDoorUpdates() {
         if (this.pendingDoorUpdates.isEmpty()) return;
 
-        final Set<BlockPosition> doorUpdates = new HashSet<>(this.pendingDoorUpdates);
+        final Map<BlockPosition, Integer> doorUpdates = new HashMap<>(this.pendingDoorUpdates);
         this.pendingDoorUpdates.clear();
-        for (BlockPosition lowerPosition : doorUpdates) {
-            if (this.sendPairedDoorUpdate(lowerPosition)) continue;
+        for (Map.Entry<BlockPosition, Integer> doorUpdate : doorUpdates.entrySet()) {
+            final BlockPosition lowerPosition = doorUpdate.getKey();
+            if (this.sendPairedDoorUpdate(lowerPosition, doorUpdate.getValue())) continue;
 
             final int chunkX = lowerPosition.x() >> 4;
             final int chunkZ = lowerPosition.z() >> 4;
@@ -1181,7 +1299,13 @@ public class ChunkTracker extends StoredObject {
         }
     }
 
-    private boolean sendPairedDoorUpdate(final BlockPosition lowerPosition) {
+    private boolean sendPairedDoorUpdate(final BlockPosition lowerPosition, final int observedTransitions) {
+        if (!this.sendPairedDoorState(lowerPosition)) return false;
+        this.acknowledgeDoorInteractions(lowerPosition, observedTransitions);
+        return true;
+    }
+
+    private boolean sendPairedDoorState(final BlockPosition lowerPosition) {
         final BlockPosition upperPosition = new BlockPosition(lowerPosition.x(), lowerPosition.y() + 1, lowerPosition.z());
         final BlockState lowerState = this.javaBlockState(this.getRawJavaBlockState(lowerPosition));
         final BlockState upperState = this.javaBlockState(this.getRawJavaBlockState(upperPosition));
@@ -1194,39 +1318,71 @@ public class ChunkTracker extends StoredObject {
 
         PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition, lowerJavaBlockState);
         PacketFactory.sendJavaBlockUpdate(this.user(), upperPosition, upperJavaBlockState);
-        this.acknowledgeDoorInteraction(lowerPosition, upperPosition);
         return true;
     }
 
-    private void acknowledgeDoorInteraction(final BlockPosition lowerPosition, final BlockPosition upperPosition) {
-        boolean resolvedInteraction = false;
-        final Iterator<Map.Entry<Integer, BlockPosition>> iterator = this.pendingDoorInteractionAcks.entrySet().iterator();
-        while (iterator.hasNext()) {
-            final Map.Entry<Integer, BlockPosition> entry = iterator.next();
-            if (lowerPosition.equals(entry.getValue()) || upperPosition.equals(entry.getValue())) {
-                this.readyBlockInteractionAcks.add(entry.getKey());
-                this.pendingDoorInteractionAckTicks.remove(entry.getKey());
-                iterator.remove();
-                resolvedInteraction = true;
-            }
+    private void acknowledgeDoorInteractions(final BlockPosition lowerPosition, final int observedTransitions) {
+        final List<Integer> resolvedSequences = resolveMatchingInteractionAcks(
+                this.pendingDoorInteractionAcks,
+                this.readyBlockInteractionAcks,
+                pending -> lowerPosition.equals(pending.lowerPosition()),
+                observedTransitions
+        );
+        for (int sequence : resolvedSequences) {
+            ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                    "[BedrockRealmBridge] resolved door block acknowledgement" +
+                            " sequence=" + sequence + " position=" + lowerPosition);
         }
-        if (resolvedInteraction) this.flushReadyBlockInteractionAcks();
+        if (!resolvedSequences.isEmpty()) this.flushReadyBlockInteractionAcks();
+    }
+
+    static <T> List<Integer> resolveMatchingInteractionAcks(
+            final NavigableMap<Integer, T> pending,
+            final NavigableSet<Integer> ready,
+            final Predicate<T> matches,
+            final int maxResolved) {
+        if (maxResolved <= 0 || pending.isEmpty()) return List.of();
+
+        final List<Integer> resolved = new ArrayList<>(Math.min(maxResolved, pending.size()));
+        final Iterator<Map.Entry<Integer, T>> iterator = pending.entrySet().iterator();
+        while (iterator.hasNext() && resolved.size() < maxResolved) {
+            final Map.Entry<Integer, T> entry = iterator.next();
+            if (!matches.test(entry.getValue())) continue;
+            ready.add(entry.getKey());
+            resolved.add(entry.getKey());
+            iterator.remove();
+        }
+        return resolved;
     }
 
     private void flushExpiredDoorInteractionAcks() {
+        final long nowNanos = System.nanoTime();
         boolean expiredInteraction = false;
-        final Iterator<Map.Entry<Integer, BlockPosition>> iterator = this.pendingDoorInteractionAcks.entrySet().iterator();
+        final Iterator<Map.Entry<Integer, PendingDoorInteractionAck>> iterator = this.pendingDoorInteractionAcks.entrySet().iterator();
         while (iterator.hasNext()) {
-            final Map.Entry<Integer, BlockPosition> entry = iterator.next();
-            final int queuedTick = this.pendingDoorInteractionAckTicks.getOrDefault(entry.getKey(), this.doorInteractionAckTick);
-            if (this.doorInteractionAckTick - queuedTick >= DOOR_INTERACTION_ACK_FALLBACK_TICKS) {
-                this.readyBlockInteractionAcks.add(entry.getKey());
-                this.pendingDoorInteractionAckTicks.remove(entry.getKey());
-                iterator.remove();
-                expiredInteraction = true;
-            }
+            final Map.Entry<Integer, PendingDoorInteractionAck> entry = iterator.next();
+            final PendingDoorInteractionAck pending = entry.getValue();
+            if (!doorInteractionAckDeadlineReached(nowNanos, pending.deadlineNanos())) continue;
+
+            // Restore both halves from the current authoritative cache before
+            // releasing Java's cumulative prediction acknowledgement. This
+            // keeps a genuinely unanswered/denied interaction coherent too.
+            this.sendAuthoritativeDoorFallbackState(pending.lowerPosition());
+            iterator.remove();
+            this.readyBlockInteractionAcks.add(entry.getKey());
+            expiredInteraction = true;
+            ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                    "[BedrockRealmBridge] timed out door block acknowledgement after 5s" +
+                            " sequence=" + entry.getKey() + " position=" + pending.lowerPosition());
         }
         if (expiredInteraction) this.flushReadyBlockInteractionAcks();
+    }
+
+    private void sendAuthoritativeDoorFallbackState(final BlockPosition lowerPosition) {
+        final BlockPosition upperPosition = new BlockPosition(
+                lowerPosition.x(), lowerPosition.y() + 1, lowerPosition.z());
+        PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition, this.getJavaBlockState(lowerPosition));
+        PacketFactory.sendJavaBlockUpdate(this.user(), upperPosition, this.getJavaBlockState(upperPosition));
     }
 
     private void flushReadyBlockInteractionAcks() {
@@ -1247,6 +1403,9 @@ public class ChunkTracker extends StoredObject {
         if (readySequences.isEmpty()) return null;
         if (deferredSequences.isEmpty()) return readySequences.last();
         return readySequences.lower(deferredSequences.first());
+    }
+
+    private record PendingDoorInteractionAck(BlockPosition lowerPosition, long deadlineNanos) {
     }
 
     private void syncItemFramesAfterChunkSend(final long chunkKey, final Set<BlockPosition> currentFrames) {

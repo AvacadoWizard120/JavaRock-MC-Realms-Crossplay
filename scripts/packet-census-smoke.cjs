@@ -6,6 +6,7 @@ const os = require('os')
 const path = require('path')
 const {
   DEFAULT_EVENT_ALWAYS_PACKET_NAMES,
+  DEFAULT_FOCUS_TRACE_PACKET_NAMES,
   PacketCensus,
   summarizePacketForCensus
 } = require('../src/packetCensus')
@@ -180,6 +181,9 @@ assert.strictEqual(softEnumSummary.action_type, 'add')
 assert.strictEqual(summarizePacketForCensus('set_commands_enabled', { enabled: true }).enabled, true)
 for (const name of ['command_request', 'command_output', 'update_soft_enum', 'set_commands_enabled']) {
   assert(DEFAULT_EVENT_ALWAYS_PACKET_NAMES.has(name), `${name} should always be written to the event log`)
+}
+for (const name of ['player_action', 'update_block', 'block_event', 'level_event', 'level_sound_event', 'animate']) {
+  assert(DEFAULT_FOCUS_TRACE_PACKET_NAMES.has(name), `${name} should be retained in focused interaction traces`)
 }
 
 function loadDatabaseSync () {

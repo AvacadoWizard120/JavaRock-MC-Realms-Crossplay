@@ -418,6 +418,11 @@ public class ClientPlayerPackets {
                     clientPlayer.addAuthInputBlockAction(new ClientPlayerEntity.AuthInputBlockAction(PlayerActionType.StartDestroyBlock, position, direction.ordinal()));
                 }
                 case ABORT_DESTROY_BLOCK -> {
+                    // Java follows an aborted mining action with a final SWING.
+                    // Once blockBreakingInfo is cleared that packet otherwise
+                    // looks like an air attack and Bedrock plays the empty-hit
+                    // sound. Consume that lifecycle tail just like STOP does.
+                    clientPlayer.cancelNextSwingPacket();
                     clientPlayer.setBlockBreakingInfo(null);
                     clientPlayer.addAuthInputBlockAction(new ClientPlayerEntity.AuthInputBlockAction(PlayerActionType.AbortDestroyBlock, position, 0/*TODO: Figure this value out*/));
                 }
@@ -744,19 +749,34 @@ public class ClientPlayerPackets {
                 return;
             }
 
+            // START_DESTROY_BLOCK already sends the one Bedrock swing which
+            // begins the mining animation. Modern Java clients keep emitting
+            // SWING while the attack button remains held; translating those as
+            // Bedrock Attack animations makes the Realm play an empty-hit sound
+            // on every mining tick. Keep the local Java arm animation, but do
+            // not forward duplicate attack animations while a block is active.
+            if (clientPlayer.blockBreakingInfo() != null) {
+                wrapper.cancel();
+                // Client-authoritative Bedrock worlds still use each Java
+                // mining swing to advance crack progress. Suppress only the
+                // standalone Attack animation/sound, not that block action.
+                if (!gameSession.isBlockBreakingServerAuthoritative()) {
+                    final ClientPlayerEntity.BlockBreakingInfo blockBreakingInfo = clientPlayer.blockBreakingInfo();
+                    clientPlayer.addAuthInputBlockAction(new ClientPlayerEntity.AuthInputBlockAction(
+                            PlayerActionType.CrackBlock,
+                            blockBreakingInfo.position(),
+                            blockBreakingInfo.direction().ordinal()
+                    ));
+                }
+                return;
+            }
+
             wrapper.write(Types.UNSIGNED_BYTE, (short) AnimatePacketPayload_Action.Swing.getValue()); // action
             wrapper.write(BedrockTypes.UNSIGNED_VAR_LONG, clientPlayer.runtimeId()); // entity runtime id
             wrapper.write(BedrockTypes.FLOAT_LE, 0F); // data
             wrapper.write(BedrockTypes.OPTIONAL_STRING, ActorSwingSource.Attack.name().toLowerCase(Locale.ROOT)); // swing source // TODO: 1.21.130
 
-            if (clientPlayer.blockBreakingInfo() != null) {
-                if (!gameSession.isBlockBreakingServerAuthoritative()) {
-                    final ClientPlayerEntity.BlockBreakingInfo blockBreakingInfo = clientPlayer.blockBreakingInfo();
-                    clientPlayer.addAuthInputBlockAction(new ClientPlayerEntity.AuthInputBlockAction(PlayerActionType.CrackBlock, blockBreakingInfo.position(), blockBreakingInfo.direction().ordinal()));
-                }
-            } else {
-                clientPlayer.addAuthInputData(PlayerAuthInputPacketPayload_InputData.MissedSwing);
-            }
+            clientPlayer.addAuthInputData(PlayerAuthInputPacketPayload_InputData.MissedSwing);
         });
     }
 
