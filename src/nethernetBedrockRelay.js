@@ -1672,19 +1672,27 @@ function makeOpenInventoryInteractPacket (runtimeEntityId = '1') {
 }
 
 
+// ViaBedrock's native Java inventory path starts at -3 and walks downward by
+// two. Keep relay-synthesized requests far away so an outstanding native click
+// cannot be overwritten in the shared pending-request map.
+const BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_START = -1000000001
+const BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_FLOOR = -2147483647
+
 function bridgeItemStackRequestIdState (owner) {
   if (owner && typeof owner === 'object') {
-    if (!Number.isFinite(owner.bridgeNextItemStackRequestId)) owner.bridgeNextItemStackRequestId = -101
+    if (!Number.isFinite(owner.bridgeNextItemStackRequestId)) owner.bridgeNextItemStackRequestId = BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_START
     return owner
   }
-  return { bridgeNextItemStackRequestId: -101 }
+  return { bridgeNextItemStackRequestId: BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_START }
 }
 
 function nextBridgeItemStackRequestId (owner) {
   const state = bridgeItemStackRequestIdState(owner)
   const id = state.bridgeNextItemStackRequestId
   state.bridgeNextItemStackRequestId -= 2
-  if (state.bridgeNextItemStackRequestId > -1) state.bridgeNextItemStackRequestId = -101
+  if (state.bridgeNextItemStackRequestId < BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_FLOOR || state.bridgeNextItemStackRequestId > -1) {
+    state.bridgeNextItemStackRequestId = BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_START
+  }
   return id
 }
 
@@ -1893,7 +1901,7 @@ function bridgeSlotContainerId (slotDescriptor = {}) {
   return firstNonNull(slotDescriptor?.slot_type?.container_id, slotDescriptor?.container_id, slotDescriptor?.containerId)
 }
 
-const BRIDGE_OWN_INVENTORY_CONTAINERS = new Set(['cursor', 'hotbar', 'inventory', 'crafting_input', 'creative_output'])
+const BRIDGE_OWN_INVENTORY_CONTAINERS = new Set(['cursor', 'hotbar', 'inventory', 'hotbar_and_inventory', 'fixed_inventory', 'crafting_input', 'creative_output'])
 
 function bridgeIsOwnInventorySlot (slotDescriptor = {}) {
   return BRIDGE_OWN_INVENTORY_CONTAINERS.has(bridgeSlotContainerId(slotDescriptor))
@@ -2562,11 +2570,12 @@ function bridgeAliasedItemStackRequestParams (owner, params = {}) {
   return out
 }
 
-function bridgeRewriteSlotStackIdFromTrackedState (owner, slot) {
+function bridgeRewriteSlotStackIdFromTrackedState (owner, slot, excludedRequestId = null) {
   if (!bridgeIsOwnInventorySlot(slot)) return false
   const trustedStackId = bridgeTrackedStackIdForLocation(owner, slot)
   const numericTrustedStackId = numberOrDefault(trustedStackId, 0)
   if (!numericTrustedStackId) return false
+  if (excludedRequestId != null && numericTrustedStackId === numberOrDefault(excludedRequestId, 0)) return false
   if (numberOrDefault(slot.stack_id, 0) === numericTrustedStackId) return false
   slot.stack_id = numericTrustedStackId
   return true
@@ -2646,7 +2655,7 @@ function bridgeSanitizedItemStackRequestParams (owner, params = {}) {
       const destination = action?.destination
 
       if (actionType === 'take' && bridgeSlotContainerId(destination) === 'cursor') {
-        if (bridgeRewriteSlotStackIdFromTrackedState(owner, source)) changed = true
+        if (bridgeRewriteSlotStackIdFromTrackedState(owner, source, requestId)) changed = true
 
         const sentCursorStackId = numberOrDefault(destination.stack_id, 0)
         const trustedCursorStackId = numberOrDefault(bridgeTrackedStackIdForLocation(owner, destination), 0)
@@ -2668,7 +2677,7 @@ function bridgeSanitizedItemStackRequestParams (owner, params = {}) {
       }
 
       if (actionType === 'place' && bridgeSlotContainerId(source) === 'cursor' && destination?.slot_type?.container_id) {
-        if (bridgeRewriteSlotStackIdFromTrackedState(owner, source)) changed = true
+        if (bridgeRewriteSlotStackIdFromTrackedState(owner, source, requestId)) changed = true
 
         // External container stack IDs come from the open Bedrock window and are
         // authoritative. The player-inventory tracker has no window identity and
@@ -2723,7 +2732,6 @@ function bridgeItemStackRequestSourcePreflightDropDiagnosis (owner, params = {})
         if (!slotKey) continue
 
         const sentStackId = bridgeSlotStackId(slot.value, 0)
-        if (!sentStackId) continue
 
         // A matching negative id is authoritative for this in-flight chain even
         // though the last acknowledged slot state still carries a positive id.
@@ -2734,6 +2742,20 @@ function bridgeItemStackRequestSourcePreflightDropDiagnosis (owner, params = {})
         if (trackedStackId == null) continue
 
         const numericTrackedStackId = numberOrDefault(trackedStackId, 0)
+        // Legacy move rewriting predicts the post-request slot state before the
+        // synthesized packet re-enters this relay path. When that prediction is
+        // the request currently being validated, it is not an acknowledged
+        // Realm stack id and must not invalidate the packet's real source id.
+        const numericRequestId = numberOrDefault(requestId, 0)
+        if (numericRequestId !== 0 && numericTrackedStackId === numericRequestId && sentStackId !== numericTrackedStackId) continue
+        if (!sentStackId) {
+          // Empty is meaningful on both sides of Swap. If the last trusted
+          // snapshot still has an occupied stack here, forwarding zero lets a
+          // stale Java prediction reach the Realm as FailedToValidateSrc/Dst.
+          // A pending modern request may legitimately be emptying the slot, so
+          // preserve that request chain and let the Realm validate it in order.
+          if (actionType !== 'swap' || numericTrackedStackId === 0 || pendingPredictedStackIds.has(slotKey)) continue
+        }
         if (numericTrackedStackId === sentStackId) continue
 
         return {
@@ -3501,7 +3523,7 @@ function bridgeModernRequestsForLegacyMoveCommit (owner, sourceAction, destinati
   const takeRequestId = nextBridgeItemStackRequestId(owner)
   const placeRequestId = nextBridgeItemStackRequestId(owner)
   bridgeRememberPredictedStackId(owner, sourceAction.slot, sourceAction.newCount > 0 ? sourceStackId : 0)
-  bridgeRememberPredictedStackId(owner, bridgeCursorSlotDescriptor(), sourceStackId)
+  bridgeRememberPredictedStackId(owner, bridgeCursorSlotDescriptor(), takeRequestId)
 
   return [{
     name: 'item_stack_request',
@@ -3530,10 +3552,17 @@ function shouldRewriteLegacyInventoryTransactionsToItemStackRequests () {
 
 function shouldRewriteLegacyCraftingTransactionsToItemStackRequests () {
   // v0.3.39 turned on the subset that Bedrock requires for the player 2x2
-  // crafting grid. The default path now also covers cursor pickup/place because
-  // those commits must be server-authoritative before the Java cursor feels real.
-  // Keep generic non-cursor container rewriting behind the lab flag.
+  // crafting grid. The production path now covers all trusted player-inventory
+  // moves (including cursor and quick-move) because every one must be accepted
+  // before Java predicts another click. External containers remain excluded;
+  // keep generic cross-container rewriting behind the lab flag.
   return process.env.NETHERNET_RELAY_REWRITE_CRAFTING_TO_STACK_REQUESTS !== 'false'
+}
+
+function bridgeLegacyInventoryRewriteMode () {
+  if (shouldRewriteLegacyInventoryTransactionsToItemStackRequests()) return 'all'
+  if (shouldRewriteLegacyCraftingTransactionsToItemStackRequests()) return 'player_inventory_safe'
+  return null
 }
 
 function bridgeModernItemStackRequestsForLegacyInventoryTransaction (owner, name, params = {}, options = {}) {
@@ -3561,7 +3590,7 @@ function bridgeModernItemStackRequestsForLegacyInventoryTransaction (owner, name
         if (!touchesCraftingGrid && !placesSyntheticCraftCursor) return null
       }
       if (mode === 'cursor_and_crafting' && !bridgeTransactionTouchesCraftingGrid([source, dest]) && !bridgeTransactionIsCursorToOrFromOwnInventorySlot([source, dest])) return null
-      if (mode === 'player_inventory_safe' && !bridgeTransactionTouchesCraftingGrid([source, dest]) && !bridgeTransactionTouchesOnlyOwnInventorySlots([source, dest])) return null
+      if (mode === 'player_inventory_safe' && !bridgeTransactionTouchesCraftingGrid([source, dest]) && !bridgeTransactionTouchesOnlyPlayerInventoryState([source, dest])) return null
       return bridgeModernRequestsForLegacyMoveCommit(owner, source, dest, { requireTrustedStackIds: mode !== 'all' })
     }
   }
@@ -4039,7 +4068,7 @@ class ViaBedrockRelayPlayer extends Player {
     this.localInventoryScreenShimAutoCloseTimer = null
     this.warnedOpenInventoryInteractIsReadOnly = false
     this.externalContainerWindowId = null
-    this.bridgeNextItemStackRequestId = -3
+    this.bridgeNextItemStackRequestId = BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_START
     this.bridgePredictedItemStackIds = new Map()
     this.bridgeAuthoritativeItemsByStackId = new Map()
     this.bridgeCraftingRecipeDb = null
@@ -6784,9 +6813,7 @@ class ViaBedrockRelayPlayer extends Player {
       params = this.normalizeLegacyOwnInventoryTransactionWindowIds(params)
     }
 
-    const rewriteMode = shouldRewriteLegacyInventoryTransactionsToItemStackRequests()
-      ? 'all'
-      : (shouldRewriteLegacyCraftingTransactionsToItemStackRequests() ? 'cursor_and_crafting' : null)
+    const rewriteMode = bridgeLegacyInventoryRewriteMode()
     if (rewriteMode) {
       const rewrittenRequests = bridgeModernItemStackRequestsForLegacyInventoryTransaction(this, name, params, { mode: rewriteMode })
       if (Array.isArray(rewrittenRequests) && rewrittenRequests.length) {
@@ -7976,6 +8003,7 @@ function startNetherNetBedrockRelay (config, info, options = {}) {
 }
 
 module.exports = {
+  BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_START,
   NetherNetRealmRelay,
   ViaBedrockRelayPlayer,
   emptyCreativeContentForLocalViaBedrock,
@@ -8015,6 +8043,7 @@ module.exports = {
   normalizeItemStackResponseForLocalViaBedrock,
   shouldRewriteLegacyInventoryTransactionsToItemStackRequests,
   shouldRewriteLegacyCraftingTransactionsToItemStackRequests,
+  bridgeLegacyInventoryRewriteMode,
   bridgeAttachItemStackRequestToPlayerAuthInput,
   shouldEmbedSyntheticItemStackRequestInNextAuthInput,
   bridgeModernItemStackRequestsForLegacyInventoryTransaction,

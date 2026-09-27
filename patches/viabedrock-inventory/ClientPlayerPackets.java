@@ -407,6 +407,7 @@ public class ClientPlayerPackets {
 
             switch (action) {
                 case START_DESTROY_BLOCK -> {
+                    clientPlayer.clearCompletedMiningSwingSuppression();
                     clientPlayer.sendSwingPacketToServer();
                     clientPlayer.cancelNextSwingPacket();
                     clientPlayer.setBlockBreakingInfo(new ClientPlayerEntity.BlockBreakingInfo(position, direction));
@@ -427,7 +428,12 @@ public class ClientPlayerPackets {
                     clientPlayer.addAuthInputBlockAction(new ClientPlayerEntity.AuthInputBlockAction(PlayerActionType.AbortDestroyBlock, position, 0/*TODO: Figure this value out*/));
                 }
                 case STOP_DESTROY_BLOCK -> {
+                    final int brokenJavaBlockState = chunkTracker.getJavaBlockState(position);
                     clientPlayer.cancelNextSwingPacket();
+                    // Java emits four more SWING packets after completing a
+                    // survival break. They belong to the completed mining
+                    // lifecycle, not four new attacks against empty air.
+                    clientPlayer.suppressCompletedMiningSwings();
                     clientPlayer.setBlockBreakingInfo(null);
 
                     if (!gameSession.isBlockBreakingServerAuthoritative()) {
@@ -440,6 +446,11 @@ public class ClientPlayerPackets {
                         clientPlayer.addAuthInputBlockAction(new ClientPlayerEntity.AuthInputBlockAction(PlayerActionType.AbortDestroyBlock, position, 0));
                     }
 
+                    // Bedrock predicts its own block-destroy particles and
+                    // sound, so a Realm does not echo a level event for a
+                    // successful predicted break. Recreate Java's normal 2001
+                    // effect with the block state captured before local air.
+                    bridgeSendJavaBlockBreakEffect(wrapper.user(), position, brokenJavaBlockState);
                     chunkTracker.handleBlockChange(position, 0, chunkTracker.bedrockAirId());
                     PacketFactory.sendJavaBlockUpdate(wrapper.user(), position, ProtocolConstants.JAVA_AIR_ID);
                 }
@@ -744,7 +755,7 @@ public class ClientPlayerPackets {
             final GameSessionStorage gameSession = wrapper.user().get(GameSessionStorage.class);
             final ClientPlayerEntity clientPlayer = wrapper.user().get(EntityTracker.class).getClientPlayer();
             final InteractionHand hand = InteractionHand.values()[wrapper.read(Types.VAR_INT)]; // hand
-            if (hand != InteractionHand.MAIN_HAND || clientPlayer.checkCancelSwingPacket()) {
+            if (hand != InteractionHand.MAIN_HAND || clientPlayer.checkCancelSwingPacket() || clientPlayer.checkCompletedMiningSwingSuppression()) {
                 wrapper.cancel();
                 return;
             }
@@ -778,6 +789,17 @@ public class ClientPlayerPackets {
 
             clientPlayer.addAuthInputData(PlayerAuthInputPacketPayload_InputData.MissedSwing);
         });
+    }
+
+    private static void bridgeSendJavaBlockBreakEffect(final UserConnection user, final BlockPosition position, final int javaBlockState) {
+        if (javaBlockState == ProtocolConstants.JAVA_AIR_ID) return;
+
+        final PacketWrapper blockBreakEffect = PacketWrapper.create(ClientboundPackets26_1.LEVEL_EVENT, user);
+        blockBreakEffect.write(Types.INT, LevelEvent.PARTICLES_DESTROY_BLOCK.getValue()); // event id
+        blockBreakEffect.write(Types.BLOCK_POSITION1_14, position); // position
+        blockBreakEffect.write(Types.INT, javaBlockState); // block state
+        blockBreakEffect.write(Types.BOOLEAN, false); // global
+        blockBreakEffect.send(BedrockProtocol.class);
     }
 
     private static void writeItemFrameInteraction(final PacketWrapper wrapper, final int javaId, final EntityTracker.ItemFrameInteraction itemFrame, final Vector3d location, final EntityTracker entityTracker, final InventoryContainer inventoryContainer) {

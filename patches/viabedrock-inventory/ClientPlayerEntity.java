@@ -54,6 +54,7 @@ public class ClientPlayerEntity extends PlayerEntity {
     // Java 26.2 treats zero as "not assigned". Keep the local player outside the
     // low positive range allocated by EntityTracker for Bedrock world entities.
     private static final int JAVA_ENTITY_ID = Integer.MAX_VALUE;
+    private static final int COMPLETED_MINING_SWING_SUPPRESSION_TICKS = 4;
     private final AtomicInteger TELEPORT_ID = new AtomicInteger(1);
     private final GameSessionStorage gameSession;
 
@@ -89,6 +90,7 @@ public class ClientPlayerEntity extends PlayerEntity {
     private GameType gameType;
     private GameMode javaGameMode;
     private boolean cancelNextSwingPacket;
+    private int completedMiningSwingSuppressionThroughTick = Integer.MIN_VALUE;
     private BlockBreakingInfo blockBreakingInfo;
 
     public ClientPlayerEntity(final UserConnection user, final long runtimeId, final UUID javaUuid, final PlayerAbilities abilities) {
@@ -507,6 +509,27 @@ public class ClientPlayerEntity extends PlayerEntity {
 
     public void cancelNextSwingPacket() {
         this.cancelNextSwingPacket = true;
+    }
+
+    static boolean bridgeShouldSuppressCompletedMiningSwing(final int currentTick, final int suppressionThroughTick) {
+        return currentTick <= suppressionThroughTick;
+    }
+
+    public boolean checkCompletedMiningSwingSuppression() {
+        if (bridgeShouldSuppressCompletedMiningSwing(this.age(), this.completedMiningSwingSuppressionThroughTick)) {
+            return true;
+        }
+
+        this.clearCompletedMiningSwingSuppression();
+        return false;
+    }
+
+    public void suppressCompletedMiningSwings() {
+        this.completedMiningSwingSuppressionThroughTick = this.age() + COMPLETED_MINING_SWING_SUPPRESSION_TICKS;
+    }
+
+    public void clearCompletedMiningSwingSuppression() {
+        this.completedMiningSwingSuppressionThroughTick = Integer.MIN_VALUE;
     }
 
     public BlockBreakingInfo blockBreakingInfo() {

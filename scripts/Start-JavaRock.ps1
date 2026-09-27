@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [switch]$CheckOnly,
-    [switch]$NoLaunch
+    [switch]$NoLaunch,
+    [string]$SetupConsentRequestFile = '',
+    [string]$SetupConsentResponseFile = ''
 )
 
 Set-StrictMode -Version 2.0
@@ -322,19 +324,115 @@ function Show-Message {
     [void][System.Windows.Forms.MessageBox]::Show($Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, $icon)
 }
 
+function Write-JsonFileAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $parent = Split-Path -Parent $fullPath
+    if ($parent) { [IO.Directory]::CreateDirectory($parent) | Out-Null }
+    $temporary = "$fullPath.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
+    $json = $Value | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText($temporary, "$json`r`n", [Text.UTF8Encoding]::new($false))
+    try {
+        if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+            [IO.File]::Replace($temporary, $fullPath, $null)
+        } else {
+            [IO.File]::Move($temporary, $fullPath)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Wait-ForUpdaterSetupConsent {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Missing,
+        [Parameter(Mandatory = $true)][string]$RequestFile,
+        [Parameter(Mandatory = $true)][string]$ResponseFile
+    )
+
+    $requestPath = [IO.Path]::GetFullPath($RequestFile)
+    $responsePath = [IO.Path]::GetFullPath($ResponseFile)
+    if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
+        Remove-Item -LiteralPath $responsePath -Force -ErrorAction SilentlyContinue
+    }
+    $items = @($Missing | ForEach-Object {
+        [ordered]@{
+            label = [string]$_.Label
+            detail = [string]$_.Detail
+        }
+    })
+    Write-JsonFileAtomic -Path $requestPath -Value ([ordered]@{
+        format = 1
+        state = 'waiting-for-consent'
+        title = 'JavaRock Requirements'
+        message = 'JavaRock needs to prepare the following items:'
+        items = $items
+        note = 'Choosing No changes nothing else and leaves JavaRock closed. Installing Node.js or Java may request administrator approval.'
+        pid = $PID
+        createdAt = [DateTime]::UtcNow.ToString('o')
+    })
+    Write-Host '[JavaRock] Waiting for your choice in the updater window...'
+
+    $deadline = [DateTime]::UtcNow.AddMinutes(30)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
+            try {
+                $response = Get-Content -LiteralPath $responsePath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $approvedProperty = $response.PSObject.Properties['approved']
+                if ($null -ne $approvedProperty -and $approvedProperty.Value -is [bool]) {
+                    return [bool]$approvedProperty.Value
+                }
+            } catch {}
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw 'The updater did not receive a setup choice within 30 minutes.'
+}
+
 function Confirm-Setup {
     param([object[]]$Missing)
 
+    if ($SetupConsentRequestFile -and $SetupConsentResponseFile) {
+        return Wait-ForUpdaterSetupConsent -Missing $Missing -RequestFile $SetupConsentRequestFile -ResponseFile $SetupConsentResponseFile
+    }
+
     Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
     $items = ($Missing | ForEach-Object { "- $($_.Label)`r`n  $($_.Detail)" }) -join "`r`n"
     $text = "JavaRock needs to prepare the following items:`r`n`r`n$items`r`n`r`nContinue?`r`n`r`nChoosing No changes nothing and closes JavaRock. Installing Node.js or Java may request administrator approval."
-    $choice = [System.Windows.Forms.MessageBox]::Show(
-        $text,
-        'JavaRock Requirements',
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question,
-        [System.Windows.Forms.MessageBoxDefaultButton]::Button2
-    )
+    # The updater that installs this release may predate the integrated consent
+    # panel. Own the fallback prompt with a hidden topmost form so that first
+    # transition cannot leave the question behind the old updater window.
+    $promptOwner = [System.Windows.Forms.Form]::new()
+    $promptOwner.ShowInTaskbar = $false
+    $promptOwner.TopMost = $true
+    $promptOwner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $promptOwner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedToolWindow
+    $promptOwner.Size = [System.Drawing.Size]::new(1, 1)
+    $promptOwner.Opacity = 0
+    try {
+        [void]$promptOwner.Show()
+        [void]$promptOwner.Activate()
+        [void]$promptOwner.BringToFront()
+        [System.Windows.Forms.Application]::DoEvents()
+        $choice = [System.Windows.Forms.MessageBox]::Show(
+            $promptOwner,
+            $text,
+            'JavaRock Requirements',
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question,
+            [System.Windows.Forms.MessageBoxDefaultButton]::Button2
+        )
+    } finally {
+        $promptOwner.Close()
+        $promptOwner.Dispose()
+    }
     return $choice -eq [System.Windows.Forms.DialogResult]::Yes
 }
 
@@ -361,6 +459,9 @@ function Invoke-NpmPhase {
 
 try {
     Set-Location -LiteralPath $ProjectRoot
+    if ([bool]$SetupConsentRequestFile -xor [bool]$SetupConsentResponseFile) {
+        throw 'The updater setup-consent request and response paths must be provided together.'
+    }
     Write-Host '[JavaRock] Checking this computer and the extracted JavaRock files...'
     $state = Get-SetupState
     Write-SetupState -State $state
@@ -374,6 +475,10 @@ try {
     }
 
     if ($missing.Count -gt 0 -and -not (Confirm-Setup -Missing $missing)) {
+        if ($SetupConsentRequestFile) {
+            Write-Host '[JavaRock] Setup was declined in the updater window. The updated files are installed; JavaRock will remain closed.'
+            exit 3
+        }
         Show-Message -Text 'Nothing was installed or changed. JavaRock will close. Run START-JAVAROCK.bat again whenever you are ready.'
         exit 1
     }
@@ -500,7 +605,7 @@ try {
     $message = $_.Exception.Message
     Write-Host ''
     Write-Host "[JavaRock] ERROR: $message" -ForegroundColor Red
-    if (-not $CheckOnly) {
+    if (-not $CheckOnly -and -not ($SetupConsentRequestFile -and $SetupConsentResponseFile)) {
         try { Show-Message -Text $message -Title 'JavaRock could not start' -Kind Error } catch {}
     }
     exit 1

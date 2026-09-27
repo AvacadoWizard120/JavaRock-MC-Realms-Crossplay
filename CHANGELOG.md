@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.115 - 2026-09-27
+
+- Shift-click moves now wait for the Realm to accept the take before placing with the returned cursor stack id. Number-key swaps use Bedrock's combined player-inventory slots, and stale swaps are resynced instead of poisoning later inventory actions.
+- Breaking a block now plays its proper block-specific sound and particles. The four trailing Java swings from that completed break are discarded before they become air-hit sounds; starting another break clears the suppression immediately.
+- When an updated install needs permission to prepare dependencies, the updater window changes into the Yes/No prompt and stays on top. The first update into this version uses a foreground fallback, and choosing No leaves the update installed with JavaRock closed.
+
 ## 0.3.114 - 2026-09-26
 
 - Removed synchronous chunk lighting from the ViaBedrock packet thread. Complete terrain columns are sent in bounded, player-first batches, so entity updates, movement, doors, chests, and sounds no longer queue behind multi-second chunk work.
