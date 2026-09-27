@@ -185,7 +185,7 @@ function slotDescriptorFromContainerIdAndSlot (containerId, slot) {
     return { container_id: 'inventory', slot: numericSlot }
   }
   if (normalized === 'crafting_input' || normalized === 'ui' || normalized === 'player_only_ui' || normalized === '124') {
-    if (numericSlot >= 28 && numericSlot <= 31) return { container_id: 'crafting_input', slot: numericSlot }
+    if (numericSlot >= 28 && numericSlot <= 40) return { container_id: 'crafting_input', slot: numericSlot }
   }
   if (normalized === 'cursor') return { container_id: 'cursor', slot: 0 }
 

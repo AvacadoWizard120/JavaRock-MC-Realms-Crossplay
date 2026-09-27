@@ -1758,7 +1758,8 @@ function bridgeInventoryActionSlotDescriptor (action = {}) {
   }
 
   if (idString === 'crafting_input' || idString === 'ui' || idString === 'player_only_ui' || idNumber === 124) {
-    if (slot >= 28 && slot <= 31) return { slot_type: { container_id: 'crafting_input' }, slot, sourceContainerId: inventoryId }
+    // Player 2x2 input uses UI 28..31; a crafting table uses UI 32..40.
+    if (slot >= 28 && slot <= 40) return { slot_type: { container_id: 'crafting_input' }, slot, sourceContainerId: inventoryId }
   }
 
   return null
@@ -2294,7 +2295,7 @@ function bridgeSlotDescriptorFromContainerIdAndSlot (containerId, slot) {
     if ((normalized === 'ui' || normalized === 'player_only_ui' || normalized === '124') && numericSlot === 0) {
       return { slot_type: { container_id: 'cursor' }, slot: 0 }
     }
-    if (numericSlot >= 28 && numericSlot <= 31) return { slot_type: { container_id: 'crafting_input' }, slot: numericSlot }
+    if (numericSlot >= 28 && numericSlot <= 40) return { slot_type: { container_id: 'crafting_input' }, slot: numericSlot }
   }
   if (normalized === 'cursor') return { slot_type: { container_id: 'cursor' }, slot: 0 }
   if (normalized === 'container') return { slot_type: { container_id: 'container' }, slot: numericSlot }
@@ -2306,7 +2307,7 @@ function bridgeSlotDescriptorFromContainerIdAndSlot (containerId, slot) {
   }
   if (windowId === 'hotbar') return { slot_type: { container_id: 'hotbar' }, slot: numericSlot }
   if (windowId === 'ui' && numericSlot === 0) return { slot_type: { container_id: 'cursor' }, slot: 0 }
-  if (windowId === 'ui' && numericSlot >= 28 && numericSlot <= 31) return { slot_type: { container_id: 'crafting_input' }, slot: numericSlot }
+  if (windowId === 'ui' && numericSlot >= 28 && numericSlot <= 40) return { slot_type: { container_id: 'crafting_input' }, slot: numericSlot }
   if (windowId === 'container') return { slot_type: { container_id: 'container' }, slot: numericSlot }
 
   return null
@@ -3194,12 +3195,46 @@ function bridgePlanksForLogItemName (identifier) {
   return null
 }
 
-function bridgeItemNameMatchesRecipeTag (identifier, tag) {
+const BRIDGE_EXACT_RECIPE_ITEM_TAGS = new Map([
+  // Complete Bedrock membership from ViaBedrock's bedrock/item_tags.json.
+  // Tool recipes use this tag directly in the live crafting_data packet.
+  ['minecraft:stone_tool_materials', new Set([
+    'minecraft:blackstone',
+    'minecraft:cobbled_deepslate',
+    'minecraft:cobblestone'
+  ])]
+])
+
+function bridgeRecipeItemTagMembers (owner, tag) {
+  const normalizedTag = bridgeNormalizeMinecraftIdentifier(tag)
+  if (!normalizedTag) return null
+  const tagWithoutNamespace = normalizedTag.replace(/^minecraft:/, '')
+  const maps = [
+    owner?.bridgeBedrockItemTags,
+    owner?.upstreamState?.bedrockItemTags,
+    owner?.state?.bedrockItemTags
+  ]
+  for (const map of maps) {
+    if (!map) continue
+    const members = map instanceof Map
+      ? (map.get(normalizedTag) ?? map.get(tagWithoutNamespace))
+      : (map[normalizedTag] ?? map[tagWithoutNamespace])
+    if (!(members instanceof Set) && !Array.isArray(members)) continue
+    return new Set([...members].map(bridgeNormalizeMinecraftIdentifier).filter(Boolean))
+  }
+  return BRIDGE_EXACT_RECIPE_ITEM_TAGS.get(normalizedTag) || null
+}
+
+function bridgeItemNameMatchesRecipeTag (identifier, tag, owner) {
   const name = bridgeNormalizeMinecraftIdentifier(identifier)
   if (!name.startsWith('minecraft:')) return false
   const id = name.slice('minecraft:'.length)
-  const normalizedTag = bridgeNormalizeMinecraftIdentifier(tag).replace(/^minecraft:/, '')
+  const namespacedTag = bridgeNormalizeMinecraftIdentifier(tag)
+  const normalizedTag = namespacedTag.replace(/^minecraft:/, '')
   if (!normalizedTag) return false
+
+  const exactMembers = bridgeRecipeItemTagMembers(owner, namespacedTag)
+  if (exactMembers) return exactMembers.has(name)
 
   if (normalizedTag === 'planks') return id.endsWith('_planks')
   if (normalizedTag === 'coals') return id === 'coal' || id === 'charcoal'
@@ -3232,7 +3267,7 @@ function bridgeRecipeIngredientMatchesItem (ingredient, item, owner) {
     return ingredient.any_of.some(entry => bridgeRecipeIngredientMatchesItem(entry, item, owner))
   }
   if (ingredient.kind === 'tag') {
-    return bridgeItemNameMatchesRecipeTag(bridgeItemNameForRecipeMatch(owner, item), ingredient.tag)
+    return bridgeItemNameMatchesRecipeTag(bridgeItemNameForRecipeMatch(owner, item), ingredient.tag, owner)
   }
   if (ingredient.kind !== 'item') return false
   if (Number(ingredient.network_id) !== Number(bridgeItemNetworkIdForRecipeMatch(item))) return false
@@ -3254,19 +3289,20 @@ function bridgeCraftResultGainCount (resultAction = {}) {
   return bridgeItemCount(resultAction.newItem)
 }
 
-function bridgeRecipeMatchesConsumedGrid (recipe, consumedByGridIndex, owner) {
+function bridgeRecipeMatchesConsumedGrid (recipe, consumedByGridIndex, owner, gridWidth = 2) {
   if (!recipe || !consumedByGridIndex) return false
+  const widthLimit = gridWidth === 3 ? 3 : 2
   if (recipe.type === 'shaped') {
     const width = numberOrDefault(recipe.width, 0)
     const height = numberOrDefault(recipe.height, 0)
     const pattern = Array.isArray(recipe.pattern) ? recipe.pattern : []
-    if (width < 1 || height < 1 || width > 2 || height > 2 || pattern.length !== width * height) return false
-    for (let offsetY = 0; offsetY <= 2 - height; offsetY++) {
-      for (let offsetX = 0; offsetX <= 2 - width; offsetX++) {
+    if (width < 1 || height < 1 || width > widthLimit || height > widthLimit || pattern.length !== width * height) return false
+    for (let offsetY = 0; offsetY <= widthLimit - height; offsetY++) {
+      for (let offsetX = 0; offsetX <= widthLimit - width; offsetX++) {
         let ok = true
-        for (let gy = 0; gy < 2 && ok; gy++) {
-          for (let gx = 0; gx < 2; gx++) {
-            const gridIndex = gy * 2 + gx
+        for (let gy = 0; gy < widthLimit && ok; gy++) {
+          for (let gx = 0; gx < widthLimit; gx++) {
+            const gridIndex = gy * widthLimit + gx
             const consumed = consumedByGridIndex[gridIndex]
             const ingredient = (gx >= offsetX && gx < offsetX + width && gy >= offsetY && gy < offsetY + height)
               ? pattern[(gy - offsetY) * width + (gx - offsetX)]
@@ -3309,49 +3345,63 @@ function bridgeRecipeMatchesConsumedGrid (recipe, consumedByGridIndex, owner) {
   return false
 }
 
-function bridgeLoadRecipeDbForLegacyCraftTranslation (owner) {
-  if (owner.bridgeCraftingRecipeDb) return owner.bridgeCraftingRecipeDb
+function bridgeLoadRecipeDbForLegacyCraftTranslation (owner, gridWidth = 2) {
+  // Tests and diagnostic callers may inject a catalog directly. Runtime caches
+  // the 2x2 and 3x3 session catalogs independently so opening the player grid
+  // first cannot pin workbench crafting to the smaller recipe database.
+  if (Array.isArray(owner.bridgeCraftingRecipeDb)) return owner.bridgeCraftingRecipeDb
+  const normalizedGridWidth = gridWidth === 3 ? 3 : 2
+  const cacheKey = normalizedGridWidth === 3 ? 'bridgeCraftingRecipeDb3x3' : 'bridgeCraftingRecipeDb2x2'
+  if (Array.isArray(owner[cacheKey])) return owner[cacheKey]
   const projectRootPath = path.resolve(__dirname, '..')
   const runDir = owner.server?.bridgeConfig?.javaLan?.viaProxyRunDir || path.join(projectRootPath, 'viaproxy-run')
+  const fileName = normalizedGridWidth === 3
+    ? 'bridge-crafting-recipes-3x3.json'
+    : 'bridge-crafting-recipes-2x2.json'
   const candidates = [
-    path.join(runDir, 'bridge-crafting-recipes-2x2.json'),
-    path.join(projectRootPath, 'bridge-crafting-recipes-2x2.json')
+    path.join(runDir, fileName),
+    path.join(projectRootPath, fileName)
   ]
   for (const file of candidates) {
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
       if (Array.isArray(parsed.recipes)) {
-        owner.bridgeCraftingRecipeDb = parsed.recipes
-        return owner.bridgeCraftingRecipeDb
+        owner[cacheKey] = parsed.recipes
+        return owner[cacheKey]
       }
     } catch {}
   }
-  owner.bridgeCraftingRecipeDb = []
-  return owner.bridgeCraftingRecipeDb
+  owner[cacheKey] = []
+  return owner[cacheKey]
 }
 
 function bridgeFindRecipeForLegacyCraft (owner, consumedActions, resultAction) {
   const resultItem = resultAction?.newItem
   if (isEmptyBedrockItemForBridge(resultItem)) return null
   const resultGainCount = bridgeCraftResultGainCount(resultAction)
+  const consumedSlots = consumedActions.map(entry => numberOrDefault(entry.slot?.slot, -1))
+  const playerGrid = consumedSlots.length > 0 && consumedSlots.every(slot => slot >= 28 && slot <= 31)
+  const workbenchGrid = consumedSlots.length > 0 && consumedSlots.every(slot => slot >= 32 && slot <= 40)
+  if (!playerGrid && !workbenchGrid) return null
+  const gridBase = workbenchGrid ? 32 : 28
+  const gridWidth = workbenchGrid ? 3 : 2
   const consumedByGridIndex = {}
   for (const entry of consumedActions) {
     const slot = entry.slot?.slot
-    if (slot < 28 || slot > 31) return null
-    consumedByGridIndex[slot - 28] = {
+    consumedByGridIndex[slot - gridBase] = {
       oldItem: entry.oldItem,
       count: Math.max(1, entry.oldCount - entry.newCount),
       stackId: bridgePredictedStackIdForLocation(owner, entry.slot, bridgeItemStackId(entry.oldItem, 0)),
       slot: entry.slot
     }
   }
-  return bridgeLoadRecipeDbForLegacyCraftTranslation(owner).find(recipe => {
+  return bridgeLoadRecipeDbForLegacyCraftTranslation(owner, gridWidth).find(recipe => {
     const output = recipe.output || {}
     return Number(output.network_id) === Number(firstNonNull(resultItem.network_id, resultItem.networkId, resultItem.id)) &&
       numberOrDefault(output.metadata, 0) === numberOrDefault(firstNonNull(resultItem.metadata, resultItem.meta, resultItem.damage), 0) &&
       numberOrDefault(output.count, 1) === resultGainCount &&
       Number.isFinite(Number(recipe.network_id)) &&
-      bridgeRecipeMatchesConsumedGrid(recipe, consumedByGridIndex, owner)
+      bridgeRecipeMatchesConsumedGrid(recipe, consumedByGridIndex, owner, gridWidth)
   }) || null
 }
 
@@ -3570,13 +3620,20 @@ function bridgeModernItemStackRequestsForLegacyInventoryTransaction (owner, name
   const transaction = params.transaction || {}
   if (String(transaction.transaction_type || '').toLowerCase() !== 'normal') return null
   const actions = Array.isArray(transaction.actions) ? transaction.actions.map(bridgeActionDelta).filter(entry => entry.slot) : []
-  if (actions.length < 2 || actions.length > 5) return null
+  // Up to nine workbench inputs plus one result action. The former five-action
+  // ceiling covered the player 2x2 grid only and silently excluded ordinary
+  // tool recipes such as a pickaxe (five consumed slots plus its result).
+  if (actions.length < 2 || actions.length > 10) return null
 
   const mode = options.mode || 'all'
   const consumed = actions.filter(entry => entry.slot?.slot_type?.container_id === 'crafting_input' && entry.oldCount > entry.newCount)
   const gains = actions.filter(entry => entry.newCount > entry.oldCount && entry.slot?.slot_type?.container_id !== 'crafting_input')
   if (consumed.length > 0 && gains.length === 1) {
-    return bridgeModernRequestsForLegacyCraftCommit(owner, consumed, gains[0])
+    const craft = bridgeModernRequestsForLegacyCraftCommit(owner, consumed, gains[0])
+    if (craft) return craft
+    // A grid -> inventory QUICK_MOVE has the same coarse count shape as a
+    // craft (grid loss plus one inventory gain), but its item identity does not
+    // match a recipe result. Let the two-action move path stage Take then Place.
   }
 
   if (actions.length === 2) {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.116 - 2026-09-27
+
+- Crafting-table recipes now use Bedrock's real item tags, including stone tool materials. The full 3x3 input range uses acknowledged stack requests, so shift-clicking or closing the table does not replay stale ingredients.
+- Number-key swaps use separate Bedrock hotbar and inventory slots again while retaining the stale-stack safety check.
+- Mining plays the correct material hit sound on Java's four-tick cadence. Java's own predicted completion sound and debris are no longer duplicated, and the final delayed mining swing stays suppressed.
+- Live Bedrock block-item runtime ids resolve through the 1.26.50 compatibility aliases, fixing missing stair and fence items and removing the misleading covered-state warning at startup.
+
 ## 0.3.115 - 2026-09-27
 
 - Shift-click moves now wait for the Realm to accept the take before placing with the returned cursor stack id. Number-key swaps use Bedrock's combined player-inventory slots, and stale swaps are resynced instead of poisoning later inventory actions.

@@ -684,8 +684,12 @@ public final class BedrockBlockStateCompatibility {
         return ALIASES.size();
     }
 
-    static int localId(final int bedrockBlockStateId) {
-        return ALIASES.getOrDefault(bedrockBlockStateId, bedrockBlockStateId);
+    public static boolean hasCompatibilityAlias(final int bedrockBlockStateId) {
+        return ALIASES.containsKey(bedrockBlockStateId);
+    }
+
+    public static int localIdFromCurrentPalette(final int currentBlockStateId) {
+        return ALIASES.getOrDefault(currentBlockStateId, currentBlockStateId);
     }
 
     static String computedAliasDataSha256() {

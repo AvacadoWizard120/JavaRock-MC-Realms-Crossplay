@@ -34,6 +34,7 @@ import net.raphimc.viabedrock.api.util.CombinationUtil;
 import net.raphimc.viabedrock.api.util.HashedPaletteComparator;
 import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.model.BlockProperties;
+import net.raphimc.viabedrock.protocol.storage.BedrockBlockStateCompatibility;
 
 import java.util.*;
 import java.util.logging.Level;
@@ -177,9 +178,15 @@ public class BlockStateRewriter implements StorableObject {
                 final int javaId = javaBlockStates.get(bedrockToJavaBlockStates.get(bedrockBlockState));
                 this.blockStateIdMappings.put(bedrockId, javaId);
             } else {
-                missingMappingCount++;
-                if (missingMappingSamples.size() < MISSING_MAPPING_SAMPLE_LIMIT) {
-                    missingMappingSamples.add(bedrockId + "=" + bedrockBlockState.toBlockStateString());
+                // The live 1.26.50 palette contains states which the embedded
+                // 1.26.45 mappings cannot name directly. The compatibility
+                // table replaces these provisional fallbacks after startup,
+                // so only report states which have no compatibility alias.
+                if (!BedrockBlockStateCompatibility.hasCompatibilityAlias(bedrockId)) {
+                    missingMappingCount++;
+                    if (missingMappingSamples.size() < MISSING_MAPPING_SAMPLE_LIMIT) {
+                        missingMappingSamples.add(bedrockId + "=" + bedrockBlockState.toBlockStateString());
+                    }
                 }
                 final int javaId = javaBlockStates.get(bedrockToJavaBlockStates.get(BedrockBlockState.INFO_UPDATE));
                 this.blockStateIdMappings.put(bedrockId, javaId);
@@ -221,7 +228,22 @@ public class BlockStateRewriter implements StorableObject {
     }
 
     public BlockState blockState(final int bedrockBlockStateId) {
-        return this.blockStateMappings.inverse().get(bedrockBlockStateId);
+        final BlockState direct = this.blockStateMappings.inverse().get(bedrockBlockStateId);
+        if (direct != null) return direct;
+
+        // Preserve the upstream embedded-palette contract when the id exists
+        // there. Only unknown ids may fall through to a live-palette alias.
+        final int localId = this.localBlockStateIdFromCurrentPalette(bedrockBlockStateId);
+        return localId == bedrockBlockStateId ? null : this.blockStateMappings.inverse().get(localId);
+    }
+
+    /**
+     * Resolves an id whose source is explicitly the live Realm palette to the
+     * embedded ViaBedrock palette. This must not replace {@link #blockState(int)}:
+     * compatibility alias keys can also be valid embedded-palette ids.
+     */
+    public int localBlockStateIdFromCurrentPalette(final int currentBlockStateId) {
+        return BedrockBlockStateCompatibility.localIdFromCurrentPalette(currentBlockStateId);
     }
 
     public int bedrockId(final int legacyBlockStateId) {

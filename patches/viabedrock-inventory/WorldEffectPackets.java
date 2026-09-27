@@ -726,6 +726,45 @@ public class WorldEffectPackets {
         paired.send(BedrockProtocol.class);
     }
 
+    static void bridgeSendJavaBlockHitSound(final UserConnection user, final BlockPosition position, final int bedrockBlockState) {
+        final BlockState blockState = user.get(BlockStateRewriter.class).blockState(bedrockBlockState);
+        final String blockSound = blockState == null
+                ? "stone"
+                : BedrockProtocol.MAPPINGS.getBedrockBlockSounds().getOrDefault(blockState.namespacedIdentifier(), "stone");
+        final SoundDefinitions.ConfiguredSound configuredSound = tryFindSound(user, "hit", bedrockBlockState, "", false);
+        if (configuredSound == null) return;
+
+        final BedrockMappingData.JavaSound javaSound = BedrockProtocol.MAPPINGS.getBedrockToJavaSounds().get(configuredSound.sound());
+        if (javaSound == null) return;
+
+        final PacketWrapper sound = PacketWrapper.create(ClientboundPackets26_1.SOUND, user);
+        sound.write(Types.SOUND_EVENT, Holder.of(javaSound.id())); // sound id
+        sound.write(Types.VAR_INT, javaSound.category().ordinal()); // category
+        sound.write(Types.INT, position.x() * 8 + 4); // x, centered in the block
+        sound.write(Types.INT, position.y() * 8 + 4); // y, centered in the block
+        sound.write(Types.INT, position.z() * 8 + 4); // z, centered in the block
+        sound.write(Types.FLOAT, bridgeJavaMiningHitVolume(blockSound)); // volume
+        sound.write(Types.FLOAT, bridgeJavaMiningHitPitch(blockSound)); // pitch
+        sound.write(Types.LONG, ThreadLocalRandom.current().nextLong()); // seed
+        sound.send(BedrockProtocol.class);
+    }
+
+    static float bridgeJavaMiningHitVolume(final String blockSound) {
+        // ClientLevel.playBreakingSound: (SoundType.volume + 1) / 8.
+        final float soundTypeVolume = "anvil".equals(blockSound) ? 0.3F : 1F;
+        return (soundTypeVolume + 1F) / 8F;
+    }
+
+    static float bridgeJavaMiningHitPitch(final String blockSound) {
+        // ClientLevel.playBreakingSound: SoundType.pitch * 0.5.
+        final float soundTypePitch = switch (blockSound) {
+            case "metal" -> 1.5F;
+            case "twisting_vines" -> 0.5F;
+            default -> 1F;
+        };
+        return soundTypePitch * 0.5F;
+    }
+
     private static SoundDefinitions.ConfiguredSound tryFindSound(final UserConnection user, final String soundEvent, final int data, final String entityIdentifier, final boolean isBabyMob) {
         final Map<String, SoundDefinitions.ConfiguredSound> soundEvents = BedrockProtocol.MAPPINGS.getBedrockLevelSoundEvents().get(soundEvent);
         if (soundEvents == null) {
