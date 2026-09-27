@@ -1128,19 +1128,30 @@ function assertMiningSwingSuppression () {
   const stopEnd = source.indexOf('case DROP_ALL_ITEMS, DROP_ITEM ->', stopStart)
   const stopHandler = source.slice(stopStart, stopEnd)
   const completedSwingSuppression = stopHandler.indexOf('clientPlayer.suppressCompletedMiningSwings()')
+  const rememberPredictedCompletion = stopHandler.indexOf('clientPlayer.rememberPredictedBlockBreakCompletion(position)')
   const clearBreakingState = stopHandler.indexOf('clientPlayer.setBlockBreakingInfo(null)')
   const predictAir = stopHandler.indexOf('chunkTracker.handleBlockChange(position, 0, chunkTracker.bedrockAirId())')
-  if (completedSwingSuppression < 0 || clearBreakingState < completedSwingSuppression || predictAir < clearBreakingState) {
-    throw new Error('STOP_DESTROY_BLOCK must bound trailing swings before applying the authoritative local-air prediction')
+  if (completedSwingSuppression < 0 || rememberPredictedCompletion < completedSwingSuppression ||
+      clearBreakingState < rememberPredictedCompletion || predictAir < clearBreakingState) {
+    throw new Error('STOP_DESTROY_BLOCK must remember the predicted completion before clearing mining state and applying local air')
   }
 
   for (const marker of [
     'private static final int COMPLETED_MINING_SWING_SUPPRESSION_TICKS = 5',
     'private static final int MINING_HIT_SOUND_INTERVAL_TICKS = 4',
+    'private static final int PREDICTED_BLOCK_BREAK_COMPLETION_TICKS = 40',
+    'private static final int MAX_PENDING_PREDICTED_BLOCK_BREAK_COMPLETIONS = 8',
     'private int completedMiningSwingSuppressionThroughTick = Integer.MIN_VALUE',
     'private int lastMiningHitSoundTick = Integer.MIN_VALUE',
+    'pendingPredictedBlockBreakCompletions = new ArrayDeque<>()',
     'static boolean bridgeShouldSuppressCompletedMiningSwing',
     'static boolean bridgeShouldPlayMiningHitSound',
+    'static boolean bridgePredictedBlockBreakStatesMatch',
+    'static boolean bridgePredictedBlockBreakCompletionMatches',
+    'static void bridgeRememberPredictedBlockBreakCompletion',
+    'static boolean bridgeConsumePredictedBlockBreakCompletion',
+    'public void rememberPredictedBlockBreakCompletion',
+    'public boolean consumePredictedBlockBreakCompletion',
     'public boolean consumeMiningHitSoundCadence()',
     'this.completedMiningSwingSuppressionThroughTick = this.age() + COMPLETED_MINING_SWING_SUPPRESSION_TICKS',
     'this.clearCompletedMiningSwingSuppression()'
@@ -1153,6 +1164,15 @@ function assertMiningSwingSuppression () {
     }
   }
   const worldEffectSource = fs.readFileSync(path.join(patchRoot, 'WorldEffectPackets.java'), 'utf8')
+  const completionGate = worldEffectSource.indexOf('if (levelEvent == LevelEvent.ParticlesDestroyBlock)')
+  const genericLevelEventMapping = worldEffectSource.indexOf('switch (levelEvent)', completionGate)
+  if (completionGate < 0 || genericLevelEventMapping < completionGate ||
+      !worldEffectSource.slice(completionGate, genericLevelEventMapping).includes('clientPlayer.consumePredictedBlockBreakCompletion(')) {
+    throw new Error('the correlated local ParticlesDestroyBlock echo must be consumed before generic Java level-event translation')
+  }
+  if (worldEffectSource.slice(completionGate, genericLevelEventMapping).includes('ParticlesDestroyBlockNoSound')) {
+    throw new Error('the local completion gate must not suppress the semantically distinct ParticlesDestroyBlockNoSound event')
+  }
   for (const marker of [
     'static void bridgeSendJavaBlockHitSound',
     'tryFindSound(user, "hit", bedrockBlockState, "", false)',
@@ -1166,7 +1186,11 @@ function assertMiningSwingSuppression () {
   }
   const blockSounds = JSON.parse(readJarEntry(viaProxyJar, 'assets/viabedrock/data/bedrock/block_sounds.json'))
   const levelSoundEvents = JSON.parse(readJarEntry(viaProxyJar, 'assets/viabedrock/data/bedrock/level_sound_event_mappings.json'))
+  const levelEvents = JSON.parse(readJarEntry(viaProxyJar, 'assets/viabedrock/data/custom/level_event_mappings.json'))
   const soundMappings = JSON.parse(readJarEntry(viaProxyJar, 'assets/viabedrock/data/custom/sound_mappings.json'))
+  if (levelEvents.ParticlesDestroyBlock !== 'PARTICLES_DESTROY_BLOCK') {
+    throw new Error(`ParticlesDestroyBlock must map to Java event 2001 (sound + debris); got ${levelEvents.ParticlesDestroyBlock}`)
+  }
   for (const [blockIdentifier, expectedJavaSound] of [
     ['minecraft:oak_log', 'minecraft:block.wood.hit'],
     ['minecraft:stone', 'minecraft:block.stone.hit']
@@ -1204,19 +1228,38 @@ function assertMiningSwingSuppression () {
   const entityBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
     'net/raphimc/viabedrock/api/model/entity/ClientPlayerEntity.class'
   )]).stdout
-  for (const marker of ['checkCompletedMiningSwingSuppression', 'suppressCompletedMiningSwings', 'clearCompletedMiningSwingSuppression']) {
+  for (const marker of [
+    'checkCompletedMiningSwingSuppression',
+    'suppressCompletedMiningSwings',
+    'clearCompletedMiningSwingSuppression',
+    'rememberPredictedBlockBreakCompletion',
+    'consumePredictedBlockBreakCompletion',
+    'bridgeConsumePredictedBlockBreakCompletion'
+  ]) {
     if (!entityBytecode.includes(marker)) throw new Error(`compiled ClientPlayerEntity.class is missing mining-tail bytecode: ${marker}`)
   }
   const packetsBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
     'net/raphimc/viabedrock/protocol/packet/ClientPlayerPackets.class'
   )]).stdout
-  for (const marker of ['checkCompletedMiningSwingSuppression', 'consumeMiningHitSoundCadence', 'bridgeSendJavaBlockHitSound']) {
+  for (const marker of [
+    'checkCompletedMiningSwingSuppression',
+    'consumeMiningHitSoundCadence',
+    'bridgeSendJavaBlockHitSound',
+    'rememberPredictedBlockBreakCompletion'
+  ]) {
     if (!packetsBytecode.includes(marker)) throw new Error(`compiled ClientPlayerPackets.class is missing mining sound/suppression bytecode: ${marker}`)
   }
   const worldEffectBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
     'net/raphimc/viabedrock/protocol/packet/WorldEffectPackets.class'
   )]).stdout
-  for (const marker of ['bridgeSendJavaBlockHitSound', 'bridgeJavaMiningHitVolume', 'bridgeJavaMiningHitPitch', 'getBedrockBlockSounds', 'getBedrockToJavaSounds']) {
+  for (const marker of [
+    'bridgeSendJavaBlockHitSound',
+    'bridgeJavaMiningHitVolume',
+    'bridgeJavaMiningHitPitch',
+    'getBedrockBlockSounds',
+    'getBedrockToJavaSounds',
+    'consumePredictedBlockBreakCompletion'
+  ]) {
     if (!worldEffectBytecode.includes(marker)) throw new Error(`compiled WorldEffectPackets.class is missing mining hit-sound bytecode: ${marker}`)
   }
 
@@ -1227,6 +1270,12 @@ function assertMiningSwingSuppression () {
     const smokeSource = path.join(packageDir, 'MiningTailSmoke.java')
     fs.writeFileSync(smokeSource, `
 package net.raphimc.viabedrock.api.model.entity;
+
+import com.viaversion.viaversion.api.minecraft.BlockPosition;
+import com.viaversion.viaversion.util.Pair;
+
+import java.util.ArrayDeque;
+import java.util.Deque;
 
 public final class MiningTailSmoke {
     private static void check(boolean value, String message) {
@@ -1250,6 +1299,80 @@ public final class MiningTailSmoke {
                 "material hit sounds must not play more often than every four ticks");
         check(ClientPlayerEntity.bridgeShouldPlayMiningHitSound(104, 100),
                 "material hit sounds must resume on the vanilla four-tick cadence");
+
+        final Deque<Pair<ClientPlayerEntity.BlockBreakingInfo, Integer>> pending = new ArrayDeque<>();
+        final BlockPosition oakPosition = new BlockPosition(10, 64, -4);
+        final ClientPlayerEntity.BlockBreakingInfo oak = new ClientPlayerEntity.BlockBreakingInfo(
+                oakPosition, null, 101, 5
+        );
+        ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pending, oak, 100);
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, oakPosition, 102, 6, 105
+                ), "a different block state at the same position must remain visible");
+        check(pending.size() == 1, "an unmatched completion must not consume the local prediction");
+        check(ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, oakPosition, 101, 5, 105
+                ), "the matching Realm actor echo must be consumed");
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, oakPosition, 101, 5, 106
+                ), "a completion record must be one-shot");
+
+        final ClientPlayerEntity.BlockBreakingInfo paletteAlias = new ClientPlayerEntity.BlockBreakingInfo(
+                oakPosition, null, 201, 17
+        );
+        ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pending, paletteAlias, 200);
+        check(ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, oakPosition, 202, 17, 205
+                ), "two live Bedrock ids mapped to the same Java state may match");
+        final ClientPlayerEntity.BlockBreakingInfo unknownAlias = new ClientPlayerEntity.BlockBreakingInfo(
+                oakPosition, null, 301, -1
+        );
+        ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pending, unknownAlias, 210);
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, oakPosition, 302, -1, 215
+                ), "two unresolved Java mappings must not collide");
+        check(ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, oakPosition, 301, -1, 215
+                ), "an exact Bedrock state remains safe when Java mapping is unavailable");
+
+        ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pending, oak, 300);
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, oakPosition, 101, 5, 341
+                ), "a Realm event outside the forty-tick window must remain visible");
+        check(pending.isEmpty(), "expired predictions must be discarded");
+
+        final BlockPosition firstPosition = new BlockPosition(20, 70, 20);
+        final BlockPosition secondPosition = new BlockPosition(21, 70, 20);
+        final ClientPlayerEntity.BlockBreakingInfo first = new ClientPlayerEntity.BlockBreakingInfo(
+                firstPosition, null, 401, 31
+        );
+        final ClientPlayerEntity.BlockBreakingInfo second = new ClientPlayerEntity.BlockBreakingInfo(
+                secondPosition, null, 402, 32
+        );
+        ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pending, first, 400);
+        ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pending, second, 401);
+        check(ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, secondPosition, 402, 32, 405
+                ), "rapid break echoes may arrive out of order");
+        check(ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, firstPosition, 401, 31, 406
+                ), "the earlier rapid break must remain matchable");
+
+        for (int index = 0; index < 9; index++) {
+            final BlockPosition position = new BlockPosition(index, 80, 0);
+            ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(
+                    pending,
+                    new ClientPlayerEntity.BlockBreakingInfo(position, null, 500 + index, 50 + index),
+                    500 + index
+            );
+        }
+        check(pending.size() == 8, "the completion correlation queue must stay bounded");
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, new BlockPosition(0, 80, 0), 500, 50, 509
+                ), "the oldest prediction must be evicted at the queue bound");
+        check(ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
+                        pending, new BlockPosition(1, 80, 0), 501, 51, 509
+                ), "newer predictions must survive bounded eviction");
     }
 }
 `)
@@ -2551,6 +2674,72 @@ function assertRecipeBookSync () {
   for (const marker of ['RECIPE_BOOK_ADD', 'RECIPE_BOOK_REMOVE', 'RECIPE_BOOK_SETTINGS', 'UPDATE_RECIPES', 'HOLDER_SET', 'itemTemplate', 'localBlockStateIdFromCurrentPalette', 'writeRecipeDisplay', 'handlePlaceRecipe']) {
     if (!bytecode.includes(marker)) throw new Error(`RecipeBookTracker.class is missing packet bytecode: ${marker}`)
   }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-item-tag-orientation-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const tagSmokePath = path.join(packageDir, 'BridgeItemTagOrientationSmoke.java')
+    fs.writeFileSync(tagSmokePath, `
+package net.raphimc.viabedrock.protocol.storage;
+
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import net.raphimc.viabedrock.api.model.container.player.InventoryContainer;
+
+public final class BridgeItemTagOrientationSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        final Map<String, Set<String>> tagsByItem = new LinkedHashMap<>();
+        tagsByItem.put("minecraft:cobblestone", Set.of("minecraft:stone_tool_materials"));
+        tagsByItem.put("minecraft:blackstone", Set.of("minecraft:stone_tool_materials"));
+        tagsByItem.put("minecraft:cobbled_deepslate", Set.of("minecraft:stone_tool_materials"));
+        tagsByItem.put("minecraft:stick", Set.of("minecraft:sticks"));
+        check(!tagsByItem.containsKey("minecraft:stone_tool_materials"),
+                "fixture must use ViaBedrock's item-identifier -> tag-names orientation");
+
+        check(InventoryContainer.bridgeMappingItemHasTag(
+                        tagsByItem, "minecraft:cobblestone", "minecraft:stone_tool_materials"),
+                "cobblestone must match the namespaced stone-tool tag");
+        check(InventoryContainer.bridgeMappingItemHasTag(
+                        tagsByItem, "blackstone", "stone_tool_materials"),
+                "tag matching must normalize omitted minecraft namespaces");
+        check(!InventoryContainer.bridgeMappingItemHasTag(
+                        tagsByItem, "minecraft:stick", "minecraft:stone_tool_materials"),
+                "stick must not match the stone-tool tag");
+        check(InventoryContainer.bridgeItemIdentifiersForTag(
+                        tagsByItem, "minecraft:stone_tool_materials").equals(List.of(
+                                "minecraft:cobblestone",
+                                "minecraft:blackstone",
+                                "minecraft:cobbled_deepslate")),
+                "reverse tag expansion must enumerate item keys whose value set contains the tag");
+
+        final Map<String, Integer> javaItems = new LinkedHashMap<>();
+        javaItems.put("minecraft:cobblestone", 1);
+        javaItems.put("minecraft:blackstone", 2);
+        javaItems.put("minecraft:cobbled_deepslate", 3);
+        javaItems.put("minecraft:stick", 4);
+        check(Arrays.equals(
+                        RecipeBookTracker.bridgeResolveTagIngredientIds(
+                                tagsByItem, javaItems, "minecraft:stone_tool_materials"),
+                        new int[] { 1, 2, 3 }),
+                "recipe-book tag expansion must resolve all and only tagged item identifiers");
+    }
+}
+`)
+
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, tagSmokePath])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.BridgeItemTagOrientationSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
 }
 
 function assertCraftingTableBridge () {
@@ -2585,7 +2774,7 @@ function assertCraftingTableBridge () {
     'bridgeTrySendNativeQuickMove',
     'crafting_grid_quick_move_native_stack_request',
     'crafting_grid_quick_move_waiting_for_authority',
-    'BedrockProtocol.MAPPINGS.getBedrockItemTags()',
+    'final Set<String> mappedTags = bridgeMappedItemTags(',
     'bridgeAppendCloseReturnMoves',
     'bridgeExecuteRecipeBookMoves(moves)',
     'queued modern close return',

@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.116-viaproxy-3.4.13-crafting-audio-mapping-fix'
+const PATCH_ID = 'v0.3.117-viaproxy-3.4.13-tagged-crafting-break-echo-fix'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/rewriter/BlockStateRewriter.class',
   'net/raphimc/viabedrock/protocol/packet/JoinPackets.class',

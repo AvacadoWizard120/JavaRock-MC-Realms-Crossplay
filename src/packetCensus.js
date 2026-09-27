@@ -782,6 +782,25 @@ function summarizePacketForCensus (name, params = {}) {
     return out
   }
 
+  if (name === 'level_event') {
+    out.event = normalizeValueForSummary(params.event ?? params.event_id ?? params.eventId)
+    out.position = normalizeValueForSummary(params.position)
+    out.data = normalizeValueForSummary(params.data)
+    return out
+  }
+
+  if (name === 'level_sound_event') {
+    out.sound_id = normalizeValueForSummary(params.sound_id ?? params.soundId ?? params.sound)
+    out.position = normalizeValueForSummary(params.position)
+    out.extra_data = normalizeValueForSummary(params.extra_data ?? params.extraData)
+    out.entity_type = params.entity_type ?? params.entityType
+    out.is_baby_mob = params.is_baby_mob ?? params.isBabyMob
+    out.is_global = params.is_global ?? params.isGlobal
+    out.entity_unique_id = normalizeValueForSummary(params.entity_unique_id ?? params.entityUniqueId)
+    out.fire_at_position = params.fire_at_position ?? params.fireAtPosition
+    return out
+  }
+
   if (name === 'level_chunk') {
     out.x = params.x ?? params.chunk_x ?? params.chunkX
     out.z = params.z ?? params.chunk_z ?? params.chunkZ
