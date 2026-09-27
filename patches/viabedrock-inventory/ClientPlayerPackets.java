@@ -411,7 +411,10 @@ public class ClientPlayerPackets {
                     clientPlayer.sendSwingPacketToServer();
                     clientPlayer.cancelNextSwingPacket();
                     final int bedrockBlockState = chunkTracker.getBlockState(position);
-                    clientPlayer.setBlockBreakingInfo(new ClientPlayerEntity.BlockBreakingInfo(position, direction, bedrockBlockState));
+                    final int javaBlockState = wrapper.user().get(BlockStateRewriter.class).javaId(bedrockBlockState);
+                    clientPlayer.setBlockBreakingInfo(new ClientPlayerEntity.BlockBreakingInfo(
+                            position, direction, bedrockBlockState, javaBlockState
+                    ));
                     if (clientPlayer.consumeMiningHitSoundCadence()) {
                         WorldEffectPackets.bridgeSendJavaBlockHitSound(wrapper.user(), position, bedrockBlockState);
                     }
@@ -437,6 +440,11 @@ public class ClientPlayerPackets {
                     // completing a survival break. They belong to the completed
                     // mining lifecycle, not new attacks against empty air.
                     clientPlayer.suppressCompletedMiningSwings();
+                    // Java already rendered level event 2001 locally while
+                    // predicting this break. Remember it before clearing the
+                    // active target so the matching Bedrock actor echo can be
+                    // consumed without hiding other players' break effects.
+                    clientPlayer.rememberPredictedBlockBreakCompletion(position);
                     clientPlayer.setBlockBreakingInfo(null);
 
                     if (!gameSession.isBlockBreakingServerAuthoritative()) {

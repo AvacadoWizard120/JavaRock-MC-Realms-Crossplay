@@ -56,6 +56,8 @@ public class ClientPlayerEntity extends PlayerEntity {
     private static final int JAVA_ENTITY_ID = Integer.MAX_VALUE;
     private static final int COMPLETED_MINING_SWING_SUPPRESSION_TICKS = 5;
     private static final int MINING_HIT_SOUND_INTERVAL_TICKS = 4;
+    private static final int PREDICTED_BLOCK_BREAK_COMPLETION_TICKS = 40;
+    private static final int MAX_PENDING_PREDICTED_BLOCK_BREAK_COMPLETIONS = 8;
     private final AtomicInteger TELEPORT_ID = new AtomicInteger(1);
     private final GameSessionStorage gameSession;
 
@@ -94,6 +96,7 @@ public class ClientPlayerEntity extends PlayerEntity {
     private int completedMiningSwingSuppressionThroughTick = Integer.MIN_VALUE;
     private int lastMiningHitSoundTick = Integer.MIN_VALUE;
     private BlockBreakingInfo blockBreakingInfo;
+    private final Deque<Pair<BlockBreakingInfo, Integer>> pendingPredictedBlockBreakCompletions = new ArrayDeque<>();
 
     public ClientPlayerEntity(final UserConnection user, final long runtimeId, final UUID javaUuid, final PlayerAbilities abilities) {
         super(user, runtimeId, JAVA_ENTITY_ID, javaUuid, abilities);
@@ -547,6 +550,87 @@ public class ClientPlayerEntity extends PlayerEntity {
         return true;
     }
 
+    static boolean bridgeSameBlockPosition(final BlockPosition first, final BlockPosition second) {
+        return first != null && second != null
+                && first.x() == second.x()
+                && first.y() == second.y()
+                && first.z() == second.z();
+    }
+
+    static boolean bridgePredictedBlockBreakStatesMatch(final int expectedBedrockBlockState, final int expectedJavaBlockState,
+                                                        final int actualBedrockBlockState, final int actualJavaBlockState) {
+        if (expectedBedrockBlockState == actualBedrockBlockState) {
+            return true;
+        }
+
+        // A live Bedrock palette can expose two runtime ids for the same Java
+        // state around a protocol update. Only use the Java mapping as a
+        // fallback when both sides resolved successfully: two missing (-1)
+        // mappings must never be treated as the same block.
+        return expectedJavaBlockState >= 0
+                && actualJavaBlockState >= 0
+                && expectedJavaBlockState == actualJavaBlockState;
+    }
+
+    static boolean bridgePredictedBlockBreakCompletionMatches(final BlockBreakingInfo pending, final int expiresAtTick,
+                                                               final BlockPosition position, final int bedrockBlockState,
+                                                               final int javaBlockState, final int currentTick) {
+        return currentTick <= expiresAtTick
+                && bridgeSameBlockPosition(pending.position(), position)
+                && bridgePredictedBlockBreakStatesMatch(
+                        pending.bedrockBlockState(), pending.javaBlockState(),
+                        bedrockBlockState, javaBlockState
+                );
+    }
+
+    static void bridgeRememberPredictedBlockBreakCompletion(final Deque<Pair<BlockBreakingInfo, Integer>> pendingCompletions,
+                                                            final BlockBreakingInfo blockBreakingInfo, final int currentTick) {
+        pendingCompletions.removeIf(entry -> currentTick > entry.value());
+        while (pendingCompletions.size() >= MAX_PENDING_PREDICTED_BLOCK_BREAK_COMPLETIONS) {
+            pendingCompletions.removeFirst();
+        }
+        pendingCompletions.addLast(new Pair<>(blockBreakingInfo, currentTick + PREDICTED_BLOCK_BREAK_COMPLETION_TICKS));
+    }
+
+    static boolean bridgeConsumePredictedBlockBreakCompletion(final Deque<Pair<BlockBreakingInfo, Integer>> pendingCompletions,
+                                                              final BlockPosition position, final int bedrockBlockState,
+                                                              final int javaBlockState, final int currentTick) {
+        final Iterator<Pair<BlockBreakingInfo, Integer>> iterator = pendingCompletions.iterator();
+        while (iterator.hasNext()) {
+            final Pair<BlockBreakingInfo, Integer> entry = iterator.next();
+            if (currentTick > entry.value()) {
+                iterator.remove();
+                continue;
+            }
+            if (!bridgePredictedBlockBreakCompletionMatches(
+                    entry.key(), entry.value(), position, bedrockBlockState, javaBlockState, currentTick
+            )) {
+                continue;
+            }
+
+            iterator.remove();
+            return true;
+        }
+        return false;
+    }
+
+    public void rememberPredictedBlockBreakCompletion(final BlockPosition position) {
+        if (this.blockBreakingInfo == null || !bridgeSameBlockPosition(this.blockBreakingInfo.position(), position)) {
+            return;
+        }
+        bridgeRememberPredictedBlockBreakCompletion(
+                this.pendingPredictedBlockBreakCompletions, this.blockBreakingInfo, this.age()
+        );
+    }
+
+    public boolean consumePredictedBlockBreakCompletion(final BlockPosition position, final int bedrockBlockState,
+                                                        final int javaBlockState) {
+        return bridgeConsumePredictedBlockBreakCompletion(
+                this.pendingPredictedBlockBreakCompletions,
+                position, bedrockBlockState, javaBlockState, this.age()
+        );
+    }
+
     public BlockBreakingInfo blockBreakingInfo() {
         return this.blockBreakingInfo;
     }
@@ -648,7 +732,7 @@ public class ClientPlayerEntity extends PlayerEntity {
     public record DimensionChangeInfo(Long loadingScreenId) {
     }
 
-    public record BlockBreakingInfo(BlockPosition position, Direction direction, int bedrockBlockState) {
+    public record BlockBreakingInfo(BlockPosition position, Direction direction, int bedrockBlockState, int javaBlockState) {
     }
 
     public record AuthInputBlockAction(PlayerActionType action, BlockPosition position, int direction) {

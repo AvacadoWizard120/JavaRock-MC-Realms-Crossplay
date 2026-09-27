@@ -111,6 +111,32 @@ assert.strictEqual(syncedBlockSummary.block_runtime_id, 1529044762)
 assert.strictEqual(syncedBlockSummary.entity_unique_id, -12n)
 assert.strictEqual(syncedBlockSummary.transition_type, 'entity')
 
+const levelEventSummary = summarizePacketForCensus('level_event', {
+  event: 'particles_destroy_block',
+  position: { x: -4, y: 64, z: 10 },
+  data: 1529044762
+})
+assert.strictEqual(levelEventSummary.event, 'particles_destroy_block')
+assert.deepStrictEqual(levelEventSummary.position, { x: -4, y: 64, z: 10 })
+assert.strictEqual(levelEventSummary.data, 1529044762)
+
+const levelSoundEventSummary = summarizePacketForCensus('level_sound_event', {
+  sound_id: 'hit',
+  position: { x: -3.5, y: 64.5, z: 10.5 },
+  extra_data: 1529044762,
+  entity_type: 'minecraft:oak_log',
+  is_baby_mob: false,
+  is_global: false,
+  entity_unique_id: -12n,
+  fire_at_position: false
+})
+assert.strictEqual(levelSoundEventSummary.sound_id, 'hit')
+assert.deepStrictEqual(levelSoundEventSummary.position, { x: -3.5, y: 64.5, z: 10.5 })
+assert.strictEqual(levelSoundEventSummary.extra_data, 1529044762)
+assert.strictEqual(levelSoundEventSummary.entity_type, 'minecraft:oak_log')
+assert.strictEqual(levelSoundEventSummary.entity_unique_id, '-12')
+assert.strictEqual(levelSoundEventSummary.fire_at_position, false)
+
 const fallingBlockSummary = summarizePacketForCensus('add_entity', {
   entity_unique_id: -12n,
   runtime_entity_id: 42n,

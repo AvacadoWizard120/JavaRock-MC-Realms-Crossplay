@@ -1563,14 +1563,13 @@ public class InventoryContainer extends Container {
         String id = identifier.substring("minecraft:".length());
         String normalizedTag = tag.startsWith("minecraft:") ? tag.substring("minecraft:".length()) : tag;
 
-        // The mapping bundle contains the complete Bedrock item-tag table used
-        // by the live crafting-data packet. Prefer it over heuristic suffix
-        // matching so recipes such as stone tools accept every actual member of
-        // minecraft:stone_tool_materials without guessing or hardcoding items.
-        Set<String> taggedItems = BedrockProtocol.MAPPINGS.getBedrockItemTags().get(tag);
-        if (taggedItems == null) taggedItems = BedrockProtocol.MAPPINGS.getBedrockItemTags().get(normalizedTag);
-        if (taggedItems == null) taggedItems = BedrockProtocol.MAPPINGS.getBedrockItemTags().get("minecraft:" + normalizedTag);
-        if (taggedItems != null) return taggedItems.contains(identifier);
+        // ViaBedrock stores this mapping as item identifier -> tag names (not
+        // tag name -> item identifiers). Prefer that authoritative membership
+        // over heuristic suffix matching whenever the item has a mapping entry.
+        final Set<String> mappedTags = bridgeMappedItemTags(
+                BedrockProtocol.MAPPINGS.getBedrockItemTags(),
+                identifier);
+        if (mappedTags != null) return bridgeTagSetContains(mappedTags, tag);
 
         if (normalizedTag.equals("planks")) return id.endsWith("_planks");
         if (normalizedTag.equals("coals")) return id.equals("coal") || id.equals("charcoal");
@@ -1594,6 +1593,58 @@ public class InventoryContainer extends Container {
                 id.equals(family + "_hyphae") || id.equals("stripped_" + family + "_hyphae");
         }
         return false;
+    }
+
+    private static String bridgeCanonicalNamespacedIdentifier(String value) {
+        if (value == null) return null;
+        final String normalized = value.trim();
+        if (normalized.isEmpty()) return null;
+        return normalized.indexOf(':') >= 0 ? normalized : "minecraft:" + normalized;
+    }
+
+    private static Set<String> bridgeMappedItemTags(
+            Map<String, Set<String>> itemTagsByIdentifier,
+            String identifier) {
+        if (itemTagsByIdentifier == null || itemTagsByIdentifier.isEmpty()) return null;
+        final String canonicalIdentifier = bridgeCanonicalNamespacedIdentifier(identifier);
+        if (canonicalIdentifier == null) return null;
+        Set<String> tags = itemTagsByIdentifier.get(canonicalIdentifier);
+        if (tags == null && canonicalIdentifier.startsWith("minecraft:")) {
+            tags = itemTagsByIdentifier.get(canonicalIdentifier.substring("minecraft:".length()));
+        }
+        return tags;
+    }
+
+    private static boolean bridgeTagSetContains(Set<String> tags, String tag) {
+        if (tags == null || tags.isEmpty()) return false;
+        final String canonicalTag = bridgeCanonicalNamespacedIdentifier(tag);
+        if (canonicalTag == null) return false;
+        for (final String mappedTag : tags) {
+            if (canonicalTag.equals(bridgeCanonicalNamespacedIdentifier(mappedTag))) return true;
+        }
+        return false;
+    }
+
+    public static boolean bridgeMappingItemHasTag(
+            Map<String, Set<String>> itemTagsByIdentifier,
+            String identifier,
+            String tag) {
+        return bridgeTagSetContains(bridgeMappedItemTags(itemTagsByIdentifier, identifier), tag);
+    }
+
+    public static List<String> bridgeItemIdentifiersForTag(
+            Map<String, Set<String>> itemTagsByIdentifier,
+            String tag) {
+        if (itemTagsByIdentifier == null || itemTagsByIdentifier.isEmpty()) return List.of();
+        final String canonicalTag = bridgeCanonicalNamespacedIdentifier(tag);
+        if (canonicalTag == null) return List.of();
+        final List<String> identifiers = new ArrayList<>();
+        for (final Map.Entry<String, Set<String>> entry : itemTagsByIdentifier.entrySet()) {
+            if (!bridgeTagSetContains(entry.getValue(), canonicalTag)) continue;
+            final String identifier = bridgeCanonicalNamespacedIdentifier(entry.getKey());
+            if (identifier != null) identifiers.add(identifier);
+        }
+        return identifiers;
     }
 
     private ClickSlot findQuickMoveTarget(ClickSlot from, BedrockItem moving) {

@@ -49,6 +49,7 @@ public final class RecipeBookTracker extends StoredObject {
     private long lastWarningAt;
     private String sentCatalogGeneration;
     private Map<Integer, ResolvedRecipe> activeRecipes = Collections.emptyMap();
+    private final Map<String, int[]> resolvedTagIngredientIds = new HashMap<>();
 
     public RecipeBookTracker(final UserConnection user) {
         super(user);
@@ -208,15 +209,15 @@ public final class RecipeBookTracker extends StoredObject {
             );
             if (javaId > 0) ids.add(javaId);
         } else if ("tag".equals(kind)) {
-            final Set<String> taggedItems = BedrockProtocol.MAPPINGS.getBedrockItemTags().get(
-                    jsonString(ingredient, "tag", "")
+            final String tag = jsonString(ingredient, "tag", "");
+            final int[] taggedItemIds = this.resolvedTagIngredientIds.computeIfAbsent(
+                    tag,
+                    value -> bridgeResolveTagIngredientIds(
+                            BedrockProtocol.MAPPINGS.getBedrockItemTags(),
+                            BedrockProtocol.MAPPINGS.getJavaItems(),
+                            value)
             );
-            if (taggedItems != null) {
-                for (final String identifier : taggedItems) {
-                    final Integer javaId = BedrockProtocol.MAPPINGS.getJavaItems().get(identifier);
-                    if (javaId != null && javaId > 0) ids.add(javaId);
-                }
-            }
+            for (final int javaId : taggedItemIds) ids.add(javaId);
         } else if ("any_of".equals(kind)) {
             final JsonArray alternatives = ingredient.getAsJsonArray("any_of");
             if (alternatives != null) {
@@ -225,6 +226,19 @@ public final class RecipeBookTracker extends StoredObject {
                     for (final int javaId : this.resolveIngredient(alternative.getAsJsonObject())) ids.add(javaId);
                 }
             }
+        }
+        return ids.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    static int[] bridgeResolveTagIngredientIds(
+            final Map<String, Set<String>> itemTagsByIdentifier,
+            final Map<String, Integer> javaItemsByIdentifier,
+            final String tag) {
+        if (javaItemsByIdentifier == null || javaItemsByIdentifier.isEmpty()) return new int[0];
+        final LinkedHashSet<Integer> ids = new LinkedHashSet<>();
+        for (final String identifier : InventoryContainer.bridgeItemIdentifiersForTag(itemTagsByIdentifier, tag)) {
+            final Integer javaId = javaItemsByIdentifier.get(identifier);
+            if (javaId != null && javaId > 0) ids.add(javaId);
         }
         return ids.stream().mapToInt(Integer::intValue).toArray();
     }

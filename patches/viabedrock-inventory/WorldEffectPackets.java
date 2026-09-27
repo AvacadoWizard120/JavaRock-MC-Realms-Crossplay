@@ -30,6 +30,7 @@ import com.viaversion.viaversion.protocols.v1_21_11to26_1.packet.ClientboundPack
 import com.viaversion.viaversion.util.Key;
 import net.raphimc.viabedrock.ViaBedrock;
 import net.raphimc.viabedrock.api.model.BlockState;
+import net.raphimc.viabedrock.api.model.entity.ClientPlayerEntity;
 import net.raphimc.viabedrock.api.model.entity.Entity;
 import net.raphimc.viabedrock.api.resourcepack.definition.SoundDefinitions;
 import net.raphimc.viabedrock.api.resourcepack.definition.TextDefinitions;
@@ -325,6 +326,25 @@ public class WorldEffectPackets {
                 ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Unknown LevelEvent: " + rawLevelEvent);
                 wrapper.cancel();
                 return;
+            }
+            if (levelEvent == LevelEvent.ParticlesDestroyBlock) {
+                final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
+                final ClientPlayerEntity clientPlayer = entityTracker != null ? entityTracker.getClientPlayer() : null;
+                final int javaBlockState = wrapper.user().get(BlockStateRewriter.class).javaId(data);
+                final BlockPosition blockPosition = new BlockPosition(
+                        MathUtil.floor(position.x()), MathUtil.floor(position.y()), MathUtil.floor(position.z())
+                );
+                if (clientPlayer != null && clientPlayer.consumePredictedBlockBreakCompletion(
+                        blockPosition, data, javaBlockState
+                )) {
+                    // Native Bedrock waits for this server event, but Java has
+                    // already played the same final sound and debris while
+                    // predicting its own successful break. Consume only the
+                    // position/state-correlated actor echo; unmatched events
+                    // (including nearby players' breaks) still translate.
+                    wrapper.cancel();
+                    return;
+                }
             }
             switch (levelEvent) {
                 case ParticleSoundGuardianGhost -> {

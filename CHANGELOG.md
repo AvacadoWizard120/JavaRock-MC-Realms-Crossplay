@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.117 - 2026-09-27
+
+- Fixed tag-based crafting recipes, including stone pickaxes. JavaRock now reads ViaBedrock's item-tag index in its actual direction, and tagged recipes also appear in the Java recipe book.
+- Removed the remaining duplicate block-break completion sound and debris. Only the Realm echo matching the local player's predicted block and position is discarded; other players' break effects still pass through.
+- Support captures now record the exact level-event and level-sound fields needed to diagnose block audio without another full packet sample.
+
 ## 0.3.116 - 2026-09-27
 
 - Crafting-table recipes now use Bedrock's real item tags, including stone tool materials. The full 3x3 input range uses acknowledged stack requests, so shift-clicking or closing the table does not replay stale ingredients.
