@@ -28,6 +28,7 @@ const {
   bridgeLegacyCraftingTransactionDropDiagnosis,
   bridgeLegacyPlayerStateTransactionDropDiagnosis,
   bridgeTrackTrustedLegacyPlayerStateTransaction,
+  bridgeInventoryActionSlotDescriptor,
   bridgeOverlayPredictedCursorStorageItem,
   bridgeTrackClientboundInventoryStacks,
   bridgeSummarizePacketForCensus
@@ -391,6 +392,121 @@ assert(Array.isArray(liveJavaCraftGridMove) && liveJavaCraftGridMove.length === 
 assert(liveJavaCraftGridMove[0].params.requests[0].actions[0].source.slot_type.container_id === 'hotbar', 'live Java inventory slot 0 source must use the hotbar container')
 assert(liveJavaCraftGridMove[0].params.requests[0].actions[0].source.stack_id === 1433, 'live Java craft-grid source must use tracked authoritative inventory stack id')
 assert(liveJavaCraftGridMove[0].followUpPlace?.destinationSlot?.slot_type?.container_id === 'crafting_input', 'live Java ui slot 28 queued destination must map to crafting_input')
+
+const workbenchInput32 = bridgeInventoryActionSlotDescriptor({
+  source_type: 'container',
+  inventory_id: 'ui',
+  slot: 32
+})
+const workbenchInput40 = bridgeInventoryActionSlotDescriptor({
+  source_type: 'container',
+  inventory_id: 124,
+  slot: 40
+})
+assert(workbenchInput32?.slot_type?.container_id === 'crafting_input' && workbenchInput32.slot === 32, 'workbench UI slot 32 must map to crafting_input')
+assert(workbenchInput40?.slot_type?.container_id === 'crafting_input' && workbenchInput40.slot === 40, 'workbench UI slot 40 must map to crafting_input')
+assert(bridgeInventoryActionSlotDescriptor({ source_type: 'container', inventory_id: 'ui', slot: 41 }) === null, 'UI slot 41 must remain outside the crafting grid')
+
+const workbenchQuickMoveOwner = {
+  ...owner,
+  bridgePredictedItemStackIds: new Map([['crafting_input:32', 88]])
+}
+const workbenchQuickMove = bridgeModernItemStackRequestsForLegacyInventoryTransaction(workbenchQuickMoveOwner, 'inventory_transaction', {
+  transaction: {
+    transaction_type: 'normal',
+    actions: [
+      {
+        source_type: 'container',
+        inventory_id: 'ui',
+        slot: 32,
+        old_item: { network_id: 4, count: 3, metadata: 0, has_stack_id: 0 },
+        new_item: { network_id: 0 }
+      },
+      {
+        source_type: 'container',
+        inventory_id: 'inventory',
+        slot: 9,
+        old_item: { network_id: 0 },
+        new_item: { network_id: 4, count: 3, metadata: 0, has_stack_id: 0 }
+      }
+    ]
+  }
+}, { mode: 'player_inventory_safe' })
+assert(Array.isArray(workbenchQuickMove) && workbenchQuickMove.length === 1, '3x3 grid quick-move must rewrite to an ACK-staged native request')
+assert(workbenchQuickMove[0].params.requests[0].actions.length === 1 && workbenchQuickMove[0].params.requests[0].actions[0].type_id === 'take', '3x3 quick-move must send only Take before the Realm ACK')
+assert(workbenchQuickMove[0].params.requests[0].actions[0].source.slot_type.container_id === 'crafting_input', '3x3 quick-move Take must source from crafting_input')
+assert(workbenchQuickMove[0].params.requests[0].actions[0].source.slot === 32 && workbenchQuickMove[0].params.requests[0].actions[0].source.stack_id === 88, '3x3 quick-move Take must preserve the authoritative source address and stack id')
+assert(workbenchQuickMove[0].followUpPlace?.destinationSlot?.slot_type?.container_id === 'inventory' && workbenchQuickMove[0].followUpPlace?.destinationSlot?.slot === 9, '3x3 quick-move must defer its inventory Place until the Take ACK')
+assert(!workbenchQuickMoveOwner.bridgePredictedItemStackIds.has('crafting_input:32'), '3x3 quick-move must retire the source prediction')
+assert(!workbenchQuickMoveOwner.bridgePredictedItemStackIds.has('inventory:9'), '3x3 quick-move must not predict the destination before its Place request is sent')
+
+const workbenchCraftOwner = {
+  ...owner,
+  bridgeItemNameByNetworkId: new Map([
+    ['4', 'minecraft:cobblestone'],
+    ['-273', 'minecraft:blackstone'],
+    ['-379', 'minecraft:cobbled_deepslate'],
+    ['300', 'minecraft:stone_pickaxe'],
+    ['352', 'minecraft:stick']
+  ]),
+  bridgeCraftingRecipeDb: [{
+    type: 'shaped',
+    recipe_id: 'minecraft:stone_pickaxe',
+    network_id: 1776,
+    width: 3,
+    height: 3,
+    pattern: [
+      { kind: 'tag', tag: 'minecraft:stone_tool_materials', count: 1 },
+      { kind: 'tag', tag: 'minecraft:stone_tool_materials', count: 1 },
+      { kind: 'tag', tag: 'minecraft:stone_tool_materials', count: 1 },
+      null,
+      { kind: 'item', network_id: 352, metadata: 32767, count: 1 },
+      null,
+      null,
+      { kind: 'item', network_id: 352, metadata: 32767, count: 1 },
+      null
+    ],
+    output: { network_id: 300, metadata: 0, count: 1, block_runtime_id: 0 }
+  }],
+  bridgePredictedItemStackIds: new Map([
+    ['crafting_input:32', 201],
+    ['crafting_input:33', 202],
+    ['crafting_input:34', 203],
+    ['crafting_input:36', 204],
+    ['crafting_input:39', 205]
+  ])
+}
+const workbenchCraft = bridgeModernItemStackRequestsForLegacyInventoryTransaction(workbenchCraftOwner, 'inventory_transaction', {
+  transaction: {
+    transaction_type: 'normal',
+    actions: [
+      ...[
+        [32, 4],
+        [33, -273],
+        [34, -379],
+        [36, 352],
+        [39, 352]
+      ].map(([slot, networkId]) => ({
+        source_type: 'container',
+        inventory_id: 'ui',
+        slot,
+        old_item: { network_id: networkId, count: 1, metadata: 0, has_stack_id: 0 },
+        new_item: { network_id: 0 }
+      })),
+      {
+        source_type: 'container',
+        inventory_id: 'inventory',
+        slot: 10,
+        old_item: { network_id: 0 },
+        new_item: { network_id: 300, count: 1, metadata: 0, has_stack_id: 0 }
+      }
+    ]
+  }
+}, { mode: 'player_inventory_safe' })
+assert(Array.isArray(workbenchCraft) && workbenchCraft.length === 1, 'the actual tagged six-action stone pickaxe recipe must rewrite to a native craft request')
+assert(workbenchCraft[0].params.requests[0].actions.filter(action => action.type_id === 'consume').length === 5, 'tagged 3x3 stone pickaxe craft must preserve all five consumed slots')
+assert(workbenchCraft[0].params.requests[0].actions[0].recipe_network_id === 1776, '3x3 craft must preserve the live recipe network id')
+
 const untrustedLiveJavaCraftGridMoveParams = {
   transaction: {
     transaction_type: 'normal',

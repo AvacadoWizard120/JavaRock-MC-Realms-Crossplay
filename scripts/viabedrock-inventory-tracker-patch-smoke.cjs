@@ -1127,32 +1127,56 @@ function assertMiningSwingSuppression () {
   const stopStart = source.indexOf('case STOP_DESTROY_BLOCK ->', abortEnd)
   const stopEnd = source.indexOf('case DROP_ALL_ITEMS, DROP_ITEM ->', stopStart)
   const stopHandler = source.slice(stopStart, stopEnd)
-  const blockStateSnapshot = stopHandler.indexOf('final int brokenJavaBlockState = chunkTracker.getJavaBlockState(position)')
   const completedSwingSuppression = stopHandler.indexOf('clientPlayer.suppressCompletedMiningSwings()')
   const clearBreakingState = stopHandler.indexOf('clientPlayer.setBlockBreakingInfo(null)')
-  const breakEffect = stopHandler.indexOf('bridgeSendJavaBlockBreakEffect(wrapper.user(), position, brokenJavaBlockState)')
   const predictAir = stopHandler.indexOf('chunkTracker.handleBlockChange(position, 0, chunkTracker.bedrockAirId())')
-  if (blockStateSnapshot < 0 || completedSwingSuppression < blockStateSnapshot || clearBreakingState < completedSwingSuppression ||
-      breakEffect < clearBreakingState || predictAir < breakEffect) {
-    throw new Error('STOP_DESTROY_BLOCK must bound trailing swings and emit the block-specific destroy effect before predicting air')
+  if (completedSwingSuppression < 0 || clearBreakingState < completedSwingSuppression || predictAir < clearBreakingState) {
+    throw new Error('STOP_DESTROY_BLOCK must bound trailing swings before applying the authoritative local-air prediction')
   }
 
   for (const marker of [
-    'private static final int COMPLETED_MINING_SWING_SUPPRESSION_TICKS = 4',
+    'private static final int COMPLETED_MINING_SWING_SUPPRESSION_TICKS = 5',
+    'private static final int MINING_HIT_SOUND_INTERVAL_TICKS = 4',
     'private int completedMiningSwingSuppressionThroughTick = Integer.MIN_VALUE',
+    'private int lastMiningHitSoundTick = Integer.MIN_VALUE',
     'static boolean bridgeShouldSuppressCompletedMiningSwing',
+    'static boolean bridgeShouldPlayMiningHitSound',
+    'public boolean consumeMiningHitSoundCadence()',
     'this.completedMiningSwingSuppressionThroughTick = this.age() + COMPLETED_MINING_SWING_SUPPRESSION_TICKS',
     'this.clearCompletedMiningSwingSuppression()'
   ]) {
     if (!entitySource.includes(marker)) throw new Error(`completed-mining swing suppression is missing marker: ${marker}`)
   }
+  for (const forbidden of ['LevelEvent.PARTICLES_DESTROY_BLOCK.getValue()', 'bridgeSendJavaBlockBreakParticles', 'sendJavaLevelParticles']) {
+    if (source.includes(forbidden)) {
+      throw new Error(`predicted block completion must rely on Java's local event 2001 instead of duplicating it through ${forbidden}`)
+    }
+  }
+  const worldEffectSource = fs.readFileSync(path.join(patchRoot, 'WorldEffectPackets.java'), 'utf8')
   for (const marker of [
-    'PacketWrapper.create(ClientboundPackets26_1.LEVEL_EVENT, user)',
-    'LevelEvent.PARTICLES_DESTROY_BLOCK.getValue()',
-    'blockBreakEffect.write(Types.INT, javaBlockState)',
-    'blockBreakEffect.send(BedrockProtocol.class)'
+    'static void bridgeSendJavaBlockHitSound',
+    'tryFindSound(user, "hit", bedrockBlockState, "", false)',
+    'BedrockProtocol.MAPPINGS.getBedrockToJavaSounds().get(configuredSound.sound())',
+    'bridgeJavaMiningHitVolume(blockSound)',
+    'bridgeJavaMiningHitPitch(blockSound)',
+    'position.x() * 8 + 4',
+    'sound.send(BedrockProtocol.class)'
   ]) {
-    if (!source.includes(marker)) throw new Error(`predicted block-break sound/effect is missing marker: ${marker}`)
+    if (!worldEffectSource.includes(marker)) throw new Error(`block-material mining hit sound is missing marker: ${marker}`)
+  }
+  const blockSounds = JSON.parse(readJarEntry(viaProxyJar, 'assets/viabedrock/data/bedrock/block_sounds.json'))
+  const levelSoundEvents = JSON.parse(readJarEntry(viaProxyJar, 'assets/viabedrock/data/bedrock/level_sound_event_mappings.json'))
+  const soundMappings = JSON.parse(readJarEntry(viaProxyJar, 'assets/viabedrock/data/custom/sound_mappings.json'))
+  for (const [blockIdentifier, expectedJavaSound] of [
+    ['minecraft:oak_log', 'minecraft:block.wood.hit'],
+    ['minecraft:stone', 'minecraft:block.stone.hit']
+  ]) {
+    const blockMaterial = blockSounds[blockIdentifier]
+    const configuredHit = levelSoundEvents.hit?.[`block:${blockMaterial}`]
+    const actualJavaSound = configuredHit == null ? null : soundMappings[configuredHit.sound]
+    if (actualJavaSound !== expectedJavaSound) {
+      throw new Error(`${blockIdentifier} mining hits must resolve through its Bedrock material to ${expectedJavaSound}; got ${actualJavaSound}`)
+    }
   }
 
   const swingStart = source.indexOf('protocol.registerServerbound(ServerboundPackets26_1.SWING')
@@ -1173,6 +1197,9 @@ function assertMiningSwingSuppression () {
   if ((handler.match(/PlayerAuthInputPacketPayload_InputData\.MissedSwing/g) || []).length !== 1) {
     throw new Error('only a genuine non-mining Java swing should set Bedrock MissedSwing')
   }
+  if ((source.match(/clientPlayer\.consumeMiningHitSoundCadence\(\)/g) || []).length !== 2) {
+    throw new Error('mining hit-sound cadence must run once at START and during active mining SWING packets')
+  }
 
   const entityBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
     'net/raphimc/viabedrock/api/model/entity/ClientPlayerEntity.class'
@@ -1183,8 +1210,14 @@ function assertMiningSwingSuppression () {
   const packetsBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
     'net/raphimc/viabedrock/protocol/packet/ClientPlayerPackets.class'
   )]).stdout
-  for (const marker of ['bridgeSendJavaBlockBreakEffect', 'PARTICLES_DESTROY_BLOCK', 'checkCompletedMiningSwingSuppression']) {
+  for (const marker of ['checkCompletedMiningSwingSuppression', 'consumeMiningHitSoundCadence', 'bridgeSendJavaBlockHitSound']) {
     if (!packetsBytecode.includes(marker)) throw new Error(`compiled ClientPlayerPackets.class is missing mining sound/suppression bytecode: ${marker}`)
+  }
+  const worldEffectBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/protocol/packet/WorldEffectPackets.class'
+  )]).stdout
+  for (const marker of ['bridgeSendJavaBlockHitSound', 'bridgeJavaMiningHitVolume', 'bridgeJavaMiningHitPitch', 'getBedrockBlockSounds', 'getBedrockToJavaSounds']) {
+    if (!worldEffectBytecode.includes(marker)) throw new Error(`compiled WorldEffectPackets.class is missing mining hit-sound bytecode: ${marker}`)
   }
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-mining-tail-'))
@@ -1205,16 +1238,54 @@ public final class MiningTailSmoke {
                 "the first post-completion swing must be suppressed");
         check(ClientPlayerEntity.bridgeShouldSuppressCompletedMiningSwing(442, 442),
                 "the fourth post-completion swing must be suppressed");
-        check(!ClientPlayerEntity.bridgeShouldSuppressCompletedMiningSwing(443, 442),
+        check(ClientPlayerEntity.bridgeShouldSuppressCompletedMiningSwing(443, 443),
+                "the fifth post-completion swing must be suppressed");
+        check(!ClientPlayerEntity.bridgeShouldSuppressCompletedMiningSwing(444, 443),
                 "a later intentional swing must not be suppressed");
         check(!ClientPlayerEntity.bridgeShouldSuppressCompletedMiningSwing(0, Integer.MIN_VALUE),
                 "the inactive sentinel must not suppress swings");
+        check(ClientPlayerEntity.bridgeShouldPlayMiningHitSound(100, Integer.MIN_VALUE),
+                "a new mining target must play its first material hit sound");
+        check(!ClientPlayerEntity.bridgeShouldPlayMiningHitSound(103, 100),
+                "material hit sounds must not play more often than every four ticks");
+        check(ClientPlayerEntity.bridgeShouldPlayMiningHitSound(104, 100),
+                "material hit sounds must resume on the vanilla four-tick cadence");
     }
 }
 `)
     const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
     run('javac', ['-cp', classPath, '-d', tmp, smokeSource])
     run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.api.model.entity.MiningTailSmoke'])
+
+    const packetDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'packet')
+    fs.mkdirSync(packetDir, { recursive: true })
+    const hitSoundSource = path.join(packetDir, 'MiningHitSoundSmoke.java')
+    fs.writeFileSync(hitSoundSource, `
+package net.raphimc.viabedrock.protocol.packet;
+
+public final class MiningHitSoundSmoke {
+    private static void check(float actual, float expected, String message) {
+        if (Math.abs(actual - expected) > 0.00001F) {
+            throw new AssertionError(message + ": expected=" + expected + " actual=" + actual);
+        }
+    }
+
+    public static void main(String[] args) {
+        check(WorldEffectPackets.bridgeJavaMiningHitVolume("wood"), 0.25F,
+                "ordinary block-hit volume must match ClientLevel.playBreakingSound");
+        check(WorldEffectPackets.bridgeJavaMiningHitPitch("wood"), 0.5F,
+                "ordinary block-hit pitch must match ClientLevel.playBreakingSound");
+        check(WorldEffectPackets.bridgeJavaMiningHitVolume("anvil"), 0.1625F,
+                "anvil hit volume must retain its SoundType volume scaling");
+        check(WorldEffectPackets.bridgeJavaMiningHitPitch("metal"), 0.75F,
+                "metal hit pitch must retain its SoundType pitch scaling");
+        check(WorldEffectPackets.bridgeJavaMiningHitPitch("twisting_vines"), 0.25F,
+                "twisting-vines hit pitch must retain its SoundType pitch scaling");
+    }
+}
+`)
+    run('javac', ['-cp', classPath, '-d', tmp, hitSoundSource])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.packet.MiningHitSoundSmoke'])
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
@@ -1267,6 +1338,7 @@ function assertAggregatedStartupBlockStateMappingWarnings () {
   for (const marker of [
     'private static final int MISSING_MAPPING_SAMPLE_LIMIT = 8',
     'int missingMappingCount = 0',
+    'if (!BedrockBlockStateCompatibility.hasCompatibilityAlias(bedrockId))',
     'missingMappingSamples.size() < MISSING_MAPPING_SAMPLE_LIMIT',
     'Missing " + missingMappingCount + " bedrock -> java block state mapping(s)',
     'applied the INFO_UPDATE fallback for each'
@@ -1300,6 +1372,8 @@ function assertBedrockBlockStateCompatibility () {
     'computedAliasDataSha256()',
     'MessageDigest.getInstance("SHA-256")',
     'Bedrock block-state compatibility alias digest mismatch',
+    'public static boolean hasCompatibilityAlias',
+    'public static int localIdFromCurrentPalette',
     'blockStateIdMappings',
     'blockStateTags',
     'Installed " + installed + " Bedrock 1.26.50 block-state compatibility aliases'
@@ -1313,7 +1387,7 @@ function assertBedrockBlockStateCompatibility () {
   }
 
   const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(className)]).stdout
-  for (const marker of ['install', 'aliasCount', 'localId', 'computedAliasDataSha256', 'sha256', 'blockStateIdMappings', 'blockStateTags']) {
+  for (const marker of ['install', 'aliasCount', 'hasCompatibilityAlias', 'localIdFromCurrentPalette', 'computedAliasDataSha256', 'sha256', 'blockStateIdMappings', 'blockStateTags']) {
     if (!bytecode.includes(marker)) throw new Error(`Bedrock block-state compatibility class is missing bytecode: ${marker}`)
   }
 
@@ -1327,7 +1401,9 @@ package net.raphimc.viabedrock.protocol.storage;
 
 import com.viaversion.viaversion.libs.fastutil.ints.Int2IntOpenHashMap;
 import com.viaversion.viaversion.libs.fastutil.ints.Int2ObjectOpenHashMap;
+import com.google.common.collect.HashBiMap;
 import net.raphimc.viabedrock.ViaBedrock;
+import net.raphimc.viabedrock.api.model.BlockState;
 import net.raphimc.viabedrock.platform.ViaBedrockConfig;
 import net.raphimc.viabedrock.platform.ViaBedrockPlatform;
 import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
@@ -1389,12 +1465,14 @@ public final class BedrockBlockStateCompatibilitySmoke {
 
     public static void main(String[] args) throws Exception {
         check(BedrockBlockStateCompatibility.aliasCount() == 5765, "alias count");
-        check(BedrockBlockStateCompatibility.localId(1023209031) == 128325399, "stone stair alias");
-        check(BedrockBlockStateCompatibility.localId(-629848190) == 1997655867, "oak fence alias");
-        check(BedrockBlockStateCompatibility.localId(1343894540) == -413905954, "poplar shelf alias");
-        check(BedrockBlockStateCompatibility.localId(1550144044) == 650702320, "poplar door alias");
-        check(BedrockBlockStateCompatibility.localId(1601900097) == 313457523, "straw bed alias");
-        check(BedrockBlockStateCompatibility.localId(123456789) == 123456789, "unknown id passthrough");
+        check(BedrockBlockStateCompatibility.hasCompatibilityAlias(1023209031), "known alias membership");
+        check(!BedrockBlockStateCompatibility.hasCompatibilityAlias(123456789), "unknown alias membership");
+        check(BedrockBlockStateCompatibility.localIdFromCurrentPalette(1023209031) == 128325399, "stone stair alias");
+        check(BedrockBlockStateCompatibility.localIdFromCurrentPalette(-629848190) == 1997655867, "oak fence alias");
+        check(BedrockBlockStateCompatibility.localIdFromCurrentPalette(1343894540) == -413905954, "poplar shelf alias");
+        check(BedrockBlockStateCompatibility.localIdFromCurrentPalette(1550144044) == 650702320, "poplar door alias");
+        check(BedrockBlockStateCompatibility.localIdFromCurrentPalette(1601900097) == 313457523, "straw bed alias");
+        check(BedrockBlockStateCompatibility.localIdFromCurrentPalette(123456789) == 123456789, "unknown id passthrough");
         check(BedrockBlockStateCompatibility.computedAliasDataSha256().equals(
                 "630d18a535900fbfbe6a4ea2bc4aaa11f5313840e83d4364f4cf0c97dc07b8e5"), "alias digest");
 
@@ -1406,12 +1484,21 @@ public final class BedrockBlockStateCompatibilitySmoke {
         javaIds.put(-413905954, 9003);
         javaIds.put(650702320, 9004);
         javaIds.put(313457523, 9005);
+        javaIds.put(-1054044407, 9006);
         final Int2ObjectOpenHashMap<String> tags = new Int2ObjectOpenHashMap<>();
         tags.put(-413905954, "shelf");
+        final HashBiMap<BlockState, Integer> blockStates = HashBiMap.create();
+        final BlockState stoneStairs = BlockState.fromString("minecraft:stone_stairs[facing=north]");
+        final BlockState poplarStairs = BlockState.fromString("minecraft:poplar_stairs[upside_down_bit=0,weirdo_direction=0]");
+        final BlockState oakStairs = BlockState.fromString("minecraft:oak_stairs[upside_down_bit=0,weirdo_direction=0]");
+        blockStates.put(stoneStairs, 128325399);
+        blockStates.put(poplarStairs, -2132602205);
+        blockStates.put(oakStairs, -1054044407);
 
         final BlockStateRewriter rewriter = emptyRewriter();
         setField(rewriter, "blockStateIdMappings", javaIds);
         setField(rewriter, "blockStateTags", tags);
+        setField(rewriter, "blockStateMappings", blockStates);
         BedrockBlockStateCompatibility.install(rewriter);
 
         check(rewriter.javaId(1023209031) == 9001, "installed stair mapping");
@@ -1420,6 +1507,14 @@ public final class BedrockBlockStateCompatibilitySmoke {
         check(rewriter.javaId(1550144044) == 9004, "installed door mapping");
         check(rewriter.javaId(1601900097) == 9005, "installed bed mapping");
         check("shelf".equals(rewriter.tag(1343894540)), "installed shelf tag");
+        check(stoneStairs.equals(rewriter.blockState(128325399)), "direct local block state");
+        check(stoneStairs.equals(rewriter.blockState(1023209031)), "compatibility block state fallback");
+        check(poplarStairs.equals(rewriter.blockState(-2132602205)),
+                "an embedded id must win even when it is also an alias key");
+        check(rewriter.localBlockStateIdFromCurrentPalette(-2132602205) == -1054044407,
+                "an explicitly current-palette lookup must use the compatibility target");
+        check(rewriter.localBlockStateIdFromCurrentPalette(1023209031) == 128325399,
+                "a genuine live current-palette hash must resolve to the embedded state");
         check(rewriter.javaId(123456789) == -1, "unknown mapping remains absent");
         check(rewriter.tag(123456789) == null, "unknown tag remains absent");
     }
@@ -2205,8 +2300,22 @@ function assertMouseActionStateMachine () {
       !nativeSwapPath.includes('bridgeSwapStackSlotFromClickSlot(second, secondBefore)')) {
     throw new Error('number-key swaps must resolve both endpoints through the Swap-specific player inventory descriptor')
   }
-  if (!nativeSwapPath.includes('ContainerEnumName.CombinedHotbarAndInventoryContainer')) {
-    throw new Error('player inventory Swap endpoints must use Bedrock\'s combined hotbar-and-inventory container')
+  if (!nativeSwapPath.includes('ContainerEnumName.HotbarContainer') ||
+      !nativeSwapPath.includes('ContainerEnumName.InventoryContainer')) {
+    throw new Error('player inventory Swap endpoints must retain split Bedrock hotbar/inventory descriptors')
+  }
+  if (nativeSwapPath.includes('ContainerEnumName.CombinedHotbarAndInventoryContainer')) {
+    throw new Error('number-key Swap endpoints must not be flattened into the combined player inventory container')
+  }
+  const nativeQuickMoveStart = inventorySource.indexOf('private boolean bridgeTrySendNativeQuickMove(')
+  const nativeQuickMoveEnd = inventorySource.indexOf('private static boolean bridgeIsCraftingInputSlot(', nativeQuickMoveStart)
+  const nativeQuickMovePath = inventorySource.slice(nativeQuickMoveStart, nativeQuickMoveEnd)
+  if (nativeQuickMoveStart < 0 || nativeQuickMoveEnd < 0 ||
+      !nativeQuickMovePath.includes('bridgeRememberPendingNativeRequest(')) {
+    throw new Error('crafting-grid QUICK_MOVE must retain per-slot request ownership and rollback tracking')
+  }
+  if (nativeQuickMovePath.includes('bridgeSetLatestNativeRequestId(')) {
+    throw new Error('non-cursor crafting-grid QUICK_MOVE must not make an older pending cursor ACK stale')
   }
   for (const marker of [
     'ClientboundBedrockPackets.ITEM_STACK_RESPONSE',
@@ -2402,6 +2511,7 @@ function assertRecipeBookSync () {
     'Types.HOLDER_SET',
     'HolderSet.of(slot.itemIds())',
     'SLOT_COMPOSITE',
+    'localBlockStateIdFromCurrentPalette(',
     'unlock_state_ready',
     'unlocked_recipe_ids'
   ]) {
@@ -2438,7 +2548,7 @@ function assertRecipeBookSync () {
   if (!PATCH_SOURCE_RELATIVE_PATHS.includes('RecipeBookTracker.java')) throw new Error('RecipeBookTracker.java is not registered in the ViaProxy patch')
 
   const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/RecipeBookTracker.class')]).stdout
-  for (const marker of ['RECIPE_BOOK_ADD', 'RECIPE_BOOK_REMOVE', 'RECIPE_BOOK_SETTINGS', 'UPDATE_RECIPES', 'HOLDER_SET', 'itemTemplate', 'writeRecipeDisplay', 'handlePlaceRecipe']) {
+  for (const marker of ['RECIPE_BOOK_ADD', 'RECIPE_BOOK_REMOVE', 'RECIPE_BOOK_SETTINGS', 'UPDATE_RECIPES', 'HOLDER_SET', 'itemTemplate', 'localBlockStateIdFromCurrentPalette', 'writeRecipeDisplay', 'handlePlaceRecipe']) {
     if (!bytecode.includes(marker)) throw new Error(`RecipeBookTracker.class is missing packet bytecode: ${marker}`)
   }
 }
@@ -2469,8 +2579,13 @@ function assertCraftingTableBridge () {
     'javaItems[1 + i] = hudContainer.getJavaItem(32 + i)',
     'if (javaSlot >= 1 && javaSlot <= 9) return 31 + javaSlot',
     'slot >= 28 && slot <= 40',
+    'bedrockSlot >= 28 && bedrockSlot <= 40',
     'bridge-crafting-recipes-3x3.json',
     'craft_3x3_quick_move',
+    'bridgeTrySendNativeQuickMove',
+    'crafting_grid_quick_move_native_stack_request',
+    'crafting_grid_quick_move_waiting_for_authority',
+    'BedrockProtocol.MAPPINGS.getBedrockItemTags()',
     'bridgeAppendCloseReturnMoves',
     'bridgeExecuteRecipeBookMoves(moves)',
     'queued modern close return',

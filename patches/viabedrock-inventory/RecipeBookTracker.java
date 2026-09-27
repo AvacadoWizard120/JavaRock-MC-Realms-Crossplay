@@ -30,6 +30,7 @@ import net.raphimc.viabedrock.ViaBedrock;
 import net.raphimc.viabedrock.api.model.container.player.InventoryContainer;
 import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.model.BedrockItem;
+import net.raphimc.viabedrock.protocol.rewriter.BlockStateRewriter;
 import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
 import com.viaversion.viaversion.protocols.v1_21_11to26_1.packet.ClientboundPackets26_1;
 
@@ -250,7 +251,11 @@ public final class RecipeBookTracker extends StoredObject {
         final int metadata = normalizedMetadata(jsonInt(result, "metadata", 0));
         final int count = Math.max(1, Math.min(127, jsonInt(result, "count", 1)));
         final BedrockItem bedrockItem = new BedrockItem(networkId, (short) metadata, (byte) count);
-        bedrockItem.setBlockRuntimeId(jsonInt(result, "block_runtime_id", 0));
+        // Recipe output descriptors come from the live Realm palette, while
+        // ViaBedrock's item mappings are keyed by its embedded local palette.
+        bedrockItem.setBlockRuntimeId(this.user().get(BlockStateRewriter.class).localBlockStateIdFromCurrentPalette(
+                jsonInt(result, "block_runtime_id", 0)
+        ));
         final Item item = this.user().get(ItemRewriter.class).javaItem(bedrockItem);
         if (item != null) item.setAmount(count);
         return item;

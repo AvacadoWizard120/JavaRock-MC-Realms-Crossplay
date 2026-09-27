@@ -54,7 +54,8 @@ public class ClientPlayerEntity extends PlayerEntity {
     // Java 26.2 treats zero as "not assigned". Keep the local player outside the
     // low positive range allocated by EntityTracker for Bedrock world entities.
     private static final int JAVA_ENTITY_ID = Integer.MAX_VALUE;
-    private static final int COMPLETED_MINING_SWING_SUPPRESSION_TICKS = 4;
+    private static final int COMPLETED_MINING_SWING_SUPPRESSION_TICKS = 5;
+    private static final int MINING_HIT_SOUND_INTERVAL_TICKS = 4;
     private final AtomicInteger TELEPORT_ID = new AtomicInteger(1);
     private final GameSessionStorage gameSession;
 
@@ -91,6 +92,7 @@ public class ClientPlayerEntity extends PlayerEntity {
     private GameMode javaGameMode;
     private boolean cancelNextSwingPacket;
     private int completedMiningSwingSuppressionThroughTick = Integer.MIN_VALUE;
+    private int lastMiningHitSoundTick = Integer.MIN_VALUE;
     private BlockBreakingInfo blockBreakingInfo;
 
     public ClientPlayerEntity(final UserConnection user, final long runtimeId, final UUID javaUuid, final PlayerAbilities abilities) {
@@ -532,12 +534,26 @@ public class ClientPlayerEntity extends PlayerEntity {
         this.completedMiningSwingSuppressionThroughTick = Integer.MIN_VALUE;
     }
 
+    static boolean bridgeShouldPlayMiningHitSound(final int currentTick, final int lastSoundTick) {
+        return lastSoundTick == Integer.MIN_VALUE || currentTick - lastSoundTick >= MINING_HIT_SOUND_INTERVAL_TICKS;
+    }
+
+    public boolean consumeMiningHitSoundCadence() {
+        if (this.blockBreakingInfo == null || !bridgeShouldPlayMiningHitSound(this.age(), this.lastMiningHitSoundTick)) {
+            return false;
+        }
+
+        this.lastMiningHitSoundTick = this.age();
+        return true;
+    }
+
     public BlockBreakingInfo blockBreakingInfo() {
         return this.blockBreakingInfo;
     }
 
     public void setBlockBreakingInfo(final BlockBreakingInfo blockBreakingInfo) {
         this.blockBreakingInfo = blockBreakingInfo;
+        this.lastMiningHitSoundTick = Integer.MIN_VALUE;
     }
 
     public void setRequestedDismount(final boolean requestedDismount) {
@@ -632,7 +648,7 @@ public class ClientPlayerEntity extends PlayerEntity {
     public record DimensionChangeInfo(Long loadingScreenId) {
     }
 
-    public record BlockBreakingInfo(BlockPosition position, Direction direction) {
+    public record BlockBreakingInfo(BlockPosition position, Direction direction, int bedrockBlockState) {
     }
 
     public record AuthInputBlockAction(PlayerActionType action, BlockPosition position, int direction) {

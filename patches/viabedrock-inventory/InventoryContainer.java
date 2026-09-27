@@ -477,6 +477,25 @@ public class InventoryContainer extends Container {
         BedrockItem toBefore = safeCopy(to.container.getItem(to.bedrockSlot));
         BedrockItem fromAfter = BedrockItem.empty();
         BedrockItem toAfter = fromBefore.copy();
+
+        // Bedrock's crafting input is item-stack-request-only. In particular,
+        // the workbench lives in UI slots 32..40, which the old legacy relay
+        // mapper did not recognize at all. Keep this move attached to a native
+        // request so a rejection can roll back both local slot predictions.
+        if (bridgeIsCraftingInputSlot(from)) {
+            if (this.bridgeTrySendNativeQuickMove(from, to, fromBefore, toBefore, fromAfter, toAfter)) {
+                this.bridgeClearPendingCraft();
+                this.publishJavaInventorySnapshot("crafting_grid_quick_move_native_stack_request");
+                return true;
+            }
+            this.publishJavaInventorySnapshot("crafting_grid_quick_move_waiting_for_authority");
+            ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                    "[BedrockRealmBridge] blocked crafting-grid quick_move without authoritative native stack ids" +
+                            " source=" + from.bedrockSlot +
+                            " destination=" + to.bedrockSlot);
+            return true;
+        }
+
         List<InventoryActionData> actions = new ArrayList<>();
         actions.add(containerAction(from, fromBefore, fromAfter));
         actions.add(containerAction(to, toBefore, toAfter));
@@ -485,6 +504,63 @@ public class InventoryContainer extends Container {
         this.sendNormalInventoryTransaction(actions, "quick_move");
         this.publishJavaInventorySnapshot("quick_move");
         return true;
+    }
+
+    private boolean bridgeTrySendNativeQuickMove(
+            ClickSlot sourceSlot,
+            ClickSlot destinationSlot,
+            BedrockItem sourceBefore,
+            BedrockItem destinationBefore,
+            BedrockItem sourceAfter,
+            BedrockItem destinationAfter) {
+        BridgeNativeStackSlot source = bridgeStackSlotFromClickSlot(sourceSlot, sourceBefore);
+        BridgeNativeStackSlot destination = bridgeStackSlotFromClickSlot(destinationSlot, destinationBefore);
+        if (!bridgeCanUseStackRequestSource(ItemStackRequestActionType.Place, source) ||
+                !bridgeCanUseStackRequestSwapSlot(destination, destinationBefore)) {
+            return false;
+        }
+
+        int requestId = this.nextItemStackRequestId();
+        // This request changes two item slots but never the cursor. Do not
+        // advance the cursor-response watermark: an older pending cursor ACK
+        // still owns the carried-item state and must be allowed to apply.
+        if (!isEmpty(sourceAfter)) sourceAfter.setNetId(Integer.valueOf(requestId));
+        if (!isEmpty(destinationAfter)) destinationAfter.setNetId(Integer.valueOf(requestId));
+        this.bridgeRememberPendingNativeRequest(
+                requestId,
+                List.of(sourceSlot, destinationSlot),
+                List.of(sourceAfter, destinationAfter),
+                this.carriedItem,
+                this.carriedItem);
+        this.sendItemStackRequestMove(
+                requestId,
+                ItemStackRequestActionType.Place,
+                sourceBefore.amount(),
+                source,
+                destination,
+                "crafting_grid_quick_move");
+        sourceSlot.container.setItem(sourceSlot.bedrockSlot, safeCopy(sourceAfter));
+        destinationSlot.container.setItem(destinationSlot.bedrockSlot, safeCopy(destinationAfter));
+        this.bridgeRememberCraftingGridSlotIfApplicable(
+                sourceSlot.sourceContainerId,
+                sourceSlot.bedrockSlot,
+                sourceAfter);
+        this.bridgeRememberCraftingGridSlotIfApplicable(
+                destinationSlot.sourceContainerId,
+                destinationSlot.bedrockSlot,
+                destinationAfter);
+        ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                "[BedrockRealmBridge] sent native crafting-grid quick_move item_stack_request" +
+                        " requestId=" + requestId +
+                        " source=" + source.describe() +
+                        " destination=" + destination.describe());
+        return true;
+    }
+
+    private static boolean bridgeIsCraftingInputSlot(ClickSlot slot) {
+        return slot != null &&
+                slot.sourceContainerId == ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue() &&
+                slot.bedrockSlot >= 28 && slot.bedrockSlot <= 40;
     }
 
     private boolean handleQuickCraftClick(int javaSlot, byte button) {
@@ -1487,6 +1563,15 @@ public class InventoryContainer extends Container {
         String id = identifier.substring("minecraft:".length());
         String normalizedTag = tag.startsWith("minecraft:") ? tag.substring("minecraft:".length()) : tag;
 
+        // The mapping bundle contains the complete Bedrock item-tag table used
+        // by the live crafting-data packet. Prefer it over heuristic suffix
+        // matching so recipes such as stone tools accept every actual member of
+        // minecraft:stone_tool_materials without guessing or hardcoding items.
+        Set<String> taggedItems = BedrockProtocol.MAPPINGS.getBedrockItemTags().get(tag);
+        if (taggedItems == null) taggedItems = BedrockProtocol.MAPPINGS.getBedrockItemTags().get(normalizedTag);
+        if (taggedItems == null) taggedItems = BedrockProtocol.MAPPINGS.getBedrockItemTags().get("minecraft:" + normalizedTag);
+        if (taggedItems != null) return taggedItems.contains(identifier);
+
         if (normalizedTag.equals("planks")) return id.endsWith("_planks");
         if (normalizedTag.equals("coals")) return id.equals("coal") || id.equals("charcoal");
         if (normalizedTag.equals("egg")) return id.equals("egg");
@@ -1706,8 +1791,11 @@ public class InventoryContainer extends Container {
                 clickSlot.sourceContainerId == ContainerID.CONTAINER_ID_INVENTORY.getValue() &&
                 clickSlot.bedrockSlot >= 0 && clickSlot.bedrockSlot <= 35) {
             int stackId = isEmpty(item) || item.netId() == null ? 0 : item.netId().intValue();
+            ContainerEnumName name = clickSlot.bedrockSlot <= 8
+                    ? ContainerEnumName.HotbarContainer
+                    : ContainerEnumName.InventoryContainer;
             return new BridgeNativeStackSlot(
-                    ContainerEnumName.CombinedHotbarAndInventoryContainer,
+                    name,
                     clickSlot.bedrockSlot,
                     stackId);
         }
@@ -2720,7 +2808,7 @@ public class InventoryContainer extends Container {
         BedrockItem out = safeCopy(item);
         if (!isEmpty(out) &&
                 sourceContainerId == ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue() &&
-                bedrockSlot >= 28 && bedrockSlot <= 31) {
+                bedrockSlot >= 28 && bedrockSlot <= 40) {
             out.setNetId(null);
         }
         return out;
