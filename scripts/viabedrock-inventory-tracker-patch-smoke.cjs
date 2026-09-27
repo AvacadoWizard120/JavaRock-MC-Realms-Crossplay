@@ -1116,6 +1116,7 @@ public final class DoorAckOrderSmoke {
 
 function assertMiningSwingSuppression () {
   const source = fs.readFileSync(path.join(patchRoot, 'ClientPlayerPackets.java'), 'utf8')
+  const entitySource = fs.readFileSync(path.join(patchRoot, 'ClientPlayerEntity.java'), 'utf8')
   const abortStart = source.indexOf('case ABORT_DESTROY_BLOCK ->')
   const abortEnd = source.indexOf('case STOP_DESTROY_BLOCK ->', abortStart)
   const abortHandler = source.slice(abortStart, abortEnd)
@@ -1123,21 +1124,99 @@ function assertMiningSwingSuppression () {
       abortHandler.indexOf('clientPlayer.cancelNextSwingPacket()') > abortHandler.indexOf('clientPlayer.setBlockBreakingInfo(null)')) {
     throw new Error('ABORT_DESTROY_BLOCK must suppress its trailing Java swing before clearing mining state')
   }
+  const stopStart = source.indexOf('case STOP_DESTROY_BLOCK ->', abortEnd)
+  const stopEnd = source.indexOf('case DROP_ALL_ITEMS, DROP_ITEM ->', stopStart)
+  const stopHandler = source.slice(stopStart, stopEnd)
+  const blockStateSnapshot = stopHandler.indexOf('final int brokenJavaBlockState = chunkTracker.getJavaBlockState(position)')
+  const completedSwingSuppression = stopHandler.indexOf('clientPlayer.suppressCompletedMiningSwings()')
+  const clearBreakingState = stopHandler.indexOf('clientPlayer.setBlockBreakingInfo(null)')
+  const breakEffect = stopHandler.indexOf('bridgeSendJavaBlockBreakEffect(wrapper.user(), position, brokenJavaBlockState)')
+  const predictAir = stopHandler.indexOf('chunkTracker.handleBlockChange(position, 0, chunkTracker.bedrockAirId())')
+  if (blockStateSnapshot < 0 || completedSwingSuppression < blockStateSnapshot || clearBreakingState < completedSwingSuppression ||
+      breakEffect < clearBreakingState || predictAir < breakEffect) {
+    throw new Error('STOP_DESTROY_BLOCK must bound trailing swings and emit the block-specific destroy effect before predicting air')
+  }
+
+  for (const marker of [
+    'private static final int COMPLETED_MINING_SWING_SUPPRESSION_TICKS = 4',
+    'private int completedMiningSwingSuppressionThroughTick = Integer.MIN_VALUE',
+    'static boolean bridgeShouldSuppressCompletedMiningSwing',
+    'this.completedMiningSwingSuppressionThroughTick = this.age() + COMPLETED_MINING_SWING_SUPPRESSION_TICKS',
+    'this.clearCompletedMiningSwingSuppression()'
+  ]) {
+    if (!entitySource.includes(marker)) throw new Error(`completed-mining swing suppression is missing marker: ${marker}`)
+  }
+  for (const marker of [
+    'PacketWrapper.create(ClientboundPackets26_1.LEVEL_EVENT, user)',
+    'LevelEvent.PARTICLES_DESTROY_BLOCK.getValue()',
+    'blockBreakEffect.write(Types.INT, javaBlockState)',
+    'blockBreakEffect.send(BedrockProtocol.class)'
+  ]) {
+    if (!source.includes(marker)) throw new Error(`predicted block-break sound/effect is missing marker: ${marker}`)
+  }
+
   const swingStart = source.indexOf('protocol.registerServerbound(ServerboundPackets26_1.SWING')
   const swingEnd = source.indexOf('\n    }\n\n    private static void writeItemFrameInteraction', swingStart)
   const handler = source.slice(swingStart, swingEnd)
+  const completedSuppressionCheck = handler.indexOf('clientPlayer.checkCompletedMiningSwingSuppression()')
   const breakingCheck = handler.indexOf('if (clientPlayer.blockBreakingInfo() != null)')
   const cancellation = handler.indexOf('wrapper.cancel()', breakingCheck)
   const authorityCheck = handler.indexOf('if (!gameSession.isBlockBreakingServerAuthoritative())', cancellation)
   const crackProgress = handler.indexOf('PlayerActionType.CrackBlock', authorityCheck)
   const breakingReturn = handler.indexOf('return', crackProgress)
   const bedrockAnimate = handler.indexOf('AnimatePacketPayload_Action.Swing')
-  if (breakingCheck < 0 || cancellation < breakingCheck || authorityCheck < cancellation ||
+  if (completedSuppressionCheck < 0 || completedSuppressionCheck > breakingCheck || breakingCheck < 0 ||
+      cancellation < breakingCheck || authorityCheck < cancellation ||
       crackProgress < authorityCheck || breakingReturn < crackProgress || bedrockAnimate < breakingReturn) {
-    throw new Error('mining SWING must preserve client-authoritative CrackBlock progress, then return before Bedrock Attack animation')
+    throw new Error('mining SWING must suppress the completion tail, preserve client-authoritative CrackBlock progress, then return before Bedrock Attack animation')
   }
   if ((handler.match(/PlayerAuthInputPacketPayload_InputData\.MissedSwing/g) || []).length !== 1) {
     throw new Error('only a genuine non-mining Java swing should set Bedrock MissedSwing')
+  }
+
+  const entityBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/api/model/entity/ClientPlayerEntity.class'
+  )]).stdout
+  for (const marker of ['checkCompletedMiningSwingSuppression', 'suppressCompletedMiningSwings', 'clearCompletedMiningSwingSuppression']) {
+    if (!entityBytecode.includes(marker)) throw new Error(`compiled ClientPlayerEntity.class is missing mining-tail bytecode: ${marker}`)
+  }
+  const packetsBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/protocol/packet/ClientPlayerPackets.class'
+  )]).stdout
+  for (const marker of ['bridgeSendJavaBlockBreakEffect', 'PARTICLES_DESTROY_BLOCK', 'checkCompletedMiningSwingSuppression']) {
+    if (!packetsBytecode.includes(marker)) throw new Error(`compiled ClientPlayerPackets.class is missing mining sound/suppression bytecode: ${marker}`)
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-mining-tail-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'api', 'model', 'entity')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const smokeSource = path.join(packageDir, 'MiningTailSmoke.java')
+    fs.writeFileSync(smokeSource, `
+package net.raphimc.viabedrock.api.model.entity;
+
+public final class MiningTailSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        check(ClientPlayerEntity.bridgeShouldSuppressCompletedMiningSwing(439, 442),
+                "the first post-completion swing must be suppressed");
+        check(ClientPlayerEntity.bridgeShouldSuppressCompletedMiningSwing(442, 442),
+                "the fourth post-completion swing must be suppressed");
+        check(!ClientPlayerEntity.bridgeShouldSuppressCompletedMiningSwing(443, 442),
+                "a later intentional swing must not be suppressed");
+        check(!ClientPlayerEntity.bridgeShouldSuppressCompletedMiningSwing(0, Integer.MIN_VALUE),
+                "the inactive sentinel must not suppress swings");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, smokeSource])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.api.model.entity.MiningTailSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
   }
 }
 
@@ -2055,6 +2134,8 @@ function assertMouseActionStateMachine () {
     'clickSlot.container.bridgeNativeStackRequestContainerName()',
     'public boolean bridgeTrySendNativeCursorMove(',
     'public boolean bridgeTrySendNativeSlotSwap(',
+    'private static BridgeNativeStackSlot bridgeSwapStackSlotFromClickSlot(',
+    'ContainerEnumName.CombinedHotbarAndInventoryContainer',
     'ItemStackRequestActionType.Swap',
     'private void sendItemStackRequestSwap(',
     'bridgeSameItemAndAmount(slotAfter, cursorBefore)',
@@ -2116,6 +2197,16 @@ function assertMouseActionStateMachine () {
   if (inventorySource.includes('sendNormalInventoryTransaction(actions, "swap")') ||
       inventorySource.includes('bridgeSendNormalInventoryTransaction(actions, "container_swap")')) {
     throw new Error('number-key swaps must not fall back to legacy inventory_transaction packets')
+  }
+  const nativeSwapStart = inventorySource.indexOf('public boolean bridgeTrySendNativeSlotSwap(')
+  const nativeSwapEnd = inventorySource.indexOf('private static BridgeNativeStackSlot bridgeStackSlotFromClickSlot(', nativeSwapStart)
+  const nativeSwapPath = inventorySource.slice(nativeSwapStart, nativeSwapEnd)
+  if (!nativeSwapPath.includes('bridgeSwapStackSlotFromClickSlot(first, firstBefore)') ||
+      !nativeSwapPath.includes('bridgeSwapStackSlotFromClickSlot(second, secondBefore)')) {
+    throw new Error('number-key swaps must resolve both endpoints through the Swap-specific player inventory descriptor')
+  }
+  if (!nativeSwapPath.includes('ContainerEnumName.CombinedHotbarAndInventoryContainer')) {
+    throw new Error('player inventory Swap endpoints must use Bedrock\'s combined hotbar-and-inventory container')
   }
   for (const marker of [
     'ClientboundBedrockPackets.ITEM_STACK_RESPONSE',

@@ -1666,8 +1666,8 @@ public class InventoryContainer extends Container {
 
         ClickSlot first = new ClickSlot(firstContainer, firstSourceContainerId, firstBedrockSlot);
         ClickSlot second = new ClickSlot(secondContainer, secondSourceContainerId, secondBedrockSlot);
-        BridgeNativeStackSlot source = bridgeStackSlotFromClickSlot(first, firstBefore);
-        BridgeNativeStackSlot destination = bridgeStackSlotFromClickSlot(second, secondBefore);
+        BridgeNativeStackSlot source = bridgeSwapStackSlotFromClickSlot(first, firstBefore);
+        BridgeNativeStackSlot destination = bridgeSwapStackSlotFromClickSlot(second, secondBefore);
         boolean sourceReady = bridgeCanUseStackRequestSwapSlot(source, firstBefore);
         boolean destinationReady = bridgeCanUseStackRequestSwapSlot(destination, secondBefore);
         if (!sourceReady || !destinationReady) {
@@ -1699,6 +1699,19 @@ public class InventoryContainer extends Container {
                         " source=" + source.describe() +
                         " destination=" + destination.describe());
         return true;
+    }
+
+    private static BridgeNativeStackSlot bridgeSwapStackSlotFromClickSlot(ClickSlot clickSlot, BedrockItem item) {
+        if (clickSlot != null &&
+                clickSlot.sourceContainerId == ContainerID.CONTAINER_ID_INVENTORY.getValue() &&
+                clickSlot.bedrockSlot >= 0 && clickSlot.bedrockSlot <= 35) {
+            int stackId = isEmpty(item) || item.netId() == null ? 0 : item.netId().intValue();
+            return new BridgeNativeStackSlot(
+                    ContainerEnumName.CombinedHotbarAndInventoryContainer,
+                    clickSlot.bedrockSlot,
+                    stackId);
+        }
+        return bridgeStackSlotFromClickSlot(clickSlot, item);
     }
 
     private static BridgeNativeStackSlot bridgeStackSlotFromClickSlot(ClickSlot clickSlot, BedrockItem item) {

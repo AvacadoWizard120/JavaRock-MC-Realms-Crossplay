@@ -175,6 +175,7 @@ function installFixture (fixture, resultName, progressName, extraArguments = [])
   const restartRequested = extraArguments.includes('-Restart')
   assert.strictEqual(result.restartRequested, restartRequested)
   assert.strictEqual(result.restartConfirmed, restartRequested)
+  assert.strictEqual(result.setupDeclined, false)
   assert.strictEqual(typeof result.attemptId, 'string')
   assert(result.attemptId.length > 0)
   assert.strictEqual(typeof result.logFile, 'string')
@@ -478,8 +479,14 @@ async function main () {
   write(currentRoot, 'node_modules/updater-smoke-fixture/marker.txt', 'keep across another root version-only change\n')
   // Mirror the real GUI launch: the long-lived child inherits the restart log handle after its launcher exits.
   const restartScript = [
+    'param(',
+    "    [string]$SetupConsentRequestFile = '',",
+    "    [string]$SetupConsentResponseFile = ''",
+    ')',
     "$runtime = Join-Path (Split-Path -Parent $PSScriptRoot) '.runtime'",
     '[IO.Directory]::CreateDirectory($runtime) | Out-Null',
+    "$consentPaths = [ordered]@{ request = $SetupConsentRequestFile; response = $SetupConsentResponseFile } | ConvertTo-Json",
+    "[IO.File]::WriteAllText((Join-Path $runtime 'restart-consent-paths.json'), $consentPaths)",
     "$startInfo = New-Object Diagnostics.ProcessStartInfo",
     "$startInfo.FileName = 'powershell.exe'",
     "$startInfo.Arguments = '-NoLogo -NoProfile -Command \"Start-Sleep -Seconds 5\"'",
@@ -500,6 +507,9 @@ async function main () {
   assert(fs.existsSync(restartPidPath), 'the updated launcher was not started')
   restartChildPid = Number(fs.readFileSync(restartPidPath, 'utf8').trim())
   assert(Number.isSafeInteger(restartChildPid) && restartChildPid > 0)
+  const consentPaths = JSON.parse(fs.readFileSync(path.join(currentRoot, '.runtime', 'restart-consent-paths.json'), 'utf8'))
+  assert.strictEqual(consentPaths.request, '', 'quiet updater restart must preserve the bootstrap\'s standalone consent UI')
+  assert.strictEqual(consentPaths.response, '', 'quiet updater restart must not request an unavailable updater-owned prompt')
   assert(fs.existsSync(path.join(currentRoot, 'node_modules', 'updater-smoke-fixture', 'marker.txt')), 'restart update deleted node_modules for a root version-only lock change')
 
   const badFixture = createReleaseFixture({ version: '1.0.4', fixtureVersion: '2.0.0' })
@@ -566,6 +576,17 @@ async function main () {
   assert.match(updaterSource, /latest-update\.log/)
   assert.match(updaterSource, /Get-SavedDarkModePreference/)
   assert.match(updaterSource, /Set-ProgressWindowTheme/)
+  assert.match(updaterSource, /Show-SetupConsentPrompt/)
+  assert.match(updaterSource, /SetupConsentRequestFile/)
+  assert.match(updaterSource, /SetupConsentResponseFile/)
+  assert.match(updaterSource, /\$useUpdaterSetupConsent = \$null -ne \$script:ProgressForm -and -not \$script:ProgressForm\.IsDisposed/)
+  assert.match(updaterSource, /waiting-for-consent/)
+  assert.match(updaterSource, /setup-consent/)
+  assert.match(updaterSource, /JavaRock needs your permission/)
+  assert.match(updaterSource, /\$script:SetupPromptPanel\.BringToFront\(\)/)
+  assert.match(updaterSource, /JavaRockUpdaterWindowTheme\]::EnsureVisible\(\$script:ProgressForm\.Handle\)/)
+  assert.match(updaterSource, /Setup was not run\. Open JavaRock again when you are ready to finish setup\./)
+  assert.match(updaterSource, /\$failureOutput = if \(\$stderr\.Trim\(\)\) \{ \$stderr \} else \{ \$stdout \}/)
   assert.match(updaterSource, /FromArgb\(32, 33, 36\)/)
   assert.match(updaterSource, /\$form\.TopMost\s*=\s*\$true/)
   assert.match(updaterSource, /EnsureVisible\(\$form\.Handle\)/)

@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.114-viaproxy-3.4.13-interaction-fix'
+const PATCH_ID = 'v0.3.115-viaproxy-3.4.13-inventory-mining-fix'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/rewriter/BlockStateRewriter.class',
   'net/raphimc/viabedrock/protocol/packet/JoinPackets.class',

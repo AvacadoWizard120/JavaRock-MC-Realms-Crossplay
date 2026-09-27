@@ -6,6 +6,7 @@ const assert = require('assert')
 const { createSerializer } = require('bedrock-protocol/src/transforms/serializer')
 const { makeBedrockPlayerAuthInputPacket } = require('../src/bedrockPuppetController')
 const {
+  BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_START,
   bridgeAttachItemStackRequestToPlayerAuthInput,
   bridgeItemStackRequestTouchesOwnInventoryScreen,
   isServerboundBlockOrItemInteraction,
@@ -215,6 +216,7 @@ function makeRelayPlayerHarness (queueImpl) {
   relayPlayer.externalContainerCloseTimer = null
   relayPlayer.pendingBridgeAuthInputItemStackRequests = []
   relayPlayer.bridgeAuthInputItemStackEmbeddingDisabled = false
+  relayPlayer.bridgeNextItemStackRequestId = BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_START
   relayPlayer.bridgePredictedItemStackIds = new Map()
   relayPlayer.externalContainerWindowId = null
   relayPlayer.realmInventoryScreenOpen = true
@@ -664,6 +666,108 @@ withQuietRelayLogs(() => {
   assert.strictEqual(place.source.stack_id, 5476)
   assert.strictEqual(place.destination.slot_type.container_id, 'inventory')
   assert.strictEqual(place.destination.slot, 22)
+})
+
+withQuietRelayLogs(() => {
+  const { relayPlayer, queued } = makeRelayPlayerHarness()
+  relayPlayer.bridgePredictedItemStackIds = new Map([['hotbar:0', 14]])
+  const outstandingNativeRequest = { request: { request_id: -3, actions: [] }, context: 'live:native_click' }
+  relayPlayer.pendingBridgeToRealmItemStackRequests.set('-3', outstandingNativeRequest)
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('inventory_transaction', {
+    transaction: {
+      legacy: { legacy_request_id: 0 },
+      transaction_type: 'normal',
+      actions: [
+        {
+          source_type: 'container',
+          window_id: 0,
+          slot: 0,
+          old_item: { network_id: -753, count: 2, metadata: 0 },
+          new_item: { network_id: 0 }
+        },
+        {
+          source_type: 'container',
+          window_id: 0,
+          slot: 10,
+          old_item: { network_id: 0 },
+          new_item: { network_id: -753, count: 2, metadata: 0 }
+        }
+      ]
+    }
+  }, 'live:captured_player_quick_move'), true)
+
+  assert.strictEqual(queued.length, 1, 'quick-move must send only Take before the Realm acknowledges it')
+  const takeRequest = queued[0].params.requests[0]
+  assert.strictEqual(takeRequest.request_id, BRIDGE_SYNTHETIC_ITEM_STACK_REQUEST_ID_START)
+  assert.notStrictEqual(takeRequest.request_id, -3)
+  assert.strictEqual(relayPlayer.pendingBridgeToRealmItemStackRequests.get('-3'), outstandingNativeRequest, 'synthetic quick-move must not overwrite an outstanding native request')
+  const take = takeRequest.actions[0]
+  assert.strictEqual(take.type_id, 'take')
+  assert.strictEqual(take.source.slot_type.container_id, 'hotbar')
+  assert.strictEqual(take.source.slot, 0)
+  assert.strictEqual(take.source.stack_id, 14)
+  assert.strictEqual(take.destination.slot_type.container_id, 'cursor')
+  assert.strictEqual(take.destination.stack_id, 0)
+  assert.strictEqual(relayPlayer.pendingBridgeSyntheticItemStackPlaces.has(String(takeRequest.request_id)), true)
+
+  relayPlayer.flushBridgeSyntheticFollowUpPlacesFromResponse({
+    responses: [{
+      status: 'ok',
+      request_id: takeRequest.request_id,
+      containers: [{
+        slot_type: { container_id: 'cursor' },
+        slots: [{ slot: 0, hotbar_slot: 0, count: 2, item_stack_id: 9001, custom_name: '', filtered_custom_name: '', durability_correction: 0 }]
+      }]
+    }]
+  }, 'live:captured_player_quick_move')
+
+  assert.strictEqual(queued.length, 2, 'quick-move Place must wait for and follow the accepted Take')
+  const place = queued[1].params.requests[0].actions[0]
+  assert.strictEqual(place.type_id, 'place')
+  assert.strictEqual(place.source.slot_type.container_id, 'cursor')
+  assert.strictEqual(place.source.stack_id, 9001)
+  assert.strictEqual(place.destination.slot_type.container_id, 'inventory')
+  assert.strictEqual(place.destination.slot, 10)
+  assert.strictEqual(place.destination.stack_id, 0)
+})
+
+withQuietRelayLogs(() => {
+  const { relayPlayer, queued } = makeRelayPlayerHarness()
+  relayPlayer.bridgePredictedItemStackIds = new Map([['cursor:0', 21]])
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('inventory_transaction', {
+    transaction: {
+      legacy: { legacy_request_id: 0 },
+      transaction_type: 'normal',
+      actions: [
+        {
+          source_type: 'global',
+          slot: 0,
+          old_item: { network_id: 5, count: 2, metadata: 0, has_stack_id: 0 },
+          new_item: { network_id: 5, count: 1, metadata: 0, has_stack_id: 0 }
+        },
+        {
+          source_type: 'container',
+          window_id: 0,
+          slot: 10,
+          old_item: { network_id: 0 },
+          new_item: { network_id: 5, count: 1, metadata: 0, has_stack_id: 0 }
+        }
+      ]
+    }
+  }, 'live:partial_cursor_place'), true)
+
+  assert.strictEqual(queued.length, 1, 'partial cursor Place must not be dropped against its own local prediction')
+  const placeRequest = queued[0].params.requests[0]
+  const place = placeRequest.actions[0]
+  assert.strictEqual(place.type_id, 'place')
+  assert.strictEqual(place.source.slot_type.container_id, 'cursor')
+  assert.strictEqual(place.source.stack_id, 21)
+  assert.notStrictEqual(place.source.stack_id, placeRequest.request_id)
+  assert.strictEqual(place.destination.slot_type.container_id, 'inventory')
+  assert.strictEqual(place.destination.slot, 10)
+  assert.strictEqual(place.destination.stack_id, 0)
 })
 
 withQuietRelayLogs(() => {

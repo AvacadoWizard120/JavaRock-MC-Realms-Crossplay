@@ -32,6 +32,13 @@ $script:ProgressStatusLabel = $null
 $script:ProgressDetailLabel = $null
 $script:ProgressBar = $null
 $script:ProgressCloseButton = $null
+$script:SetupPromptPanel = $null
+$script:SetupPromptMessageLabel = $null
+$script:SetupPromptDetailsBox = $null
+$script:SetupPromptNoteLabel = $null
+$script:SetupPromptYesButton = $null
+$script:SetupPromptNoButton = $null
+$script:SetupConsentDecision = $null
 $script:ProgressDarkMode = $false
 $script:UpdateMutex = $null
 $script:UpdateMutexHeld = $false
@@ -255,6 +262,22 @@ function Set-ProgressWindowTheme {
         $script:ProgressCloseButton.BackColor = [Drawing.Color]::FromArgb(51, 55, 61)
         $script:ProgressCloseButton.ForeColor = [Drawing.Color]::FromArgb(232, 234, 237)
         $script:ProgressCloseButton.FlatStyle = [Windows.Forms.FlatStyle]::Flat
+        if ($null -ne $script:SetupPromptPanel) {
+            $script:SetupPromptPanel.BackColor = $script:ProgressForm.BackColor
+            $script:SetupPromptPanel.ForeColor = $script:ProgressForm.ForeColor
+            foreach ($label in @($script:SetupPromptPanel.Controls | Where-Object { $_ -is [Windows.Forms.Label] })) {
+                $label.BackColor = $script:SetupPromptPanel.BackColor
+                $label.ForeColor = $script:SetupPromptPanel.ForeColor
+            }
+            $script:SetupPromptDetailsBox.BackColor = [Drawing.Color]::FromArgb(42, 45, 50)
+            $script:SetupPromptDetailsBox.ForeColor = [Drawing.Color]::FromArgb(232, 234, 237)
+            foreach ($button in @($script:SetupPromptYesButton, $script:SetupPromptNoButton)) {
+                $button.UseVisualStyleBackColor = $false
+                $button.BackColor = [Drawing.Color]::FromArgb(51, 55, 61)
+                $button.ForeColor = [Drawing.Color]::FromArgb(232, 234, 237)
+                $button.FlatStyle = [Windows.Forms.FlatStyle]::Flat
+            }
+        }
     } else {
         $script:ProgressForm.BackColor = [Drawing.SystemColors]::Control
         $script:ProgressForm.ForeColor = [Drawing.SystemColors]::ControlText
@@ -264,6 +287,20 @@ function Set-ProgressWindowTheme {
         }
         $script:ProgressCloseButton.UseVisualStyleBackColor = $true
         $script:ProgressCloseButton.FlatStyle = [Windows.Forms.FlatStyle]::Standard
+        if ($null -ne $script:SetupPromptPanel) {
+            $script:SetupPromptPanel.BackColor = [Drawing.SystemColors]::Control
+            $script:SetupPromptPanel.ForeColor = [Drawing.SystemColors]::ControlText
+            foreach ($label in @($script:SetupPromptPanel.Controls | Where-Object { $_ -is [Windows.Forms.Label] })) {
+                $label.BackColor = $script:SetupPromptPanel.BackColor
+                $label.ForeColor = $script:SetupPromptPanel.ForeColor
+            }
+            $script:SetupPromptDetailsBox.BackColor = [Drawing.SystemColors]::Window
+            $script:SetupPromptDetailsBox.ForeColor = [Drawing.SystemColors]::WindowText
+            foreach ($button in @($script:SetupPromptYesButton, $script:SetupPromptNoButton)) {
+                $button.UseVisualStyleBackColor = $true
+                $button.FlatStyle = [Windows.Forms.FlatStyle]::Standard
+            }
+        }
     }
 }
 
@@ -387,11 +424,64 @@ function Initialize-UpdateProgressWindow {
     })
     $form.Controls.Add($close)
 
+    $setupPanel = New-Object Windows.Forms.Panel
+    $setupPanel.Dock = [Windows.Forms.DockStyle]::Fill
+    $setupPanel.Visible = $false
+
+    $setupTitle = New-Object Windows.Forms.Label
+    $setupTitle.Text = 'JavaRock needs your permission'
+    $setupTitle.Font = New-Object Drawing.Font('Segoe UI Semibold', 15)
+    $setupTitle.Location = New-Object Drawing.Point(22, 18)
+    $setupTitle.Size = New-Object Drawing.Size(570, 32)
+    $setupPanel.Controls.Add($setupTitle)
+
+    $setupMessage = New-Object Windows.Forms.Label
+    $setupMessage.Text = 'JavaRock needs to prepare required software and files before it opens.'
+    $setupMessage.Location = New-Object Drawing.Point(24, 58)
+    $setupMessage.Size = New-Object Drawing.Size(570, 40)
+    $setupPanel.Controls.Add($setupMessage)
+
+    $setupDetails = New-Object Windows.Forms.TextBox
+    $setupDetails.Location = New-Object Drawing.Point(25, 103)
+    $setupDetails.Size = New-Object Drawing.Size(570, 165)
+    $setupDetails.Multiline = $true
+    $setupDetails.ReadOnly = $true
+    $setupDetails.ScrollBars = [Windows.Forms.ScrollBars]::Vertical
+    $setupDetails.TabStop = $false
+    $setupPanel.Controls.Add($setupDetails)
+
+    $setupNote = New-Object Windows.Forms.Label
+    $setupNote.Text = 'Choosing No leaves the update installed and keeps JavaRock closed.'
+    $setupNote.Location = New-Object Drawing.Point(24, 278)
+    $setupNote.Size = New-Object Drawing.Size(570, 44)
+    $setupPanel.Controls.Add($setupNote)
+
+    $setupNo = New-Object Windows.Forms.Button
+    $setupNo.Text = 'No'
+    $setupNo.Location = New-Object Drawing.Point(387, 337)
+    $setupNo.Size = New-Object Drawing.Size(100, 30)
+    $setupNo.Add_Click({ $script:SetupConsentDecision = $false })
+    $setupPanel.Controls.Add($setupNo)
+
+    $setupYes = New-Object Windows.Forms.Button
+    $setupYes.Text = 'Yes'
+    $setupYes.Location = New-Object Drawing.Point(495, 337)
+    $setupYes.Size = New-Object Drawing.Size(100, 30)
+    $setupYes.Add_Click({ $script:SetupConsentDecision = $true })
+    $setupPanel.Controls.Add($setupYes)
+    $form.Controls.Add($setupPanel)
+
     $script:ProgressForm = $form
     $script:ProgressStatusLabel = $status
     $script:ProgressDetailLabel = $detail
     $script:ProgressBar = $progress
     $script:ProgressCloseButton = $close
+    $script:SetupPromptPanel = $setupPanel
+    $script:SetupPromptMessageLabel = $setupMessage
+    $script:SetupPromptDetailsBox = $setupDetails
+    $script:SetupPromptNoteLabel = $setupNote
+    $script:SetupPromptYesButton = $setupYes
+    $script:SetupPromptNoButton = $setupNo
     $script:ProgressDarkMode = Get-SavedDarkModePreference
     Set-ProgressWindowTheme -Enabled $script:ProgressDarkMode
     $form.Add_FormClosing({
@@ -409,10 +499,65 @@ function Initialize-UpdateProgressWindow {
     }
 }
 
-function Complete-UpdateProgressWindow {
-    param([string]$Message)
+function Show-SetupConsentPrompt {
+    param([Parameter(Mandatory = $true)]$Request)
 
-    Set-ProgressWindowState -Message $Message -Percent 100 -Detail 'The updated JavaRock window is ready.'
+    if ($null -eq $script:ProgressForm -or $script:ProgressForm.IsDisposed -or
+        $null -eq $script:SetupPromptPanel) {
+        throw 'JavaRock needs setup permission, but the updater has no interactive window to ask for it.'
+    }
+
+    $message = [string](Get-PropertyValue $Request 'message' 'JavaRock needs to prepare required software and files before it opens.')
+    $note = [string](Get-PropertyValue $Request 'note' 'Choosing No leaves the update installed and keeps JavaRock closed.')
+    $detailLines = @()
+    foreach ($item in @(Get-PropertyValue $Request 'items' @())) {
+        $label = [string](Get-PropertyValue $item 'label' 'Required item')
+        $detail = [string](Get-PropertyValue $item 'detail' '')
+        $detailLines += if ($detail) { "$label`r`n$detail" } else { $label }
+    }
+    if ($detailLines.Count -eq 0) { $detailLines = @('JavaRock requirements need to be prepared.') }
+
+    $script:SetupConsentDecision = $null
+    $script:SetupPromptMessageLabel.Text = $message
+    $script:SetupPromptDetailsBox.Text = $detailLines -join "`r`n`r`n"
+    $script:SetupPromptNoteLabel.Text = $note
+    $script:ProgressForm.ClientSize = New-Object Drawing.Size(620, 385)
+    $script:SetupPromptPanel.Visible = $true
+    $script:SetupPromptPanel.BringToFront()
+    $script:ProgressForm.AcceptButton = $script:SetupPromptYesButton
+    $script:ProgressForm.CancelButton = $script:SetupPromptNoButton
+    $script:SetupPromptNoButton.Select()
+    Set-ProgressWindowChromeTheme
+    $script:ProgressWindowVisible = [bool][JavaRockUpdaterWindowTheme]::EnsureVisible($script:ProgressForm.Handle)
+    $script:ProgressForm.BringToFront()
+    $script:ProgressForm.Activate()
+
+    try {
+        $deadline = [DateTime]::UtcNow.AddMinutes(30)
+        while ($null -eq $script:SetupConsentDecision) {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw 'No setup choice was received within 30 minutes.'
+            }
+            Pump-UpdateProgressWindow
+            Start-Sleep -Milliseconds 50
+        }
+        return [bool]$script:SetupConsentDecision
+    } finally {
+        $script:ProgressForm.AcceptButton = $null
+        $script:ProgressForm.CancelButton = $null
+        $script:SetupPromptPanel.Visible = $false
+        $script:ProgressForm.ClientSize = New-Object Drawing.Size(560, 220)
+        Pump-UpdateProgressWindow
+    }
+}
+
+function Complete-UpdateProgressWindow {
+    param(
+        [string]$Message,
+        [string]$Detail = 'The updated JavaRock window is ready.'
+    )
+
+    Set-ProgressWindowState -Message $Message -Percent 100 -Detail $Detail
     if ($null -ne $script:ProgressForm -and -not $script:ProgressForm.IsDisposed) {
         $script:ProgressCloseButton.Visible = $true
         $script:ProgressForm.ControlBox = $true
@@ -429,6 +574,10 @@ function Show-UpdateFailure {
     if ($Quiet) { return }
     if ($null -eq $script:ProgressForm -or $script:ProgressForm.IsDisposed) {
         return
+    }
+    if ($null -ne $script:SetupPromptPanel) {
+        $script:SetupPromptPanel.Visible = $false
+        $script:ProgressForm.ClientSize = New-Object Drawing.Size(560, 220)
     }
     $script:ProgressForm.Text = 'JavaRock Update Failed'
     $script:ProgressForm.ControlBox = $true
@@ -1245,10 +1394,27 @@ function Invoke-MonitoredRestart {
 
     $stdoutPath = Join-Path $RuntimeRoot 'latest-restart.out.log'
     $stderrPath = Join-Path $RuntimeRoot 'latest-restart.err.log'
+    $setupRequestPath = Join-Path $RuntimeRoot "setup-consent-$($script:AttemptId)-request.json"
+    $setupResponsePath = Join-Path $RuntimeRoot "setup-consent-$($script:AttemptId)-response.json"
+    $useUpdaterSetupConsent = $null -ne $script:ProgressForm -and -not $script:ProgressForm.IsDisposed
     [IO.File]::WriteAllText($stdoutPath, '', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText($stderrPath, '', [Text.UTF8Encoding]::new($false))
+    foreach ($path in @($setupRequestPath, $setupResponsePath)) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
     $powershell = (Get-Command 'powershell.exe' -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-    $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $startScript)
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', $startScript
+    )
+    if ($useUpdaterSetupConsent) {
+        $arguments += @(
+            '-SetupConsentRequestFile', $setupRequestPath,
+            '-SetupConsentResponseFile', $setupResponsePath
+        )
+    }
     $process = Start-Process -FilePath $powershell `
         -ArgumentList (Join-NativeArguments $arguments) `
         -WorkingDirectory $ProjectRoot `
@@ -1256,6 +1422,8 @@ function Invoke-MonitoredRestart {
         -RedirectStandardError $stderrPath `
         -WindowStyle Hidden `
         -PassThru
+    $setupConsentHandled = $false
+    $setupConsentApproved = $false
     try {
         $deadline = [DateTime]::UtcNow.AddMinutes(30)
         $lastDetail = ''
@@ -1263,6 +1431,27 @@ function Invoke-MonitoredRestart {
             if ([DateTime]::UtcNow -ge $deadline) {
                 try { $process.Kill() } catch {}
                 throw 'JavaRock startup did not finish within 30 minutes. Review the updater restart log.'
+            }
+            if ($useUpdaterSetupConsent -and -not $setupConsentHandled -and (Test-Path -LiteralPath $setupRequestPath -PathType Leaf)) {
+                $setupRequest = $null
+                try { $setupRequest = Get-Content -LiteralPath $setupRequestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+                if ($null -ne $setupRequest -and [string](Get-PropertyValue $setupRequest 'state' '') -eq 'waiting-for-consent') {
+                    Write-UpdateProgress -State 'running' -Phase 'setup-consent' -Message 'JavaRock needs your permission...' -Percent 96 -Detail 'Choose Yes or No in this updater window.' -Indeterminate
+                    $setupConsentApproved = Show-SetupConsentPrompt -Request $setupRequest
+                    Write-JsonFileAtomic -Path $setupResponsePath -Value ([ordered]@{
+                        format = 1
+                        approved = [bool]$setupConsentApproved
+                        respondedAt = [DateTime]::UtcNow.ToString('o')
+                    })
+                    $setupConsentHandled = $true
+                    $choiceText = if ($setupConsentApproved) { 'approved' } else { 'declined' }
+                    Write-UpdateLog "JavaRock requirement setup was $choiceText in the updater window."
+                    if ($setupConsentApproved) {
+                        Write-UpdateProgress -State 'running' -Phase 'restart' -Message 'Preparing and reopening JavaRock...' -Percent 96 -Detail 'Preparing the required software and files.' -Indeterminate
+                    } else {
+                        Write-UpdateProgress -State 'running' -Phase 'restart' -Message 'Finishing the update...' -Percent 98 -Detail 'Setup was declined; JavaRock will remain closed.' -Indeterminate
+                    }
+                }
             }
             $detail = ''
             try { $detail = [string](Get-Content -LiteralPath $stdoutPath -Tail 1 -ErrorAction Stop) } catch {}
@@ -1278,14 +1467,24 @@ function Invoke-MonitoredRestart {
         $process.Refresh()
         $exitCode = [int]$process.ExitCode
     } finally {
+        if (-not $process.HasExited) {
+            try { $process.Kill() } catch {}
+        }
         $process.Dispose()
+        foreach ($path in @($setupRequestPath, $setupResponsePath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
     }
 
     $stdout = Read-TextFileShared -Path $stdoutPath
     $stderr = Read-TextFileShared -Path $stderrPath
     foreach ($line in @(("$stdout`r`n$stderr" -split '\r?\n') | Where-Object { $_ })) { Write-UpdateLog "restart: $line" }
     if ($exitCode -ne 0) {
-        $detail = ($stderr.Trim() -split '\r?\n' | Select-Object -Last 1)
+        if ($exitCode -eq 3 -and $setupConsentHandled -and -not $setupConsentApproved) {
+            return [pscustomobject]@{ ReadyPid = 0; SetupDeclined = $true }
+        }
+        $failureOutput = if ($stderr.Trim()) { $stderr } else { $stdout }
+        $detail = ($failureOutput.Trim() -split '\r?\n' | Where-Object { $_ } | Select-Object -Last 1)
         if (-not $detail) { $detail = "startup exited with code $exitCode" }
         throw "JavaRock updated, but could not reopen: $detail"
     }
@@ -1296,7 +1495,7 @@ function Invoke-MonitoredRestart {
     if ($null -eq (Get-Process -Id $readyPid -ErrorAction SilentlyContinue)) {
         throw 'JavaRock reported a ready window, but that window closed before the updater could confirm it.'
     }
-    return $readyPid
+    return [pscustomobject]@{ ReadyPid = $readyPid; SetupDeclined = $false }
 }
 
 function Wait-ForParentExit {
@@ -1544,9 +1743,12 @@ try {
 
     [void](Install-Release -ReleaseInfo $releaseInfo)
     $readyPid = 0
+    $setupDeclined = $false
     if ($Restart) {
         Set-UpdatePhase -Phase 'restart' -Message 'Preparing and reopening JavaRock...' -Percent 94 -Detail 'Checking requirements and waiting for the updated window.' -Indeterminate -State 'running'
-        $readyPid = Invoke-MonitoredRestart
+        $restartResult = Invoke-MonitoredRestart
+        $readyPid = [int](Get-PropertyValue $restartResult 'ReadyPid' 0)
+        $setupDeclined = [bool](Get-PropertyValue $restartResult 'SetupDeclined' $false)
     }
     Write-UpdateResult ([ordered]@{
         state = 'installed'
@@ -1555,14 +1757,22 @@ try {
         tag = $releaseInfo.Tag
         restartRequested = [bool]$Restart
         restartConfirmed = [bool]($Restart -and $readyPid -gt 0)
+        setupDeclined = [bool]$setupDeclined
         readyPid = $readyPid
         attemptId = $script:AttemptId
         logFile = $script:UpdateLogFile
     })
     Write-UpdateLog "Updated to $($releaseInfo.LatestVersion)."
-    $completeDetail = if ($Restart) { "The updated JavaRock window is running (PID $readyPid)." } else { 'The update is installed.' }
-    Write-UpdateProgress -State 'complete' -Phase 'complete' -Message "JavaRock $($releaseInfo.LatestVersion) is ready." -Percent 100 -Detail $completeDetail
-    Complete-UpdateProgressWindow -Message "JavaRock $($releaseInfo.LatestVersion) is ready."
+    $completeMessage = if ($setupDeclined) { "JavaRock $($releaseInfo.LatestVersion) was updated." } else { "JavaRock $($releaseInfo.LatestVersion) is ready." }
+    $completeDetail = if ($setupDeclined) {
+        'Setup was not run. Open JavaRock again when you are ready to finish setup.'
+    } elseif ($Restart) {
+        "The updated JavaRock window is running (PID $readyPid)."
+    } else {
+        'The update is installed.'
+    }
+    Write-UpdateProgress -State 'complete' -Phase 'complete' -Message $completeMessage -Percent 100 -Detail $completeDetail
+    Complete-UpdateProgressWindow -Message $completeMessage -Detail $completeDetail
     exit 0
 } catch {
     $message = $_.Exception.Message

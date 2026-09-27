@@ -19,9 +19,11 @@ const {
   normalizeItemStackResponseForLocalViaBedrock,
   shouldRewriteLegacyInventoryTransactionsToItemStackRequests,
   shouldRewriteLegacyCraftingTransactionsToItemStackRequests,
+  bridgeLegacyInventoryRewriteMode,
   bridgeModernItemStackRequestsForLegacyInventoryTransaction,
   bridgeAliasedItemStackRequestParams,
   bridgeSanitizedItemStackRequestParams,
+  bridgeItemStackRequestTouchesOwnInventoryScreen,
   bridgeItemStackRequestSourcePreflightDropDiagnosis,
   bridgeLegacyCraftingTransactionDropDiagnosis,
   bridgeLegacyPlayerStateTransactionDropDiagnosis,
@@ -129,6 +131,7 @@ const moveParams = {
 }
 assert(shouldRewriteLegacyInventoryTransactionsToItemStackRequests() === false, 'full legacy->item_stack_request rewrite must stay off by default after v0.3.38 regression rollback')
 assert(shouldRewriteLegacyCraftingTransactionsToItemStackRequests() === true, 'crafting-grid legacy->item_stack_request rewrite should be on by default')
+assert(bridgeLegacyInventoryRewriteMode() === 'player_inventory_safe', 'production rewrite mode must include trusted player quick-moves as well as cursor and crafting moves')
 const genericMoveParams = {
   transaction: {
     transaction_type: 'normal',
@@ -260,6 +263,42 @@ assert(Array.isArray(safePlayerMove) && safePlayerMove.length === 1, 'safe playe
 assert(safePlayerMove[0].params.requests[0].actions[0].source.slot_type.container_id === 'hotbar', 'safe player-inventory rewrite must map Java hotbar source slots to Bedrock hotbar')
 assert(safePlayerMove[0].followUpPlace?.destinationSlot?.slot_type?.container_id === 'hotbar', 'safe player-inventory rewrite must map queued Java hotbar destinations to Bedrock hotbar')
 assert(safePlayerMove[0].followUpPlace?.destinationStackId === 0, 'safe player-inventory rewrite must keep empty destination stack ids at 0 even when local prediction is stale')
+
+const capturedQuickMove = bridgeModernItemStackRequestsForLegacyInventoryTransaction({
+  ...owner,
+  bridgePredictedItemStackIds: new Map([['hotbar:0', 14]])
+}, 'inventory_transaction', {
+  transaction: {
+    transaction_type: 'normal',
+    actions: [{
+      source_type: 'container',
+      window_id: 0,
+      slot: 0,
+      old_item: { network_id: -753, count: 2, metadata: 0 },
+      new_item: { network_id: 0 }
+    }, {
+      source_type: 'container',
+      window_id: 0,
+      slot: 10,
+      old_item: { network_id: 0 },
+      new_item: { network_id: -753, count: 2, metadata: 0 }
+    }]
+  }
+}, { mode: 'player_inventory_safe' })
+assert(Array.isArray(capturedQuickMove) && capturedQuickMove.length === 1, 'captured hotbar-to-main shift-click must become one staged modern move')
+assert(capturedQuickMove[0].params.requests[0].actions[0].type_id === 'take', 'captured shift-click must wait for an acknowledged Take before placing')
+assert(capturedQuickMove[0].params.requests[0].actions[0].source.slot_type.container_id === 'hotbar', 'captured shift-click must address its hotbar source canonically')
+assert(capturedQuickMove[0].params.requests[0].actions[0].source.stack_id === 14, 'captured shift-click must use the trusted source stack id')
+assert(capturedQuickMove[0].followUpPlace?.destinationSlot?.slot_type?.container_id === 'inventory', 'captured shift-click must stage its main-inventory destination')
+assert(capturedQuickMove[0].followUpPlace?.destinationSlot?.slot === 10, 'captured shift-click must preserve the chosen main-inventory slot')
+assert(capturedQuickMove[0].followUpPlace?.destinationStackId === 0, 'captured shift-click must retain the authoritative empty destination id')
+
+const safeCursorPickup = bridgeModernItemStackRequestsForLegacyInventoryTransaction({
+  ...owner,
+  bridgePredictedItemStackIds: new Map([['hotbar:4', 574]])
+}, 'inventory_transaction', pickupAllFirstParams, { mode: 'player_inventory_safe' })
+assert(Array.isArray(safeCursorPickup) && safeCursorPickup.length === 1, 'safe player-inventory mode must retain cursor pickup rewriting')
+assert(safeCursorPickup[0].params.requests[0].actions[0].type_id === 'take', 'safe player-inventory cursor pickup must use an acknowledged Take request')
 
 const externalContainerMoveParams = {
   transaction: {
@@ -1149,6 +1188,29 @@ const untrackedSourceDrop = bridgeItemStackRequestSourcePreflightDropDiagnosis({
   bridgePredictedItemStackIds: new Map()
 }, stalePlaceCursorSourceRequest)
 assert(untrackedSourceDrop === null, 'preflight must not drop untracked sources because missing state is not proof of invalidity')
+
+const capturedStaleEmptySwap = {
+  requests: [{
+    request_id: -7,
+    actions: [{
+      type_id: 'swap',
+      source: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 23, stack_id: 24 },
+      destination: { slot_type: { container_id: 'hotbar_and_inventory' }, slot: 0, stack_id: 0 }
+    }],
+    custom_names: [],
+    cause: -1
+  }]
+}
+assert(bridgeItemStackRequestTouchesOwnInventoryScreen(capturedStaleEmptySwap) === true, 'combined player-inventory Swap descriptors must use the protected Realm inventory-open path')
+const capturedStaleEmptySwapDrop = bridgeItemStackRequestSourcePreflightDropDiagnosis({
+  bridgePredictedItemStackIds: new Map([
+    ['inventory:23', 24],
+    ['hotbar:0', 14]
+  ])
+}, capturedStaleEmptySwap)
+assert(capturedStaleEmptySwapDrop?.reason === 'destination_stack_id_mismatch_after_sanitize', 'Swap preflight must reject a claimed empty destination that the trusted inventory still shows occupied')
+assert(capturedStaleEmptySwapDrop?.destination === 'hotbar:0', 'stale empty Swap diagnostics must identify the canonical hotbar destination')
+assert(capturedStaleEmptySwapDrop?.sent_stack_id === 0 && capturedStaleEmptySwapDrop?.tracked_stack_id === 14, 'stale empty Swap diagnostics must preserve both conflicting stack ids')
 
 const currentRequestCursorPrediction = {
   requests: [{
