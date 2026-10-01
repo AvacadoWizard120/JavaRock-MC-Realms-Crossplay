@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.120 - 2026-10-01
+
+- Realm movement corrections now replace Java's divergent velocity instead of preserving it, stopping the repeated sinking and vertical snaps captured during spider combat.
+- Entity position updates retain their Realm motion, so animals interpolate through falls and movement instead of repeatedly freezing or zipping between positions.
+- Double-click pickup-all now searches every visible input in both the 2x2 inventory grid and 3x3 crafting table before scanning the player inventory.
+- Torches, lamps, and other emitting blocks now send propagated block light while keeping the expensive sky-light solver off the packet path.
+
 ## 0.3.119 - 2026-10-01
 
 - Closing a crafting table now restores the grid to Java's player-inventory window immediately, including forced closes, instead of hiding accepted items until the next Realm inventory refresh.

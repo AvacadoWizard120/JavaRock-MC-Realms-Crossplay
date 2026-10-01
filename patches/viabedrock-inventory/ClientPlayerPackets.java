@@ -324,7 +324,11 @@ public class ClientPlayerPackets {
                     clientPlayer.setPosition(correctedPosition);
                     clientPlayer.setOnGround(onGround);
                     clientPlayer.beginPositionSync();
-                    clientPlayer.writePlayerPositionPacketToClient(wrapper, Relative.union(Relative.ROTATION, Relative.VELOCITY), true);
+                    // A Bedrock correction carries authoritative velocity as
+                    // well as position. Keeping Java's local velocity here
+                    // makes the client continue its rejected fall/knockback
+                    // trajectory and immediately provokes another correction.
+                    clientPlayer.writePlayerPositionPacketToClient(wrapper, Relative.ROTATION, positionDelta, true);
                 }
                 case Vehicle -> {
                     final Entity vehicle = entityTracker.getEntityByRid(clientPlayer.mountEntityRId());

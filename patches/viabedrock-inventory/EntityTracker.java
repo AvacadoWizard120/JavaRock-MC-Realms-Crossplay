@@ -44,6 +44,7 @@ import net.raphimc.viabedrock.api.model.entity.*;
 import net.raphimc.viabedrock.protocol.BedrockProtocol;
 import net.raphimc.viabedrock.protocol.data.generated.java.EntityDataFields;
 import net.raphimc.viabedrock.protocol.model.BedrockItem;
+import net.raphimc.viabedrock.protocol.model.Position3f;
 import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
 
 import java.util.ArrayList;
@@ -59,6 +60,7 @@ public class EntityTracker extends StoredObject {
     private ClientPlayerEntity clientPlayerEntity = null;
     private final Long2ObjectMap<Entity> entities = new Long2ObjectOpenHashMap<>();
     private final Long2ObjectMap<Long> runtimeIdToUniqueId = new Long2ObjectOpenHashMap<>();
+    private final Long2ObjectMap<Position3f> entityMotions = new Long2ObjectOpenHashMap<>();
     private final Int2ObjectMap<Long> javaIdToUniqueId = new Int2ObjectOpenHashMap<>();
     private final Object2IntMap<BlockPosition> itemFrames = new Object2IntOpenHashMap<>();
     private final Int2ObjectMap<ItemFrameInteraction> itemFrameInteractions = new Int2ObjectOpenHashMap<>();
@@ -122,8 +124,22 @@ public class EntityTracker extends StoredObject {
 
         this.entities.remove(entity.uniqueId());
         this.runtimeIdToUniqueId.remove(entity.runtimeId());
+        this.entityMotions.remove(entity.runtimeId());
         this.javaIdToUniqueId.remove(entity.javaId());
         entity.remove();
+    }
+
+    public void setEntityMotion(final long runtimeId, final Position3f motion) {
+        if (motion == null) {
+            this.entityMotions.remove(runtimeId);
+        } else {
+            this.entityMotions.put(runtimeId, motion);
+        }
+    }
+
+    public Position3f entityMotion(final long runtimeId) {
+        final Position3f motion = this.entityMotions.get(runtimeId);
+        return motion != null ? motion : Position3f.ZERO;
     }
 
     public void spawnItemFrame(final BlockPosition position, final BlockState blockState) {
