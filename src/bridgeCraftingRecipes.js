@@ -128,14 +128,66 @@ function recipeIngredientToBridgeSpec (ingredient, options = {}) {
   }
 }
 
-function recipeResultToBridgeSpec (result) {
+let javaItemDataForStackSizes
+
+function lookupValue (lookup, key) {
+  if (lookup instanceof Map) {
+    if (lookup.has(key)) return lookup.get(key)
+    const stringKey = String(key)
+    if (lookup.has(stringKey)) return lookup.get(stringKey)
+    return undefined
+  }
+  if (lookup && typeof lookup === 'object') {
+    if (Object.prototype.hasOwnProperty.call(lookup, key)) return lookup[key]
+    const stringKey = String(key)
+    if (Object.prototype.hasOwnProperty.call(lookup, stringKey)) return lookup[stringKey]
+  }
+  return undefined
+}
+
+function recipeResultIdentifier (result, item, options = {}) {
+  const direct = normalizeMinecraftIdentifier(firstNonEmpty(
+    result?.name,
+    result?.identifier,
+    result?.item_name,
+    result?.itemName
+  ))
+  if (direct) return direct
+  return normalizeMinecraftIdentifier(lookupValue(options.itemNameByNetworkId, item.network_id))
+}
+
+function recipeResultMaxStackSize (result, item, options = {}) {
+  const explicit = Number(firstNonEmpty(result?.max_stack_size, result?.maxStackSize))
+  if (Number.isFinite(explicit) && explicit >= 1) return Math.min(64, Math.trunc(explicit))
+
+  const identifier = recipeResultIdentifier(result, item, options)
+  if (!identifier) return 0
+
+  const configured = Number(lookupValue(options.stackSizeByItemName, identifier))
+  if (Number.isFinite(configured) && configured >= 1) return Math.min(64, Math.trunc(configured))
+
+  try {
+    if (javaItemDataForStackSizes === undefined) {
+      javaItemDataForStackSizes = require('minecraft-data')('26.1') || null
+    }
+    const itemName = identifier.startsWith('minecraft:') ? identifier.slice('minecraft:'.length) : identifier
+    const stackSize = Number(javaItemDataForStackSizes?.itemsByName?.[itemName]?.stackSize)
+    if (Number.isFinite(stackSize) && stackSize >= 1) return Math.min(64, Math.trunc(stackSize))
+  } catch {
+    javaItemDataForStackSizes = null
+  }
+  return 0
+}
+
+function recipeResultToBridgeSpec (result, options = {}) {
   const item = normalizeItemForLocalViaBedrock(result)
   if (!item || !item.network_id) return null
   return {
     network_id: item.network_id,
     metadata: numberOrDefault(item.metadata, 0),
     count: numberOrDefault(item.count, 1),
-    block_runtime_id: numberOrDefault(item.block_runtime_id, 0)
+    block_runtime_id: numberOrDefault(item.block_runtime_id, 0),
+    max_stack_size: recipeResultMaxStackSize(result, item, options)
   }
 }
 
@@ -261,7 +313,7 @@ function simplifyCraftingDataForBridgeGrid (params = {}, gridSize = 2, options =
     const networkId = recipeNetworkId(entry, recipe)
     if (networkId <= 0) continue
     const outputList = Array.isArray(recipe.output) ? recipe.output : (recipe.result ? [recipe.result] : [])
-    const output = recipeResultToBridgeSpec(outputList[0])
+    const output = recipeResultToBridgeSpec(outputList[0], options)
     if (!output) continue
 
     if (entryType === 'shaped') {
@@ -290,6 +342,7 @@ function simplifyCraftingDataForBridgeGrid (params = {}, gridSize = 2, options =
         type: 'shaped',
         recipe_id: String(recipe.recipe_id || recipe.uuid || `shaped_${out.length}`),
         network_id: networkId,
+        assume_symmetry: isTruthyProtocolFlag(recipe.assume_symmetry ?? recipe.assumeSymmetry),
         width,
         height,
         pattern,
@@ -362,7 +415,7 @@ function simplifyCraftingDataForRecipeBook (params = {}, options = {}) {
     const networkId = recipeNetworkId(entry, recipe)
     if (networkId <= 0) continue
     const outputList = Array.isArray(recipe.output) ? recipe.output : (recipe.result ? [recipe.result] : [])
-    const output = recipeResultToBridgeSpec(outputList[0])
+    const output = recipeResultToBridgeSpec(outputList[0], options)
     if (!output) continue
 
     const recipeId = String(recipe.recipe_id || recipe.uuid || `${entryType}_${out.length}`)
@@ -393,6 +446,7 @@ function simplifyCraftingDataForRecipeBook (params = {}, options = {}) {
         type: 'shaped',
         recipe_id: recipeId,
         network_id: networkId,
+        assume_symmetry: isTruthyProtocolFlag(recipe.assume_symmetry ?? recipe.assumeSymmetry),
         width,
         height,
         pattern,
@@ -415,6 +469,7 @@ function simplifyCraftingDataForRecipeBook (params = {}, options = {}) {
     const duplicateKey = JSON.stringify({
       type: simplified.type,
       recipe_id: simplified.recipe_id,
+      assume_symmetry: simplified.assume_symmetry,
       width: simplified.width,
       height: simplified.height,
       pattern: simplified.pattern,
@@ -449,7 +504,7 @@ function simplifyFutureStationRecipesForBridge (params = {}, options = {}) {
     const recipeId = String(recipe.recipe_id || recipe.uuid || `${entry.type || 'station'}_${out.length}`)
     const block = recipeBlockName(entry)
     const outputList = Array.isArray(recipe.output) ? recipe.output : (recipe.result ? [recipe.result] : [])
-    const output = recipeResultToBridgeSpec(outputList[0])
+    const output = recipeResultToBridgeSpec(outputList[0], options)
     const input = Array.isArray(recipe.input)
       ? recipe.input.map(ingredient => recipeInputCell(ingredient, options)).filter(Boolean)
       : []

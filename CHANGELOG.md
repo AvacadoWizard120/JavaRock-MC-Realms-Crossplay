@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.118 - 2026-10-01
+
+- Boats and rafts now use the block or water position under the crosshair, matching Bedrock's native placement packet instead of sending an ignored air click.
+- Shaped recipes honor Bedrock's symmetry flag, so stone axes and other mirrored recipes work in either valid orientation. Recipe-book autofill now matches the original Bedrock ingredients directly.
+- Number keys 1-9 can move a crafted result straight into an empty or compatible hotbar slot while respecting each item's real stack limit.
+
 ## 0.3.117 - 2026-09-27
 
 - Fixed tag-based crafting recipes, including stone pickaxes. JavaRock now reads ViaBedrock's item-tag index in its actual direction, and tagged recipes also appear in the Java recipe book.

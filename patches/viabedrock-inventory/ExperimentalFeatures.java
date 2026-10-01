@@ -57,6 +57,7 @@ import net.raphimc.viabedrock.protocol.data.enums.java.generated.PlayerActionAct
 import net.raphimc.viabedrock.protocol.model.BedrockItem;
 import net.raphimc.viabedrock.protocol.model.EntityLink;
 import net.raphimc.viabedrock.protocol.model.Position3f;
+import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
 import net.raphimc.viabedrock.protocol.storage.ChunkTracker;
 import net.raphimc.viabedrock.protocol.storage.EntityTracker;
 import net.raphimc.viabedrock.protocol.storage.InventoryTracker;
@@ -74,6 +75,8 @@ import java.util.logging.Level;
 public class ExperimentalFeatures {
 
     private static final int MAP_FLAGS_ALL = ClientboundMapItemDataPacket_Type.Creation.getValue() | ClientboundMapItemDataPacket_Type.DecorationUpdate.getValue() | ClientboundMapItemDataPacket_Type.TextureUpdate.getValue();
+    private static final double SURVIVAL_BOAT_INTERACTION_REACH = 4.5D;
+    private static final double CREATIVE_BOAT_INTERACTION_REACH = 5.0D;
 
     public static void registerPacketTranslators(final BedrockProtocol protocol) {
         ProtocolUtil.prependServerbound(protocol, ServerboundPackets26_1.PLAYER_ACTION, wrapper -> {
@@ -189,15 +192,88 @@ public class ExperimentalFeatures {
             final InventoryTransactionRewriter inventoryTransactionRewriter = wrapper.user().get(InventoryTransactionRewriter.class);
 
             final int hand = wrapper.read(Types.VAR_INT); // hand
-            wrapper.read(Types.VAR_INT); // sequence
-            wrapper.read(Types.FLOAT); // yaw
-            wrapper.read(Types.FLOAT); // pitch
+            final int sequence = wrapper.read(Types.VAR_INT); // sequence
+            final float yaw = wrapper.read(Types.FLOAT); // yaw
+            final float pitch = wrapper.read(Types.FLOAT); // pitch
 
             // Bedrock can't hold the majority of item in offhand and can't use any either.
             // TODO: We need to handle cases where the item changes, or it affect player movement (eg: eating/blocking/etc)
             if (hand != InteractionHand.MAIN_HAND.ordinal()) {
                 wrapper.cancel();
                 return;
+            }
+
+            final ClientPlayerEntity clientPlayer = entityTracker.getClientPlayer();
+            final BedrockItem selectedHotbarItem = inventoryContainer.getSelectedHotbarItem();
+            final String selectedIdentifier = selectedHotbarItem.isEmpty()
+                    ? null
+                    : wrapper.user().get(ItemRewriter.class).getItems().inverse().get(selectedHotbarItem.identifier());
+            if (isBoatOrRaftIdentifier(selectedIdentifier)) {
+                final ChunkTracker chunkTracker = wrapper.user().get(ChunkTracker.class);
+                final double reach = clientPlayer.javaGameMode() == GameMode.CREATIVE
+                        ? CREATIVE_BOAT_INTERACTION_REACH
+                        : SURVIVAL_BOAT_INTERACTION_REACH;
+                final Object[] hit = findBoatPlacementHit(chunkTracker, clientPlayer.position(), yaw, pitch, reach);
+                if (hit != null) {
+                    final BlockPosition position = (BlockPosition) hit[0];
+                    final int faceInt = (Integer) hit[1];
+                    final Position3f clickPosition = (Position3f) hit[2];
+                    final int blockRuntimeId = (Integer) hit[3];
+                    final BlockFace face = Direction.getFromVerticalId(faceInt).blockFace();
+
+                    // Java's boat/raft interaction reaches the server as USE_ITEM,
+                    // but a native Bedrock client places it with a click-block
+                    // transaction followed by the ordinary click-air transaction.
+                    // Reconstruct that first transaction and leave the wrapper below
+                    // intact so the second packet retains native ordering.
+                    chunkTracker.acknowledgeBlockInteraction(sequence);
+                    ExperimentalPacketFactory.sendBedrockPlayerAction(
+                            wrapper.user(),
+                            clientPlayer.runtimeId(),
+                            PlayerActionType.StartItemUseOn,
+                            position,
+                            position.getRelative(face),
+                            faceInt
+                    );
+
+                    final PacketWrapper placementPacket = PacketWrapper.create(ServerboundBedrockPackets.INVENTORY_TRANSACTION, wrapper.user());
+                    final List<InventoryActionData> placementActions = List.of(new InventoryActionData(
+                            new InventorySource(InventorySourceType.Container_Inventory, ContainerID.CONTAINER_ID_INVENTORY.getValue(), InventorySource_InventorySourceFlags.No_Flag),
+                            inventoryContainer.getSelectedHotbarSlot(),
+                            selectedHotbarItem,
+                            selectedHotbarItem.copy()
+                    ));
+                    final BedrockInventoryTransaction placementTransaction = new BedrockInventoryTransaction(
+                            0,
+                            null,
+                            placementActions,
+                            ComplexInventoryTransaction_Type.ItemUseTransaction,
+                            new InventoryTransactionData.UseItemTransactionData(
+                                    ItemUseInventoryTransaction_ActionType.Place,
+                                    ItemUseInventoryTransaction_TriggerType.PlayerInput,
+                                    position,
+                                    faceInt,
+                                    inventoryContainer.getSelectedHotbarSlot(),
+                                    selectedHotbarItem,
+                                    clientPlayer.position(),
+                                    clickPosition,
+                                    blockRuntimeId,
+                                    ItemUseInventoryTransaction_PredictedResult.Success,
+                                    ItemUseInventoryTransaction_ClientCooldownState.Off
+                            )
+                    );
+                    placementPacket.write(inventoryTransactionRewriter.getInventoryTransactionType(), placementTransaction);
+                    placementPacket.sendToServer(BedrockProtocol.class);
+
+                    ExperimentalPacketFactory.sendBedrockPlayerAction(
+                            wrapper.user(),
+                            clientPlayer.runtimeId(),
+                            PlayerActionType.StopItemUseOn,
+                            position,
+                            new BlockPosition(0, 0, 0),
+                            0
+                    );
+                }
             }
 
             BedrockInventoryTransaction inventoryTransaction = new BedrockInventoryTransaction(
@@ -607,6 +683,126 @@ public class ExperimentalFeatures {
             }
             */
         });
+    }
+
+    static boolean isBoatOrRaftIdentifier(final String identifier) {
+        if (identifier == null || !identifier.startsWith("minecraft:")) return false;
+        final String path = identifier.substring("minecraft:".length());
+        return path.endsWith("_boat") || path.endsWith("_raft");
+    }
+
+    static double[] boatLookVector(final float yaw, final float pitch) {
+        final double yawRadians = Math.toRadians(yaw);
+        final double pitchRadians = Math.toRadians(pitch);
+        final double horizontal = Math.cos(pitchRadians);
+        return new double[]{
+                -Math.sin(yawRadians) * horizontal,
+                -Math.sin(pitchRadians),
+                Math.cos(yawRadians) * horizontal
+        };
+    }
+
+    static List<Object[]> boatRaycastSteps(final Position3f origin, final float yaw, final float pitch, final double reach) {
+        final List<Object[]> steps = new ArrayList<>();
+        if (origin == null || !Float.isFinite(origin.x()) || !Float.isFinite(origin.y()) || !Float.isFinite(origin.z())
+                || !Float.isFinite(yaw) || !Float.isFinite(pitch) || !Double.isFinite(reach) || reach <= 0D) {
+            return steps;
+        }
+
+        final double[] direction = boatLookVector(yaw, pitch);
+        final double directionX = direction[0];
+        final double directionY = direction[1];
+        final double directionZ = direction[2];
+        int blockX = (int) Math.floor(origin.x());
+        int blockY = (int) Math.floor(origin.y());
+        int blockZ = (int) Math.floor(origin.z());
+        final int stepX = Double.compare(directionX, 0D);
+        final int stepY = Double.compare(directionY, 0D);
+        final int stepZ = Double.compare(directionZ, 0D);
+        double distanceX = firstBoatBoundaryDistance(origin.x(), blockX, directionX, stepX);
+        double distanceY = firstBoatBoundaryDistance(origin.y(), blockY, directionY, stepY);
+        double distanceZ = firstBoatBoundaryDistance(origin.z(), blockZ, directionZ, stepZ);
+        final double deltaX = stepX == 0 ? Double.POSITIVE_INFINITY : Math.abs(1D / directionX);
+        final double deltaY = stepY == 0 ? Double.POSITIVE_INFINITY : Math.abs(1D / directionY);
+        final double deltaZ = stepZ == 0 ? Double.POSITIVE_INFINITY : Math.abs(1D / directionZ);
+
+        // A five-block unit ray crosses at most eighteen voxels. Keep a hard
+        // ceiling as a guard against malformed rotations or future reach data.
+        for (int visited = 0; visited < 64; visited++) {
+            final double distance;
+            final int face;
+            if (distanceX <= distanceY && distanceX <= distanceZ) {
+                distance = distanceX;
+                distanceX += deltaX;
+                blockX += stepX;
+                face = stepX > 0 ? Direction.WEST.verticalId() : Direction.EAST.verticalId();
+            } else if (distanceY <= distanceZ) {
+                distance = distanceY;
+                distanceY += deltaY;
+                blockY += stepY;
+                face = stepY > 0 ? Direction.DOWN.verticalId() : Direction.UP.verticalId();
+            } else {
+                distance = distanceZ;
+                distanceZ += deltaZ;
+                blockZ += stepZ;
+                face = stepZ > 0 ? Direction.NORTH.verticalId() : Direction.SOUTH.verticalId();
+            }
+
+            if (!Double.isFinite(distance) || distance > reach + 1.0E-7D) break;
+            final BlockPosition position = new BlockPosition(blockX, blockY, blockZ);
+            final Position3f clickPosition = new Position3f(
+                    boatClickCoordinate(origin.x() + (directionX * distance), blockX),
+                    boatClickCoordinate(origin.y() + (directionY * distance), blockY),
+                    boatClickCoordinate(origin.z() + (directionZ * distance), blockZ)
+            );
+            steps.add(new Object[]{position, face, clickPosition});
+        }
+        return steps;
+    }
+
+    static int boatPlacementTargetState(final int airState, final int blockState, final int fluidState) {
+        return blockState != airState ? blockState : fluidState;
+    }
+
+    static Object[] boatPlacementHit(final Object[] rayStep, final int runtimeState, final int airState) {
+        if (rayStep == null || rayStep.length < 3 || runtimeState == airState) return null;
+        return new Object[]{rayStep[0], rayStep[1], rayStep[2], runtimeState};
+    }
+
+    static boolean boatRaycastPositionLoaded(final BlockPosition position, final int minY, final int maxY,
+                                              final boolean sectionLoaded) {
+        return position != null && position.y() >= minY && position.y() < maxY && sectionLoaded;
+    }
+
+    private static Object[] findBoatPlacementHit(final ChunkTracker chunkTracker, final Position3f origin,
+                                                  final float yaw, final float pitch, final double reach) {
+        final int airState = chunkTracker.bedrockAirId();
+        for (Object[] rayStep : boatRaycastSteps(origin, yaw, pitch, reach)) {
+            final BlockPosition position = (BlockPosition) rayStep[0];
+            if (!boatRaycastPositionLoaded(position, chunkTracker.getMinY(), chunkTracker.getMaxY(),
+                    chunkTracker.getChunkSection(position) != null)) {
+                return null;
+            }
+            final int runtimeState = boatPlacementTargetState(
+                    airState,
+                    chunkTracker.getBlockState(0, position),
+                    chunkTracker.getBlockState(1, position)
+            );
+            final Object[] hit = boatPlacementHit(rayStep, runtimeState, airState);
+            if (hit != null) return hit;
+        }
+        return null;
+    }
+
+    private static double firstBoatBoundaryDistance(final double coordinate, final int blockCoordinate,
+                                                     final double direction, final int step) {
+        if (step > 0) return ((blockCoordinate + 1D) - coordinate) / direction;
+        if (step < 0) return (coordinate - blockCoordinate) / -direction;
+        return Double.POSITIVE_INFINITY;
+    }
+
+    private static float boatClickCoordinate(final double coordinate, final int blockCoordinate) {
+        return (float) Math.max(0D, Math.min(1D, coordinate - blockCoordinate));
     }
 
     public static void registerTasks() {

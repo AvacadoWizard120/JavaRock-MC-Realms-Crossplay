@@ -1066,16 +1066,21 @@ public final class DoorAckOrderSmoke {
     .map(line => line
       .replace(/^\s*\d+:\s*/, '')
       .replace(/#\d+/g, '#')
-      .replace(/\s+$/, ''))
+      .replace(/\bldc_w\b/g, 'ldc')
+      .replace(/\b(if[a-z0-9_]*|goto(?:_w)?|jsr(?:_w)?)\s+-?\d+\b/g, '$1 <target>')
+      .replace(/^(\s*(?:default|-?\d+):)\s+-?\d+\s*$/, '$1 <target>')
+      .trim()
+      .replace(/^-?\d+$/, '<switch-target>')
+      .replace(/\s+/g, ' '))
     .filter(line => line.trim())
     .join('\n')
   const bundledMethods = methodBodies(bundledExperimentalBytecode)
   const patchedMethods = methodBodies(experimentalBytecode)
   for (const [method, bundledBody] of bundledMethods) {
-    // This is the sole intended method-level difference: Java USE_ITEM_ON now
-    // defers door ACKs. Every other translator must remain bytecode-equivalent
-    // to the bundled ViaBedrock 3.4.13 implementation.
-    if (method.includes('lambda$registerPacketTranslators$2')) continue
+    // The intended translator differences are bounded to Java USE_ITEM boat/
+    // raft reconstruction and USE_ITEM_ON door ACK timing. Every other bundled
+    // translator must remain bytecode-equivalent to ViaBedrock 3.4.13.
+    if (method.includes('lambda$registerPacketTranslators$1') || method.includes('lambda$registerPacketTranslators$2')) continue
     const patchedBody = patchedMethods.get(method)
     if (!patchedBody || normalizedInstructions(bundledBody) !== normalizedInstructions(patchedBody)) {
       throw new Error(`ExperimentalFeatures changed unrelated bundled bytecode: ${method}`)
@@ -1111,6 +1116,181 @@ public final class DoorAckOrderSmoke {
   }
   if (canonicalSwitchInitializer(bundledSwitchBytecode) !== canonicalSwitchInitializer(patchedSwitchBytecode)) {
     throw new Error('ExperimentalFeatures$1 changed the bundled enum-switch mappings or guards')
+  }
+}
+
+function assertBoatAndRaftUseItemPlacement () {
+  const experimentalSource = fs.readFileSync(path.join(patchRoot, 'ExperimentalFeatures.java'), 'utf8')
+  const useStart = experimentalSource.indexOf('protocol.registerServerbound(ServerboundPackets26_1.USE_ITEM,')
+  const useEnd = experimentalSource.indexOf('protocol.registerServerbound(ServerboundPackets26_1.USE_ITEM_ON', useStart)
+  const useItem = experimentalSource.slice(useStart, useEnd)
+  for (const marker of [
+    'final int sequence = wrapper.read(Types.VAR_INT)',
+    'final float yaw = wrapper.read(Types.FLOAT)',
+    'final float pitch = wrapper.read(Types.FLOAT)',
+    'isBoatOrRaftIdentifier(selectedIdentifier)',
+    'findBoatPlacementHit(chunkTracker, clientPlayer.position(), yaw, pitch, reach)',
+    'chunkTracker.acknowledgeBlockInteraction(sequence)',
+    'PlayerActionType.StartItemUseOn',
+    'final List<InventoryActionData> placementActions = List.of(new InventoryActionData(',
+    'selectedHotbarItem.copy()',
+    'ItemUseInventoryTransaction_ActionType.Place',
+    'ItemUseInventoryTransaction_TriggerType.PlayerInput',
+    'ItemUseInventoryTransaction_PredictedResult.Success',
+    'PlayerActionType.StopItemUseOn',
+    'ItemUseInventoryTransaction_ActionType.Use',
+    'ItemUseInventoryTransaction_PredictedResult.Failure'
+  ]) {
+    if (!useItem.includes(marker)) throw new Error(`USE_ITEM is missing boat/raft placement marker: ${marker}`)
+  }
+  if (useItem.includes('selectedHotbarItem.setAmount') || useItem.includes('predictedToItem.setAmount')) {
+    throw new Error('boat/raft USE_ITEM must mirror native Bedrock and leave removal authoritative to the Realm')
+  }
+  const placementStart = useItem.indexOf('PlayerActionType.StartItemUseOn')
+  const placementTransaction = useItem.indexOf('final BedrockInventoryTransaction placementTransaction')
+  const placementStop = useItem.indexOf('PlayerActionType.StopItemUseOn')
+  const clickAirTransaction = useItem.lastIndexOf('BedrockInventoryTransaction inventoryTransaction')
+  if (placementStart < 0 || placementTransaction < placementStart || placementStop < placementTransaction || clickAirTransaction < placementStop) {
+    throw new Error('boat/raft USE_ITEM must send native start/place/stop before retaining the ordinary click-air transaction')
+  }
+  for (const marker of [
+    'static List<Object[]> boatRaycastSteps',
+    'static int boatPlacementTargetState',
+    'static Object[] boatPlacementHit',
+    'static boolean boatRaycastPositionLoaded',
+    'chunkTracker.getBlockState(0, position)',
+    'chunkTracker.getBlockState(1, position)',
+    'chunkTracker.getChunkSection(position) != null'
+  ]) {
+    if (!experimentalSource.includes(marker)) throw new Error(`boat/raft raycast is missing source marker: ${marker}`)
+  }
+
+  const experimentalClassName = 'net/raphimc/viabedrock/experimental/ExperimentalFeatures.class'
+  const experimentalBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(experimentalClassName)]).stdout
+  for (const marker of [
+    'isBoatOrRaftIdentifier',
+    'boatLookVector',
+    'boatRaycastSteps',
+    'boatPlacementTargetState',
+    'boatPlacementHit',
+    'boatRaycastPositionLoaded',
+    'findBoatPlacementHit',
+    'ItemUseInventoryTransaction_ActionType.Place',
+    'ItemUseInventoryTransaction_TriggerType.PlayerInput',
+    'ItemUseInventoryTransaction_PredictedResult.Success'
+  ]) {
+    if (!experimentalBytecode.includes(marker)) throw new Error(`compiled ExperimentalFeatures.class is missing boat/raft bytecode: ${marker}`)
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-boat-use-item-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'experimental')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const sourcePath = path.join(packageDir, 'BoatUseItemSmoke.java')
+    fs.writeFileSync(sourcePath, `
+package net.raphimc.viabedrock.experimental;
+
+import com.viaversion.viaversion.api.minecraft.BlockPosition;
+import net.raphimc.viabedrock.protocol.data.enums.Direction;
+import net.raphimc.viabedrock.protocol.model.Position3f;
+
+import java.util.List;
+
+public final class BoatUseItemSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static void close(double actual, double expected, String message) {
+        if (Math.abs(actual - expected) > 1.0E-6D) {
+            throw new AssertionError(message + ": expected=" + expected + " actual=" + actual);
+        }
+    }
+
+    private static BlockPosition position(Object[] step) {
+        return (BlockPosition) step[0];
+    }
+
+    public static void main(String[] args) {
+        check(ExperimentalFeatures.isBoatOrRaftIdentifier("minecraft:oak_boat"), "oak boat is handled");
+        check(ExperimentalFeatures.isBoatOrRaftIdentifier("minecraft:oak_chest_boat"), "chest boat is handled");
+        check(ExperimentalFeatures.isBoatOrRaftIdentifier("minecraft:bamboo_raft"), "bamboo raft is handled");
+        check(ExperimentalFeatures.isBoatOrRaftIdentifier("minecraft:bamboo_chest_raft"), "chest raft is handled");
+        check(!ExperimentalFeatures.isBoatOrRaftIdentifier("minecraft:boat_with_chestplate"), "suffix match stays bounded");
+        check(!ExperimentalFeatures.isBoatOrRaftIdentifier("example:oak_boat"), "custom items stay on generic USE_ITEM");
+
+        double[] south = ExperimentalFeatures.boatLookVector(0F, 0F);
+        close(south[0], 0D, "yaw zero x");
+        close(south[1], 0D, "yaw zero y");
+        close(south[2], 1D, "yaw zero faces south");
+        double[] west = ExperimentalFeatures.boatLookVector(90F, 0F);
+        close(west[0], -1D, "yaw 90 faces west");
+        close(west[2], 0D, "yaw 90 z");
+        double[] north = ExperimentalFeatures.boatLookVector(180F, 0F);
+        close(north[0], 0D, "yaw 180 x");
+        close(north[2], -1D, "yaw 180 faces north");
+        double[] east = ExperimentalFeatures.boatLookVector(-90F, 0F);
+        close(east[0], 1D, "yaw -90 faces east");
+        close(east[2], 0D, "yaw -90 z");
+        double[] down = ExperimentalFeatures.boatLookVector(0F, 90F);
+        close(down[1], -1D, "pitch 90 faces down");
+        double[] diagonal = ExperimentalFeatures.boatLookVector(45F, -30F);
+        close(Math.sqrt((diagonal[0] * diagonal[0]) + (diagonal[1] * diagonal[1]) + (diagonal[2] * diagonal[2])), 1D,
+                "diagonal look vector is normalized");
+        check(diagonal[0] < 0D && diagonal[1] > 0D && diagonal[2] > 0D, "diagonal signs match Java rotation");
+
+        List<Object[]> steps = ExperimentalFeatures.boatRaycastSteps(new Position3f(0.5F, 2.5F, 0.5F), 0F, 0F, 2.5D);
+        check(steps.size() == 3, "inclusive reach visits the boundary voxel");
+        check(position(steps.get(0)).equals(new BlockPosition(0, 2, 1)), "first south voxel");
+        check(position(steps.get(1)).equals(new BlockPosition(0, 2, 2)), "second south voxel");
+        check(position(steps.get(2)).equals(new BlockPosition(0, 2, 3)), "max-reach south voxel");
+        check((Integer) steps.get(0)[1] == Direction.NORTH.verticalId(), "south ray enters the north face");
+        Position3f click = (Position3f) steps.get(0)[2];
+        close(click.x(), 0.5D, "click x fraction");
+        close(click.y(), 0.5D, "click y fraction");
+        close(click.z(), 0D, "click z lies on entered face");
+        Object[] northStep = ExperimentalFeatures.boatRaycastSteps(new Position3f(0.5F, 2.5F, 0.5F), 180F, 0F, 1D).get(0);
+        check(position(northStep).equals(new BlockPosition(0, 2, -1)) && (Integer) northStep[1] == Direction.SOUTH.verticalId(),
+                "north ray enters the south face");
+        Object[] westStep = ExperimentalFeatures.boatRaycastSteps(new Position3f(0.5F, 2.5F, 0.5F), 90F, 0F, 1D).get(0);
+        check(position(westStep).equals(new BlockPosition(-1, 2, 0)) && (Integer) westStep[1] == Direction.EAST.verticalId(),
+                "west ray enters the east face");
+        Object[] eastStep = ExperimentalFeatures.boatRaycastSteps(new Position3f(0.5F, 2.5F, 0.5F), -90F, 0F, 1D).get(0);
+        check(position(eastStep).equals(new BlockPosition(1, 2, 0)) && (Integer) eastStep[1] == Direction.WEST.verticalId(),
+                "east ray enters the west face");
+        Object[] downStep = ExperimentalFeatures.boatRaycastSteps(new Position3f(0.5F, 2.5F, 0.5F), 0F, 90F, 1D).get(0);
+        check(position(downStep).equals(new BlockPosition(0, 1, 0)) && (Integer) downStep[1] == Direction.UP.verticalId(),
+                "down ray enters the top face");
+        check(ExperimentalFeatures.boatRaycastSteps(new Position3f(0.5F, 2.5F, 0.5F), 0F, 0F, 1.49D).size() == 1,
+                "ray does not exceed interaction reach");
+        check(ExperimentalFeatures.boatRaycastSteps(new Position3f(0.5F, 2.5F, 0.5F), 0F, 0F, 1.5D).size() == 2,
+                "ray includes an exact reach-boundary hit");
+
+        final int air = 0;
+        check(ExperimentalFeatures.boatPlacementTargetState(air, 42, air) == 42, "open water in layer zero is targetable");
+        check(ExperimentalFeatures.boatPlacementTargetState(air, 77, 42) == 77, "waterlogged solid uses its layer-zero runtime id");
+        check(ExperimentalFeatures.boatPlacementTargetState(air, air, 42) == 42, "layer-one fluid remains targetable");
+        check(ExperimentalFeatures.boatPlacementTargetState(air, 77, air) == 77, "solid ground is targetable");
+        check(ExperimentalFeatures.boatPlacementHit(steps.get(1), air, air) == null, "air is a ray miss");
+        Object[] hit = ExperimentalFeatures.boatPlacementHit(steps.get(1), 42, air);
+        check(hit != null && position(hit).equals(new BlockPosition(0, 2, 2)) && (Integer) hit[3] == 42,
+                "hit retains target position and runtime id");
+        check(ExperimentalFeatures.boatRaycastPositionLoaded(new BlockPosition(0, 2, 2), -64, 320, true),
+                "loaded in-bounds target is usable");
+        check(!ExperimentalFeatures.boatRaycastPositionLoaded(new BlockPosition(0, 2, 2), -64, 320, false),
+                "unloaded section fails closed");
+        check(!ExperimentalFeatures.boatRaycastPositionLoaded(new BlockPosition(0, 320, 2), -64, 320, true),
+                "out-of-height target fails closed");
+        check(ExperimentalFeatures.boatRaycastSteps(new Position3f(Float.NaN, 0F, 0F), 0F, 0F, 4.5D).isEmpty(),
+                "malformed origin fails closed");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.experimental.BoatUseItemSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
   }
 }
 
@@ -2636,7 +2816,9 @@ function assertRecipeBookSync () {
     'SLOT_COMPOSITE',
     'localBlockStateIdFromCurrentPalette(',
     'unlock_state_ready',
-    'unlocked_recipe_ids'
+    'unlocked_recipe_ids',
+    'InventoryContainer.BridgeIngredient.fromJson(ingredientObject)',
+    'bedrockIngredients.add(slot.bedrockIngredient())'
   ]) {
     if (!source.includes(marker)) throw new Error(`RecipeBookTracker.java is missing recipe sync marker: ${marker}`)
   }
@@ -2669,6 +2851,14 @@ function assertRecipeBookSync () {
     if (!CLASS_RELATIVE_PATHS.includes(relativePath)) throw new Error(`recipe-book patch class is not registered: ${relativePath}`)
   }
   if (!PATCH_SOURCE_RELATIVE_PATHS.includes('RecipeBookTracker.java')) throw new Error('RecipeBookTracker.java is not registered in the ViaProxy patch')
+
+  const inventorySource = fs.readFileSync(path.join(patchRoot, 'InventoryContainer.java'), 'utf8')
+  if (!inventorySource.includes('if (!bridgeRecipeBookIngredientMatches(this, ingredient, candidate)) continue;')) {
+    throw new Error('recipe-book autofill must match authoritative Bedrock ingredient descriptors')
+  }
+  if (inventorySource.includes('bridgeJavaItemId(candidate)')) {
+    throw new Error('recipe-book autofill regressed to Bedrock -> Java item-id round-tripping')
+  }
 
   const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/RecipeBookTracker.class')]).stdout
   for (const marker of ['RECIPE_BOOK_ADD', 'RECIPE_BOOK_REMOVE', 'RECIPE_BOOK_SETTINGS', 'UPDATE_RECIPES', 'HOLDER_SET', 'itemTemplate', 'localBlockStateIdFromCurrentPalette', 'writeRecipeDisplay', 'handlePlaceRecipe']) {
@@ -2737,6 +2927,125 @@ public final class BridgeItemTagOrientationSmoke {
     const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
     run('javac', ['-cp', classPath, '-d', tmp, tagSmokePath])
     run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.BridgeItemTagOrientationSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+function assertCraftingInteractionSemantics () {
+  const inventorySource = fs.readFileSync(path.join(patchRoot, 'InventoryContainer.java'), 'utf8')
+  for (const marker of [
+    'javaSlot == 0 && input == ContainerInput.SWAP',
+    'handleCraftingOutputSwap(button)',
+    'bridgeCanCraftResultIntoHotbar(destinationBefore, recipe.output, recipe.outputMaxStackSize)',
+    'craft_2x2_number_key_to_hotbar',
+    'craft_3x3_number_key_to_hotbar',
+    'jsonBoolean(object, "assume_symmetry", false)',
+    'if (mirrored) patternX = this.width - 1 - patternX;'
+  ]) {
+    if (!inventorySource.includes(marker)) throw new Error(`crafting interaction implementation is missing marker: ${marker}`)
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-crafting-interactions-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'api', 'model', 'container', 'player')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const sourcePath = path.join(packageDir, 'BridgeCraftingInteractionSmoke.java')
+    fs.writeFileSync(sourcePath, `
+package net.raphimc.viabedrock.api.model.container.player;
+
+import com.viaversion.viaversion.libs.gson.JsonObject;
+import com.viaversion.viaversion.libs.gson.JsonParser;
+import java.lang.reflect.Method;
+import net.raphimc.viabedrock.protocol.model.BedrockItem;
+
+public final class BridgeCraftingInteractionSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static BedrockItem item(int identifier, int amount) {
+        return new BedrockItem(identifier, (short) 0, (byte) amount);
+    }
+
+    private static Object recipe(String assumeSymmetry) throws Exception {
+        final JsonObject json = JsonParser.parseString(
+                "{\\"type\\":\\"shaped\\",\\"recipe_id\\":\\"minecraft:axe_smoke\\",\\"network_id\\":1583," +
+                "\\"assume_symmetry\\":" + assumeSymmetry + ",\\"width\\":2,\\"height\\":3," +
+                "\\"pattern\\":[" +
+                "{\\"kind\\":\\"item\\",\\"network_id\\":1,\\"metadata\\":32767}," +
+                "{\\"kind\\":\\"item\\",\\"network_id\\":1,\\"metadata\\":32767}," +
+                "{\\"kind\\":\\"item\\",\\"network_id\\":1,\\"metadata\\":32767}," +
+                "{\\"kind\\":\\"item\\",\\"network_id\\":2,\\"metadata\\":32767},null," +
+                "{\\"kind\\":\\"item\\",\\"network_id\\":2,\\"metadata\\":32767}]," +
+                "\\"output\\":{\\"network_id\\":3,\\"metadata\\":0,\\"count\\":1,\\"max_stack_size\\":1}}"
+        ).getAsJsonObject();
+        final Class<?> recipeClass = Class.forName(
+                "net.raphimc.viabedrock.api.model.container.player.InventoryContainer$BridgeRecipe");
+        final Method fromJson = recipeClass.getDeclaredMethod("fromJson", JsonObject.class);
+        fromJson.setAccessible(true);
+        return fromJson.invoke(null, json);
+    }
+
+    private static boolean matches(Object recipe, BedrockItem[] grid) throws Exception {
+        final Method match = recipe.getClass().getDeclaredMethod(
+                "match", InventoryContainer.class, BedrockItem[].class);
+        match.setAccessible(true);
+        return match.invoke(recipe, new Object[] { null, grid }) != null;
+    }
+
+    public static void main(String[] args) throws Exception {
+        for (int button = 0; button <= 8; button++) {
+            check(InventoryContainer.bridgeIsHotbarButton(button), "hotbar button " + button);
+        }
+        check(!InventoryContainer.bridgeIsHotbarButton(-1), "negative hotbar button");
+        check(!InventoryContainer.bridgeIsHotbarButton(9), "out-of-range hotbar button");
+
+        final BedrockItem result = item(3, 2);
+        check(InventoryContainer.bridgeCanCraftResultIntoHotbar(BedrockItem.empty(), result, 64),
+                "empty hotbar destination");
+        check(InventoryContainer.bridgeCanCraftResultIntoHotbar(item(3, 62), result, 64),
+                "stack-compatible hotbar destination");
+        check(!InventoryContainer.bridgeCanCraftResultIntoHotbar(item(3, 63), result, 64),
+                "full hotbar destination");
+        check(!InventoryContainer.bridgeCanCraftResultIntoHotbar(item(4, 1), result, 64),
+                "incompatible hotbar destination");
+        check(!InventoryContainer.bridgeCanCraftResultIntoHotbar(item(3, 1), item(3, 1), 1),
+                "non-stackable crafting result");
+        check(!InventoryContainer.bridgeCanCraftResultIntoHotbar(item(3, 1), item(3, 1), 0),
+                "unknown stack limit must not merge");
+        check(InventoryContainer.bridgeCanCraftResultIntoHotbar(BedrockItem.empty(), item(3, 1), 0),
+                "unknown stack limit may still craft into an empty destination");
+
+        final InventoryContainer.BridgeIngredient wildcardItem =
+                InventoryContainer.BridgeIngredient.fromJson(JsonParser.parseString(
+                        "{\\"kind\\":\\"item\\",\\"network_id\\":1,\\"metadata\\":32767}").getAsJsonObject());
+        check(InventoryContainer.bridgeRecipeBookIngredientMatches(null, wildcardItem, item(1, 1)),
+                "recipe-book allocation must match the original Bedrock item descriptor");
+        check(!InventoryContainer.bridgeRecipeBookIngredientMatches(null, wildcardItem, item(2, 1)),
+                "recipe-book allocation must reject a different Bedrock runtime id");
+
+        final BedrockItem[] canonical = new BedrockItem[] {
+                item(1, 1), item(1, 1), BedrockItem.empty(),
+                item(1, 1), item(2, 1), BedrockItem.empty(),
+                BedrockItem.empty(), item(2, 1), BedrockItem.empty()
+        };
+        final BedrockItem[] mirrored = new BedrockItem[] {
+                item(1, 1), item(1, 1), BedrockItem.empty(),
+                item(2, 1), item(1, 1), BedrockItem.empty(),
+                item(2, 1), BedrockItem.empty(), BedrockItem.empty()
+        };
+        check(matches(recipe("true"), canonical), "canonical symmetric recipe orientation");
+        check(matches(recipe("true"), mirrored), "mirrored orientation when assume_symmetry=true");
+        check(matches(recipe("false"), canonical), "canonical asymmetric recipe orientation");
+        check(!matches(recipe("false"), mirrored), "mirror must be rejected when assume_symmetry=false");
+    }
+}
+`)
+
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.api.model.container.player.BridgeCraftingInteractionSmoke'])
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
@@ -2912,6 +3221,8 @@ for (const relativePath of CLASS_RELATIVE_PATHS) {
   if (!fs.existsSync(patchClass)) throw new Error(`missing bundled patched class: ${patchClass}`)
 }
 
+assertCraftingInteractionSemantics()
+assertRecipeBookSync()
 assertNoObjectPacketEnumDescriptor()
 assertRegisteredCompanionDependencies()
 assertNoStalePlayerPickupStrings()
@@ -2931,6 +3242,7 @@ assertBoundedDirtyChunkDrain()
 assertUpstreamSafeChunkLighting()
 assertCompleteChunkSendGate()
 assertDeferredDoorInteractionAck()
+assertBoatAndRaftUseItemPlacement()
 assertMiningSwingSuppression()
 assertMissingBlockStateWarningDedupe()
 assertAggregatedStartupBlockStateMappingWarnings()
@@ -2945,7 +3257,6 @@ assertChestBlockEventLifecycleFallback()
 assertAuthoritativeContainerSlotCodec()
 assertMouseActionStateMachine()
 assertRenderingBehavior()
-assertRecipeBookSync()
 assertCraftingTableBridge()
 assertUnsupportedCameraSplineCancelled()
 

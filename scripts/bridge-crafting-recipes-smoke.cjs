@@ -9,7 +9,8 @@ const {
   simplifyCraftingDataForRecipeBook,
   simplifyFutureStationRecipesForBridge,
   writeBridgeCraftingRecipesForViaProxy,
-  applyBridgeUnlockedRecipesForViaProxy
+  applyBridgeUnlockedRecipesForViaProxy,
+  recipeResultToBridgeSpec
 } = require('../src/bridgeCraftingRecipes')
 
 function recipeIds (db) {
@@ -63,6 +64,7 @@ const tinyPacket = {
         recipe_id: 'minecraft:test_2x2_shaped',
         network_id: 101,
         block: 'crafting_table',
+        assume_symmetry: true,
         width: 2,
         height: 2,
         input: [
@@ -200,6 +202,11 @@ const twoByTwo = db.recipes.find(recipe => recipe.recipe_id === 'minecraft:test_
 if (!twoByTwo || twoByTwo.pattern[0]?.network_id !== 1 || twoByTwo.pattern[1] !== null || twoByTwo.pattern[2]?.tag !== 'minecraft:planks' || twoByTwo.pattern[3]?.network_id !== 2) {
   throw new Error('nested shaped recipe cells were not flattened into row-major grid order')
 }
+if (twoByTwo.assume_symmetry !== true) throw new Error('shaped recipe did not preserve assume_symmetry=true')
+const twoByTwoBook = recipeBookDb.recipes.find(recipe => recipe.recipe_id === 'minecraft:test_2x2_shaped')
+if (twoByTwoBook?.assume_symmetry !== true) throw new Error('recipe-book shaped recipe did not preserve assume_symmetry=true')
+const verticalShape = db.recipes.find(recipe => recipe.recipe_id === 'minecraft:test_vertical_sticks_shape')
+if (verticalShape?.assume_symmetry !== false) throw new Error('missing assume_symmetry must remain false')
 const ladderShape = craftingTableDb.recipes.find(recipe => recipe.recipe_id === 'minecraft:too_large')
 const ladderEmptySlots = ladderShape?.pattern
   .map((cell, index) => cell ? -1 : index)
@@ -231,7 +238,34 @@ const modernRecipeOptions = {
   networkIdByItemName: new Map([
     ['minecraft:oak_log', 17],
     ['minecraft:stick', 352]
+  ]),
+  itemNameByNetworkId: new Map([
+    [-742, 'minecraft:oak_planks'],
+    [-203, 'minecraft:barrel'],
+    [58, 'minecraft:crafting_table']
   ])
+}
+
+const stoneAxeOutput = recipeResultToBridgeSpec(
+  { network_id: 900, count: 1, metadata: 0 },
+  { itemNameByNetworkId: new Map([[900, 'minecraft:stone_axe']]) }
+)
+if (stoneAxeOutput?.max_stack_size !== 1) {
+  throw new Error(`stone axe result must retain its one-item stack limit, got ${stoneAxeOutput?.max_stack_size}`)
+}
+const pearlOutput = recipeResultToBridgeSpec(
+  { network_id: 901, count: 1, metadata: 0 },
+  { itemNameByNetworkId: new Map([[901, 'minecraft:ender_pearl']]) }
+)
+if (pearlOutput?.max_stack_size !== 16) {
+  throw new Error(`ender pearl result must retain its 16-item stack limit, got ${pearlOutput?.max_stack_size}`)
+}
+const goldenDandelionOutput = recipeResultToBridgeSpec(
+  { network_id: 902, count: 1, metadata: 0 },
+  { itemNameByNetworkId: new Map([[902, 'minecraft:golden_dandelion']]) }
+)
+if (goldenDandelionOutput?.max_stack_size !== 64) {
+  throw new Error(`Java 26.1-only result must resolve its stack limit, got ${goldenDandelionOutput?.max_stack_size}`)
 }
 const modernSplitPacket = {
   shaped_recipes: [

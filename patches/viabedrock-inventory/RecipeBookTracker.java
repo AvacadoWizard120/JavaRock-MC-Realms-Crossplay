@@ -183,9 +183,12 @@ public final class RecipeBookTracker extends StoredObject {
                 continue;
             }
             final JsonObject ingredientObject = ingredient.getAsJsonObject();
+            final InventoryContainer.BridgeIngredient bedrockIngredient =
+                    InventoryContainer.BridgeIngredient.fromJson(ingredientObject);
+            if (bedrockIngredient == null) return null;
             final int[] itemIds = this.resolveIngredient(ingredientObject);
             if (itemIds.length == 0) return null;
-            ingredients.add(new ResolvedSlot(itemIds, this.ingredientCount(ingredientObject)));
+            ingredients.add(new ResolvedSlot(itemIds, bedrockIngredient, this.ingredientCount(ingredientObject)));
         }
 
         final Item result = this.resolveResult(recipe.getAsJsonObject("output"));
@@ -405,10 +408,10 @@ public final class RecipeBookTracker extends StoredObject {
             return;
         }
 
-        final List<int[]> itemIds = new ArrayList<>(recipe.ingredients().size());
+        final List<InventoryContainer.BridgeIngredient> bedrockIngredients = new ArrayList<>(recipe.ingredients().size());
         final List<Integer> counts = new ArrayList<>(recipe.ingredients().size());
         for (final ResolvedSlot slot : recipe.ingredients()) {
-            itemIds.add(slot.itemIds());
+            bedrockIngredients.add(slot.bedrockIngredient());
             counts.add(Integer.valueOf(slot.count()));
         }
         inventory.bridgePlaceRecipeFromBook(
@@ -416,7 +419,7 @@ public final class RecipeBookTracker extends StoredObject {
                 "shaped".equals(recipe.type()),
                 recipe.width(),
                 recipe.height(),
-                itemIds,
+                bedrockIngredients,
                 counts,
                 useMaxItems);
     }
@@ -481,8 +484,11 @@ public final class RecipeBookTracker extends StoredObject {
         try { return element.getAsBoolean(); } catch (Throwable ignored) { return fallback; }
     }
 
-    private record ResolvedSlot(int[] itemIds, int count) {
-        private static final ResolvedSlot EMPTY = new ResolvedSlot(new int[0], 0);
+    private record ResolvedSlot(
+            int[] itemIds,
+            InventoryContainer.BridgeIngredient bedrockIngredient,
+            int count) {
+        private static final ResolvedSlot EMPTY = new ResolvedSlot(new int[0], null, 0);
     }
 
     private record ResolvedRecipe(
