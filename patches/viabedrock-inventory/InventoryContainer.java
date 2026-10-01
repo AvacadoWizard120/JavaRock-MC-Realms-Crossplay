@@ -150,9 +150,9 @@ public class InventoryContainer extends Container {
         if (!this.bridgeCraftingTable && activeCraftingTable != null && activeCraftingTable != this) {
             return activeCraftingTable.getJavaItems();
         }
-        Item[] ownItems = super.getJavaItems();
-        HudContainer hudContainer = tracker.getHudContainer();
         if (this.bridgeCraftingTable) {
+            Item[] ownItems = super.getJavaItems();
+            HudContainer hudContainer = tracker.getHudContainer();
             Item[] javaItems = StructuredItem.emptyArray(46);
             System.arraycopy(ownItems, 9, javaItems, 10, 27);
             System.arraycopy(ownItems, 0, javaItems, 37, 9);
@@ -163,6 +163,13 @@ public class InventoryContainer extends Container {
             if (!isEmpty(craftOutput)) javaItems[0] = this.user.get(ItemRewriter.class).javaItem(craftOutput);
             return javaItems;
         }
+        return this.bridgePlayerInventoryJavaItems();
+    }
+
+    private Item[] bridgePlayerInventoryJavaItems() {
+        InventoryTracker tracker = this.user.get(InventoryTracker.class);
+        Item[] ownItems = super.getJavaItems();
+        HudContainer hudContainer = tracker.getHudContainer();
         Item[] armorItems = tracker.getArmorContainer().getActualJavaItems();
         Item[] offhandItems = tracker.getOffhandContainer().getActualJavaItems();
         Item[] javaItems = StructuredItem.emptyArray(46);
@@ -2454,6 +2461,11 @@ public class InventoryContainer extends Container {
         this.publishJavaInventorySnapshot(reason);
     }
 
+    public void bridgePublishCanonicalJavaInventorySnapshot(String reason) {
+        InventoryContainer owner = this.bridgeCanonicalInventory;
+        owner.publishCanonicalJavaInventorySnapshot(reason);
+    }
+
     public BedrockItem bridgeGetCarriedItem() {
         return safeCopy(this.carriedItem);
     }
@@ -2752,6 +2764,27 @@ public class InventoryContainer extends Container {
         }
     }
 
+    private void publishCanonicalJavaInventorySnapshot(String reason) {
+        try {
+            InventoryTracker tracker = this.user.get(InventoryTracker.class);
+            tracker.getHudContainer().setItem(0, safeCopy(this.carriedItem));
+            int javaStateId = this.nextJavaStateId();
+            this.sendJavaContainerSetContent(
+                    javaStateId,
+                    ContainerID.CONTAINER_ID_INVENTORY.getValue(),
+                    this.bridgePlayerInventoryJavaItems());
+            this.sendJavaCursorItem();
+            ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                    "[BedrockRealmBridge] sent canonical Java player inventory snapshot reason=" + reason +
+                            " javaStateId=" + javaStateId +
+                            " javaContainerId=" + ContainerID.CONTAINER_ID_INVENTORY.getValue() +
+                            " carriedEmpty=" + isEmpty(this.carriedItem));
+        } catch (Throwable t) {
+            ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
+                    "[BedrockRealmBridge] failed to send canonical Java player inventory snapshot after container close", t);
+        }
+    }
+
     private int nextJavaStateId() {
         InventoryContainer owner = this.bridgeCanonicalInventory;
         owner.bridgeJavaStateId++;
@@ -2761,10 +2794,14 @@ public class InventoryContainer extends Container {
     }
 
     private void sendJavaContainerSetContent(int stateId) {
+        this.sendJavaContainerSetContent(stateId, this.javaContainerId(), this.getJavaItems());
+    }
+
+    private void sendJavaContainerSetContent(int stateId, int javaContainerId, Item[] javaItems) {
         PacketWrapper wrapper = PacketWrapper.create(com.viaversion.viaversion.protocols.v1_21_11to26_1.packet.ClientboundPackets26_1.CONTAINER_SET_CONTENT, this.user);
-        wrapper.write(Types.VAR_INT, Integer.valueOf(this.javaContainerId()));
+        wrapper.write(Types.VAR_INT, Integer.valueOf(javaContainerId));
         wrapper.write(Types.VAR_INT, Integer.valueOf(stateId));
-        wrapper.write(VersionedTypes.V26_2.itemArray(), this.getJavaItems());
+        wrapper.write(VersionedTypes.V26_2.itemArray(), javaItems);
         wrapper.write(VersionedTypes.V26_2.item(), this.user.get(InventoryTracker.class).getHudContainer().getJavaItem(0));
         wrapper.send(BedrockProtocol.class);
     }

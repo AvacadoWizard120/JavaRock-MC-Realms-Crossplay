@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.119 - 2026-10-01
+
+- Closing a crafting table now restores the grid to Java's player-inventory window immediately, including forced closes, instead of hiding accepted items until the next Realm inventory refresh.
+- Boats and rafts now relay Java movement and paddle input as Bedrock client-predicted vehicle state, follow Realm corrections, keep mounted chunk and interaction origins current, and dismount at the latest boat position.
+- Identical block actions duplicated inside one movement tick are collapsed before reaching the Realm, preventing duplicate mining-start processing while preserving every distinct action, position, and face.
+
 ## 0.3.118 - 2026-10-01
 
 - Boats and rafts now use the block or water position under the crosshair, matching Bedrock's native placement packet instead of sending an ignored air click.

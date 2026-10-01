@@ -202,24 +202,30 @@ queuedLinkRelay.rememberClientboundEntityPacket('start_game', {
 })
 assert.strictEqual(queuedLinkRelay.downstreamEntityUniqueToRuntime.get('-236223201279'), '1')
 
+assert.strictEqual(queuedLinkRelay.queueClientbound('add_entity', {
+  unique_id: -287762808828n,
+  runtime_id: 62n,
+  entity_type: 'minecraft:drowned'
+}, 'drowned_spawn'), true)
+assert.deepStrictEqual(queuedLinkPackets.map(packet => packet.name), ['add_entity'])
+
 assert.strictEqual(queuedLinkRelay.queueClientbound('set_entity_link', entityLink, 'queue_smoke'), false)
-assert.strictEqual(queuedLinkPackets.length, 0, 'queueClientbound must not send a deferred entity link')
+assert.deepStrictEqual(queuedLinkPackets.map(packet => packet.name), ['add_entity'], 'queueClientbound must not send a deferred entity link')
 assert.strictEqual(queuedLinkRelay.pendingClientboundEntityLinks.size, 1)
 assert.strictEqual(queueEvents.at(-1).phase, 'deferred')
 assert.strictEqual(queueEvents.at(-1).translation_status, 'deferred_until_linked_entities_spawn')
 
-queuedLinkRelay.rememberClientboundEntityPacket('add_entity', {
+assert.strictEqual(queuedLinkRelay.queueClientbound('add_entity', {
   unique_id: -287762808824n,
   runtime_id: 66n,
   entity_type: 'minecraft:zombie_nautilus'
-})
-assert.strictEqual(queuedLinkPackets.length, 0)
-queuedLinkRelay.rememberClientboundEntityPacket('add_entity', {
-  unique_id: -287762808828n,
-  runtime_id: 67n,
-  entity_type: 'minecraft:drowned'
-})
-assert.deepStrictEqual(queuedLinkPackets.map(packet => packet.name), ['set_entity_link'])
+}, 'zombie_nautilus_spawn'), true)
+assert.deepStrictEqual(
+  queuedLinkPackets.map(packet => packet.name),
+  ['add_entity', 'add_entity', 'set_entity_link'],
+  'the deferred link must follow both fully queued support-trace entity spawns'
+)
 assert.strictEqual(queuedLinkRelay.pendingClientboundEntityLinks.size, 0)
+assert.ok(queueEvents.some(event => event.name === 'set_entity_link' && event.phase === 'sent'))
 
 console.log('NetherNet relay entity tracker smoke check passed.')

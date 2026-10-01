@@ -150,6 +150,7 @@ public class UnhandledPackets {
             wrapper.write(Types.BYTE, (byte) ContainerType.NONE.getValue());
             wrapper.write(Types.BOOLEAN, false);
             inventoryTracker.markPendingClose(container);
+            inventoryTracker.bridgePublishCanonicalInventoryAfterJavaClose(container);
         }, true);
 
         protocol.registerClientbound(ClientboundBedrockPackets.ITEM_STACK_RESPONSE, null, wrapper -> {
