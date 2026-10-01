@@ -149,15 +149,20 @@ public class ClientPlayerEntity extends PlayerEntity {
     }
 
     public void writePlayerPositionPacketToClient(final PacketWrapper wrapper, final Set<Relative> relatives, final boolean fakeTeleport) {
+        this.writePlayerPositionPacketToClient(wrapper, relatives, Position3f.ZERO, fakeTeleport);
+    }
+
+    public void writePlayerPositionPacketToClient(final PacketWrapper wrapper, final Set<Relative> relatives,
+                                                  final Position3f velocity, final boolean fakeTeleport) {
         this.pendingTeleportId = TELEPORT_ID.getAndIncrement();
 
         wrapper.write(Types.VAR_INT, this.pendingTeleportId * (fakeTeleport ? -1 : 1)); // teleport id
         wrapper.write(Types.DOUBLE, relatives.contains(Relative.X) ? 0D : (double) this.position.x()); // x
         wrapper.write(Types.DOUBLE, relatives.contains(Relative.Y) ? 0D : (double) (this.position.y() - this.eyeOffset())); // y
         wrapper.write(Types.DOUBLE, relatives.contains(Relative.Z) ? 0D : (double) this.position.z()); // z
-        wrapper.write(Types.DOUBLE, 0D); // velocity x
-        wrapper.write(Types.DOUBLE, 0D); // velocity y
-        wrapper.write(Types.DOUBLE, 0D); // velocity z
+        wrapper.write(Types.DOUBLE, (double) velocity.x()); // velocity x
+        wrapper.write(Types.DOUBLE, (double) velocity.y()); // velocity y
+        wrapper.write(Types.DOUBLE, (double) velocity.z()); // velocity z
         wrapper.write(Types.FLOAT, relatives.contains(Relative.Y_ROT) ? 0F : this.rotation.y()); // yaw
         wrapper.write(Types.FLOAT, relatives.contains(Relative.X_ROT) ? 0F : this.rotation.x()); // pitch
         wrapper.write(Types.INT, EnumUtil.getIntBitmaskFromEnumSet(relatives, Relative::ordinal)); // flags

@@ -224,7 +224,7 @@ function assertItemFrameMetadata () {
     'entityTracker.updateItemFrame(position, blockState, frameTag)',
     'this.user().get(EntityTracker.class).updateItemFrame(',
     'levelChunkWithLight.write(Types.BYTE_ARRAY_PRIMITIVE, FULL_LIGHT.clone())',
-    'levelChunkWithLight.write(Types.VAR_INT, 0); // block light length'
+    'levelChunkWithLight.write(Types.VAR_INT, blockLight.arrays().length); // block light length'
   ]) {
     if (!chunkSource.includes(marker)) throw new Error(`patched ChunkTracker.java is missing frame/light marker: ${marker}`)
   }
@@ -595,29 +595,106 @@ public final class DirtyChunkBudgetSmoke {
   }
 }
 
-function assertUpstreamSafeChunkLighting () {
+function assertBoundedDerivedChunkLighting () {
   const source = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
   const sendStart = source.indexOf('public void sendChunk(final int chunkX, final int chunkZ)')
   const sendEnd = source.indexOf('public Dimension getDimension()', sendStart)
   const sendChunk = source.slice(sendStart, sendEnd)
-  for (const expensiveCall of ['this.getSkyLight(chunk)', 'this.getBlockLight(chunk)']) {
-    if (sendChunk.includes(expensiveCall)) {
-      throw new Error(`ChunkTracker.sendChunk() still invokes the reverted synchronous light engine: ${expensiveCall}`)
+  for (const forbidden of ['this.getSkyLight(chunk)', 'this.getBlockLight(chunk)', 'computeBlockLight(']) {
+    if (sendChunk.includes(forbidden)) {
+      throw new Error(`ChunkTracker.sendChunk() performs light propagation synchronously: ${forbidden}`)
     }
   }
   for (const marker of [
     'final int lightSectionCount = remappedChunk.getSections().length + 2',
     'final BitSet lightMask = new BitSet(lightSectionCount)',
     'lightMask.set(0, lightSectionCount)',
+    'final int[][] blockLightSnapshot = snapshotRemappedJavaStates(remappedChunk)',
+    'this.blockLightSnapshots.put(chunkKey, blockLightSnapshot)',
+    'this.appliedBlockLight.getOrDefault(',
+    'emptyLightData(remappedChunk.getSections().length)',
+    'blockLight.mask()',
+    'blockLight.emptyMask()',
     'levelChunkWithLight.write(Types.VAR_INT, lightSectionCount)',
     'levelChunkWithLight.write(Types.BYTE_ARRAY_PRIMITIVE, FULL_LIGHT.clone())',
-    'levelChunkWithLight.write(Types.VAR_INT, 0); // block light length'
+    'levelChunkWithLight.write(Types.VAR_INT, blockLight.arrays().length)',
+    'for (byte[] data : blockLight.arrays())',
+    'this.invalidateBlockLightAround(chunkX, chunkZ)'
   ]) {
-    if (!sendChunk.includes(marker)) throw new Error(`ChunkTracker.sendChunk() is missing upstream-safe light marker: ${marker}`)
+    if (!sendChunk.includes(marker)) throw new Error(`ChunkTracker.sendChunk() is missing async block-light marker: ${marker}`)
   }
-  if ((sendChunk.match(/lightMask\.toLongArray\(\)/g) || []).length !== 2 ||
-      (sendChunk.match(/new long\[0\]/g) || []).length !== 2) {
-    throw new Error('ChunkTracker.sendChunk() must use full sky/empty block light masks in the 26_1 long-array wire format')
+  if ((sendChunk.match(/lightMask\.toLongArray\(\)/g) || []).length !== 1 ||
+      (sendChunk.match(/new long\[0\]/g) || []).length !== 1) {
+    throw new Error('ChunkTracker.sendChunk() must retain the full-sky fallback with cached/empty block light')
+  }
+  const sentChunkIndex = sendChunk.indexOf('this.sentChunks.add(chunkKey)')
+  const initialLightQueueIndex = sendChunk.lastIndexOf('this.invalidateBlockLightAround(chunkX, chunkZ)')
+  if (sentChunkIndex < 0 || initialLightQueueIndex < sentChunkIndex) {
+    throw new Error('the first terrain send must become visible before its async block-light job is queued')
+  }
+
+  for (const marker of [
+    'private static final Semaphore BLOCK_LIGHT_SLOTS',
+    'private static final ExecutorService BLOCK_LIGHT_EXECUTOR',
+    'new Thread(target, "ViaBedrock Block Light Worker")',
+    'thread.setDaemon(true)',
+    'private final Long2ObjectMap<int[][]> blockLightSnapshots',
+    'private final Long2ObjectMap<int[][]> pendingBlockLightSnapshots',
+    'private final Map<Long, Long> blockLightVersions',
+    'private void updateBlockLightSnapshot(',
+    'final int[][] updated = current.clone()',
+    'current[sectionIndex].clone()',
+    'BLOCK_LIGHT_EXECUTOR.execute(() ->',
+    'result = computeBlockLight(regionSnapshots, centerSnapshot.length)',
+    'this.user().getChannel().eventLoop().execute(() ->',
+    'this.blockLightVersions.getOrDefault(chunkKey, 0L) != version',
+    'PacketWrapper.create(ClientboundPackets26_1.LIGHT_UPDATE, this.user())'
+  ]) {
+    if (!source.includes(marker)) throw new Error(`ChunkTracker is missing bounded worker-light marker: ${marker}`)
+  }
+  const workerStart = source.indexOf('BLOCK_LIGHT_EXECUTOR.execute(() ->')
+  const compute = source.indexOf('result = computeBlockLight(', workerStart)
+  const eventLoop = source.indexOf('this.user().getChannel().eventLoop().execute(() ->', compute)
+  const sendUpdate = source.indexOf('this.sendBlockLightUpdate(', eventLoop)
+  if (workerStart < 0 || compute < workerStart || eventLoop < compute || sendUpdate < eventLoop) {
+    throw new Error('block light must compute on the worker and return to the connection event loop before sending')
+  }
+
+  const blockChangeStart = source.indexOf('public IntObjectPair<BlockEntity> handleBlockChange')
+  const blockChangeEnd = source.indexOf('public BedrockChunkSection handleBlockPalette', blockChangeStart)
+  const blockChange = source.slice(blockChangeStart, blockChangeEnd)
+  if (blockChange.indexOf('this.invalidateBlockLightAround(chunkX, chunkZ)') > blockChange.indexOf('if (doorStateChanged)')) {
+    throw new Error('door transitions must invalidate worker light before entering their paired update branch')
+  }
+
+  const pairedDoorStart = source.indexOf('private boolean sendPairedDoorState(')
+  const pairedDoorEnd = source.indexOf('private void acknowledgeDoorInteractions(', pairedDoorStart)
+  const pairedDoor = source.slice(pairedDoorStart, pairedDoorEnd)
+  const lowerSnapshotUpdate = pairedDoor.indexOf('this.updateBlockLightSnapshot(lowerPosition, lowerJavaBlockState)')
+  const upperSnapshotUpdate = pairedDoor.indexOf('this.updateBlockLightSnapshot(upperPosition, upperJavaBlockState)')
+  const lowerPacketUpdate = pairedDoor.indexOf('PacketFactory.sendJavaBlockUpdate(this.user(), lowerPosition, lowerJavaBlockState)')
+  if (lowerSnapshotUpdate < 0 || upperSnapshotUpdate < lowerSnapshotUpdate || lowerPacketUpdate < upperSnapshotUpdate) {
+    throw new Error('paired door updates must replace both immutable light-snapshot states before sending the Java pair')
+  }
+
+  const lightUpdateStart = source.indexOf('private void sendBlockLightUpdate(')
+  const lightUpdateEnd = source.indexOf('static boolean hasDirtyChunkSendBudget', lightUpdateStart)
+  const lightUpdate = source.slice(lightUpdateStart, lightUpdateEnd)
+  const orderedLightMarkers = [
+    'lightUpdate.write(Types.VAR_INT, chunkX)',
+    'lightUpdate.write(Types.VAR_INT, chunkZ)',
+    'new long[0]); // sky light mask (unchanged)',
+    'blockLight.mask()); // block light mask',
+    'new long[0]); // empty sky light mask (unchanged)',
+    'blockLight.emptyMask()); // empty block light mask',
+    'lightUpdate.write(Types.VAR_INT, 0); // sky light length',
+    'blockLight.arrays().length); // block light length'
+  ]
+  let previousIndex = -1
+  for (const marker of orderedLightMarkers) {
+    const markerIndex = lightUpdate.indexOf(marker)
+    if (markerIndex <= previousIndex) throw new Error(`LIGHT_UPDATE field order is wrong or missing: ${marker}`)
+    previousIndex = markerIndex
   }
 
   const chunkTrackerClass = bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/ChunkTracker.class')
@@ -625,11 +702,92 @@ function assertUpstreamSafeChunkLighting () {
   const bytecodeSendStart = bytecode.indexOf('public void sendChunk(int, int);')
   const bytecodeSendEnd = bytecode.indexOf('public net.raphimc.viabedrock.protocol.data.enums.Dimension getDimension();', bytecodeSendStart)
   const sendChunkBytecode = bytecode.slice(bytecodeSendStart, bytecodeSendEnd)
-  if (sendChunkBytecode.includes('getSkyLight') || sendChunkBytecode.includes('getBlockLight')) {
-    throw new Error('compiled ChunkTracker.sendChunk bytecode still invokes the reverted light engine')
+  if (sendChunkBytecode.includes('getSkyLight') || sendChunkBytecode.includes('getBlockLight') || sendChunkBytecode.includes('computeBlockLight')) {
+    throw new Error('compiled ChunkTracker.sendChunk bytecode performs synchronous light propagation')
   }
-  if (!sendChunkBytecode.includes('FULL_LIGHT')) {
-    throw new Error('compiled ChunkTracker.sendChunk bytecode does not write the upstream full-sky fallback')
+  for (const marker of ['FULL_LIGHT', 'snapshotRemappedJavaStates', 'appliedBlockLight', 'invalidateBlockLightAround']) {
+    if (!sendChunkBytecode.includes(marker)) throw new Error(`compiled sendChunk is missing async light marker: ${marker}`)
+  }
+  for (const marker of ['BLOCK_LIGHT_EXECUTOR', 'computeBlockLight', 'sendBlockLightUpdate', 'eventLoop']) {
+    if (!bytecode.includes(marker)) throw new Error(`compiled ChunkTracker is missing worker light bytecode: ${marker}`)
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-block-light-worker-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const smokeSource = path.join(packageDir, 'BlockLightWorkerSmoke.java')
+    fs.writeFileSync(smokeSource, `
+package net.raphimc.viabedrock.protocol.storage;
+
+import java.util.BitSet;
+import java.util.function.IntUnaryOperator;
+
+public final class BlockLightWorkerSmoke {
+    private static final int AIR = 0;
+    private static final int TORCH = 1;
+    private static final int STONE = 2;
+    private static final IntUnaryOperator EMISSION = state -> state == TORCH ? 14 : 0;
+    private static final IntUnaryOperator OPACITY = state -> state == STONE || state < 0 ? 15 : 0;
+
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static int index(int x, int y, int z) {
+        return (y << 8) | (z << 4) | x;
+    }
+
+    private static int light(byte[] data, int x, int y, int z) {
+        int nibble = index(x, y, z);
+        int value = data[nibble >>> 1] & 0xFF;
+        return (nibble & 1) == 0 ? value & 15 : value >>> 4;
+    }
+
+    private static int[][] chunk() {
+        return new int[][] {new int[4096]};
+    }
+
+    private static ChunkTracker.BlockLightData compute(int[][][] region) {
+        return ChunkTracker.computeBlockLight(region, 1, EMISSION, OPACITY);
+    }
+
+    public static void main(String[] args) {
+        int[][][] centerRegion = new int[9][][];
+        centerRegion[4] = chunk();
+        centerRegion[4][0][index(1, 8, 8)] = TORCH;
+        ChunkTracker.BlockLightData center = compute(centerRegion);
+        BitSet centerMask = BitSet.valueOf(center.mask());
+        BitSet centerEmpty = BitSet.valueOf(center.emptyMask());
+        check(centerMask.cardinality() == center.arrays().length, "mask/array cardinality");
+        check(!centerMask.intersects(centerEmpty), "nonempty and empty masks overlap");
+        check(centerMask.get(1), "target section missing from block-light mask");
+        check(light(center.arrays()[0], 1, 8, 8) == 14, "torch source level");
+        check(light(center.arrays()[0], 14, 8, 8) == 1, "Manhattan distance 13");
+        check(light(center.arrays()[0], 15, 8, 8) == 0, "Manhattan distance 14");
+
+        int[][][] opaqueRegion = new int[9][][];
+        opaqueRegion[4] = chunk();
+        opaqueRegion[4][0][index(1, 8, 8)] = TORCH;
+        opaqueRegion[4][0][index(2, 8, 8)] = STONE;
+        ChunkTracker.BlockLightData opaque = compute(opaqueRegion);
+        check(light(opaque.arrays()[0], 2, 8, 8) == 0, "opaque block must reject entering light");
+
+        int[][][] borderRegion = new int[9][][];
+        borderRegion[3] = chunk();
+        borderRegion[4] = chunk();
+        borderRegion[3][0][index(15, 8, 8)] = TORCH;
+        ChunkTracker.BlockLightData border = compute(borderRegion);
+        check(light(border.arrays()[0], 0, 8, 8) == 13,
+                "west-neighbor emitter must cross the target chunk border");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, smokeSource])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.BlockLightWorkerSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
   }
 }
 
@@ -1868,6 +2026,66 @@ function assertMovementCorrectionRebase () {
   }
 }
 
+function assertAuthoritativeMovementVelocity () {
+  const playerEntitySource = fs.readFileSync(path.join(patchRoot, 'ClientPlayerEntity.java'), 'utf8')
+  const playerPacketsSource = fs.readFileSync(path.join(patchRoot, 'ClientPlayerPackets.java'), 'utf8')
+  const playerCorrectionStart = playerPacketsSource.indexOf('case Player ->')
+  const playerCorrectionEnd = playerPacketsSource.indexOf('case Vehicle ->', playerCorrectionStart)
+  if (playerCorrectionStart < 0 || playerCorrectionEnd < 0) {
+    throw new Error('could not isolate the player movement-correction branch')
+  }
+  const playerCorrection = playerPacketsSource.slice(playerCorrectionStart, playerCorrectionEnd)
+  if (!playerEntitySource.includes('final Position3f velocity, final boolean fakeTeleport')) {
+    throw new Error('ClientPlayerEntity is missing the authoritative-velocity position-sync overload')
+  }
+  if (!playerCorrection.includes('writePlayerPositionPacketToClient(wrapper, Relative.ROTATION, positionDelta, true)')) {
+    throw new Error('player movement corrections do not forward Bedrock authoritative velocity')
+  }
+  if (playerCorrection.includes('Relative.VELOCITY')) {
+    throw new Error('player movement corrections still preserve Java divergent velocity')
+  }
+
+  const trackerSource = fs.readFileSync(path.join(patchRoot, 'EntityTracker.java'), 'utf8')
+  for (const marker of [
+    'private final Long2ObjectMap<Position3f> entityMotions',
+    'public void setEntityMotion',
+    'public Position3f entityMotion',
+    'this.entityMotions.remove(entity.runtimeId())'
+  ]) {
+    if (!trackerSource.includes(marker)) throw new Error(`EntityTracker is missing retained-motion marker: ${marker}`)
+  }
+
+  const entityPacketsSource = fs.readFileSync(path.join(patchRoot, 'EntityPackets.java'), 'utf8')
+  const syncVelocityCalls = entityPacketsSource.match(/writeJavaPositionSyncVelocity\(wrapper, entityTracker\.entityMotion\(entityRuntimeId\)\)/g) || []
+  if (syncVelocityCalls.length !== 2) {
+    throw new Error(`entity absolute/delta position syncs must both retain real motion; found ${syncVelocityCalls.length} calls`)
+  }
+  for (const marker of [
+    'entityTracker.setEntityMotion(entityRuntimeId, motion)',
+    'private static void writeJavaPositionSyncVelocity',
+    'wrapper.write(Types.DOUBLE, (double) motion.x())',
+    'wrapper.write(Types.DOUBLE, (double) motion.y())',
+    'wrapper.write(Types.DOUBLE, (double) motion.z())'
+  ]) {
+    if (!entityPacketsSource.includes(marker)) throw new Error(`EntityPackets is missing retained-motion marker: ${marker}`)
+  }
+
+  const playerEntityBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath('net/raphimc/viabedrock/api/model/entity/ClientPlayerEntity.class')]).stdout
+  const playerPacketsBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath('net/raphimc/viabedrock/protocol/packet/ClientPlayerPackets.class')]).stdout
+  const trackerBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath('net/raphimc/viabedrock/protocol/storage/EntityTracker.class')]).stdout
+  const entityPacketsBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath('net/raphimc/viabedrock/protocol/packet/EntityPackets.class')]).stdout
+  for (const [label, bytecode, markers] of [
+    ['ClientPlayerEntity', playerEntityBytecode, ['Position3f.x:()F', 'Position3f.y:()F', 'Position3f.z:()F']],
+    ['ClientPlayerPackets', playerPacketsBytecode, ['ClientPlayerEntity.writePlayerPositionPacketToClient']],
+    ['EntityTracker', trackerBytecode, ['entityMotions', 'setEntityMotion', 'entityMotion']],
+    ['EntityPackets', entityPacketsBytecode, ['EntityTracker.setEntityMotion', 'EntityTracker.entityMotion', 'writeJavaPositionSyncVelocity']]
+  ]) {
+    for (const marker of markers) {
+      if (!bytecode.includes(marker)) throw new Error(`${label}.class is missing authoritative movement bytecode: ${marker}`)
+    }
+  }
+}
+
 function assertAssignedLocalPlayerEntityId () {
   const source = fs.readFileSync(path.join(patchRoot, 'ClientPlayerEntity.java'), 'utf8')
   if (!source.includes('private static final int JAVA_ENTITY_ID = Integer.MAX_VALUE')) {
@@ -2680,6 +2898,10 @@ function assertMouseActionStateMachine () {
     '(isEmpty(slotBefore) || canStack(cursorBefore, slotBefore))',
     '(isEmpty(cursorBefore) || canStack(cursorBefore, slotBefore))',
     'public int bridgeTakeMatchingSlotsToCursor(',
+    'final int craftingInputCount = bridgePickupAllCraftingInputCount(this.bridgeCraftingTable)',
+    'static int bridgePickupAllCraftingInputCount(final boolean craftingTable)',
+    'for (int craftingJavaSlot = 1; craftingJavaSlot <= craftingInputCount; craftingJavaSlot++)',
+    'ClickSlot candidate = this.clickSlotFromJavaSlot(craftingJavaSlot)',
     'private void sendItemStackRequestTakes(',
     'wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, sources.size())',
     'private boolean applyQuickCraft(int mode, List<Integer> selected)',
@@ -2810,9 +3032,30 @@ public final class BridgeMouseActionSmoke {
 }
 `)
 
+    const playerPackageDir = path.join(packageDir, 'player')
+    fs.mkdirSync(playerPackageDir, { recursive: true })
+    const pickupAllSourcePath = path.join(playerPackageDir, 'BridgePickupAllCraftingGridSmoke.java')
+    fs.writeFileSync(pickupAllSourcePath, `
+package net.raphimc.viabedrock.api.model.container.player;
+
+public final class BridgePickupAllCraftingGridSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) {
+        check(InventoryContainer.bridgePickupAllCraftingInputCount(false) == 4,
+                "player-inventory pickup-all must scan every 2x2 crafting input");
+        check(InventoryContainer.bridgePickupAllCraftingInputCount(true) == 9,
+                "workbench pickup-all must scan every 3x3 crafting input");
+    }
+}
+`)
+
     const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
-    run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
+    run('javac', ['-cp', classPath, '-d', tmp, sourcePath, pickupAllSourcePath])
     run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.api.model.container.BridgeMouseActionSmoke'])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.api.model.container.player.BridgePickupAllCraftingGridSmoke'])
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
@@ -3379,7 +3622,7 @@ assertModernMobArmorEquipmentCodec()
 assertCanonicalInventoryInteractionState()
 assertChunkLifecycleFixes()
 assertBoundedDirtyChunkDrain()
-assertUpstreamSafeChunkLighting()
+assertBoundedDerivedChunkLighting()
 assertCompleteChunkSendGate()
 assertDeferredDoorInteractionAck()
 assertBoatAndRaftUseItemPlacement()
@@ -3388,6 +3631,7 @@ assertMissingBlockStateWarningDedupe()
 assertAggregatedStartupBlockStateMappingWarnings()
 assertBedrockBlockStateCompatibility()
 assertMovementCorrectionRebase()
+assertAuthoritativeMovementVelocity()
 assertAssignedLocalPlayerEntityId()
 assertSubChunkRequestWireLayout()
 assertInitialJoinReadinessLifecycle()

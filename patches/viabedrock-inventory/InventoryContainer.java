@@ -710,6 +710,20 @@ public class InventoryContainer extends Container {
             sourceContainerIds.add(Integer.valueOf(clicked.sourceContainerId));
             sourceSlots.add(Integer.valueOf(clicked.bedrockSlot));
         }
+        // Java's pickup-all searches every slot in the open menu, not only the
+        // player's 36 inventory slots. Bedrock keeps both the 2x2 and 3x3
+        // crafting inputs in the player-only UI container, so include those
+        // inputs explicitly before scanning the inventory. Without this, a
+        // double-click over one crafting input can only collect matching stacks
+        // from the hotbar/main inventory and leaves the rest of the grid behind.
+        final int craftingInputCount = bridgePickupAllCraftingInputCount(this.bridgeCraftingTable);
+        for (int craftingJavaSlot = 1; craftingJavaSlot <= craftingInputCount; craftingJavaSlot++) {
+            ClickSlot candidate = this.clickSlotFromJavaSlot(craftingJavaSlot);
+            if (candidate == null || sameClickSlot(candidate, clicked)) continue;
+            sourceContainers.add(candidate.container);
+            sourceContainerIds.add(Integer.valueOf(candidate.sourceContainerId));
+            sourceSlots.add(Integer.valueOf(candidate.bedrockSlot));
+        }
         for (int slot = 35; slot >= 0; slot--) {
             ClickSlot candidate = this.playerInventorySlot(slot);
             if (sameClickSlot(candidate, clicked)) continue;
@@ -730,6 +744,10 @@ public class InventoryContainer extends Container {
                         " targetIdentifier=" + target.identifier() +
                         " cursorAmount=" + amountOrZero(this.carriedItem));
         return true;
+    }
+
+    static int bridgePickupAllCraftingInputCount(final boolean craftingTable) {
+        return craftingTable ? 9 : 4;
     }
 
     public int bridgeTakeMatchingSlotsToCursor(

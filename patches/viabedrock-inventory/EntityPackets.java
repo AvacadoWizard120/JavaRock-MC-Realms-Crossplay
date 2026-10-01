@@ -115,6 +115,7 @@ public class EntityPackets {
             }
             entity.setPosition(position);
             entity.setRotation(rotation);
+            entityTracker.setEntityMotion(entityRuntimeId, motion);
 
             wrapper.write(Types.VAR_INT, entity.javaId()); // entity id
             wrapper.write(Types.UUID, entity.javaUuid()); // uuid
@@ -149,6 +150,7 @@ public class EntityPackets {
 
             final Entity entity = entityTracker.addEntity(entityUniqueId, entityRuntimeId, "minecraft:item", EntityTypes26_2.ITEM);
             entity.setPosition(position);
+            entityTracker.setEntityMotion(entityRuntimeId, motion);
 
             wrapper.write(Types.VAR_INT, entity.javaId()); // entity id
             wrapper.write(Types.UUID, entity.javaUuid()); // uuid
@@ -224,9 +226,7 @@ public class EntityPackets {
             wrapper.write(Types.DOUBLE, (double) position.x()); // x
             wrapper.write(Types.DOUBLE, (double) position.y() - entity.eyeOffset()); // y
             wrapper.write(Types.DOUBLE, (double) position.z()); // z
-            wrapper.write(Types.DOUBLE, 0D); // velocity x
-            wrapper.write(Types.DOUBLE, 0D); // velocity y
-            wrapper.write(Types.DOUBLE, 0D); // velocity z
+            writeJavaPositionSyncVelocity(wrapper, entityTracker.entityMotion(entityRuntimeId));
             wrapper.write(Types.FLOAT, yaw); // yaw
             wrapper.write(Types.FLOAT, pitch); // pitch
             wrapper.write(Types.BOOLEAN, onGround); // on ground
@@ -311,9 +311,7 @@ public class EntityPackets {
             wrapper.write(Types.DOUBLE, (double) entity.position().x()); // x
             wrapper.write(Types.DOUBLE, (double) entity.position().y() - entity.eyeOffset()); // y
             wrapper.write(Types.DOUBLE, (double) entity.position().z()); // z
-            wrapper.write(Types.DOUBLE, 0D); // velocity x
-            wrapper.write(Types.DOUBLE, 0D); // velocity y
-            wrapper.write(Types.DOUBLE, 0D); // velocity z
+            writeJavaPositionSyncVelocity(wrapper, entityTracker.entityMotion(entityRuntimeId));
             wrapper.write(Types.FLOAT, entity.rotation().y()); // yaw
             wrapper.write(Types.FLOAT, entity.rotation().x()); // pitch
             wrapper.write(Types.BOOLEAN, entity.isOnGround()); // on ground
@@ -331,6 +329,7 @@ public class EntityPackets {
                 return;
             }
 
+            entityTracker.setEntityMotion(entityRuntimeId, motion);
             wrapper.write(Types.VAR_INT, entity.javaId()); // entity id
             wrapper.write(Types.LOW_PRECISION_VECTOR, new Vector3d(motion.x(), motion.y(), motion.z())); // velocity
         });
@@ -640,6 +639,12 @@ public class EntityPackets {
             wrapper.write(Types.VAR_INT, collectorEntity.javaId()); // collector entity id
             wrapper.write(Types.VAR_INT, 0); // amount
         });
+    }
+
+    private static void writeJavaPositionSyncVelocity(final PacketWrapper wrapper, final Position3f motion) {
+        wrapper.write(Types.DOUBLE, (double) motion.x()); // velocity x
+        wrapper.write(Types.DOUBLE, (double) motion.y()); // velocity y
+        wrapper.write(Types.DOUBLE, (double) motion.z()); // velocity z
     }
 
     private static int javaAddEntityData(final PacketWrapper wrapper, final Entity entity, final EntityData[] entityData) {
