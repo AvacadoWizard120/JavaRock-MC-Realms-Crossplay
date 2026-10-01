@@ -6606,7 +6606,8 @@ class ViaBedrockRelayPlayer extends Player {
       }
 
       const result = writeBridgeCraftingRecipesForViaProxy(projectRootPath, runDir, params, {
-        networkIdByItemName: this.bridgeNetworkIdByItemName
+        networkIdByItemName: this.bridgeNetworkIdByItemName,
+        itemNameByNetworkId: this.bridgeItemNameByNetworkId
       })
       if (result.written) {
         console.log(`[bedrock-relay] Exported ${result.recipeCount} live Bedrock crafting_table 2x2 recipe(s) and ${result.craftingTableRecipeCount} 3x3 recipe(s) for ViaBedrock from ${result.sourceSchema}: ${result.targets[0]}`)
