@@ -212,6 +212,29 @@ public class InventoryTracker extends StoredObject {
         this.pendingCloseContainer = container;
     }
 
+    public void bridgePublishCanonicalInventoryAfterJavaClose(Container closedContainer) {
+        if (!bridgeShouldPublishCanonicalInventoryAfterJavaClose(
+                closedContainer,
+                this.currentContainer,
+                this.pendingCloseContainer)) {
+            return;
+        }
+        this.inventoryContainer.bridgePublishCanonicalJavaInventorySnapshot(
+                "external_container_java_close:" + (closedContainer.containerId() & 0xFF));
+    }
+
+    static boolean bridgeShouldPublishCanonicalInventoryAfterJavaClose(
+            Container closedContainer,
+            Container currentContainer,
+            Container pendingCloseContainer) {
+        // Java has already switched back to window 0 when its close packet is
+        // received. Only the exact active container detached by that packet may
+        // refresh window 0. A delayed close/ACK must never overwrite a newer UI.
+        return closedContainer != null &&
+                currentContainer == null &&
+                pendingCloseContainer == closedContainer;
+    }
+
     public void setCurrentContainerClosed(boolean sendBedrockClose) {
         if (!sendBedrockClose) {
             // This is only the ACK for the previously client-closed Bedrock
@@ -767,8 +790,11 @@ public class InventoryTracker extends StoredObject {
     }
 
     private void forceCloseCurrentContainer() {
-        this.markPendingClose(this.currentContainer);
-        PacketFactory.sendJavaContainerClose(this.user(), this.pendingCloseContainer.javaContainerId());
-        PacketFactory.sendBedrockContainerClose(this.user(), this.pendingCloseContainer.containerId(), ContainerType.NONE);
+        final Container closingContainer = this.currentContainer;
+        if (closingContainer == null) return;
+        this.markPendingClose(closingContainer);
+        PacketFactory.sendJavaContainerClose(this.user(), closingContainer.javaContainerId());
+        this.bridgePublishCanonicalInventoryAfterJavaClose(closingContainer);
+        PacketFactory.sendBedrockContainerClose(this.user(), closingContainer.containerId(), ContainerType.NONE);
     }
 }

@@ -6,15 +6,36 @@ const {
   normalizePlayerAuthInputBlockActionsForRealm
 } = require('../src/nethernetBedrockRelay')
 
-const rawActions = normalizePlayerAuthInputBlockActionsForRealm([
-  { action: 'continue_break', position: { x: 1, y: 2, z: 3 }, face: 1 },
-  { action: 'predict_break', position: { x: 1, y: 2, z: 3 }, face: 1 },
-  { action: 'abort_break', position: { x: 1, y: 2, z: 3 }, face: 0 }
-])
-assert.deepStrictEqual(rawActions.map(entry => entry.action), ['continue_break', 'predict_break', 'abort_break'])
-
 const oldMode = process.env.NETHERNET_RELAY_BLOCK_ACTION_MODE
 try {
+  process.env.NETHERNET_RELAY_BLOCK_ACTION_MODE = 'raw'
+  const rawActions = normalizePlayerAuthInputBlockActionsForRealm([
+    { action: 'continue_break', position: { x: 1, y: 2, z: 3 }, face: 1 },
+    { action: 'predict_break', position: { x: 1, y: 2, z: 3 }, face: 1 },
+    { action: 'abort_break', position: { x: 1, y: 2, z: 3 }, face: 0 }
+  ])
+  assert.deepStrictEqual(rawActions.map(entry => entry.action), ['continue_break', 'predict_break', 'abort_break'])
+
+  const deduped = markPlayerAuthInputAsServerAuthoritativeBreak({
+    input_data: { block_action: true },
+    block_action: [
+      { action: 'start_break', position: { x: 4, y: 5, z: 6 }, face: 2 },
+      { action: 'start_break', position: { x: 4, y: 5, z: 6 }, face: 2 },
+      { action: 'start_break', position: { x: 4, y: 5, z: 7 }, face: 2 },
+      { action: 'start_break', position: { x: 4, y: 5, z: 6 }, face: 3 }
+    ]
+  })
+  assert.deepStrictEqual(
+    deduped.block_action,
+    [
+      { action: 'start_break', position: { x: 4, y: 5, z: 6 }, face: 2 },
+      { action: 'start_break', position: { x: 4, y: 5, z: 7 }, face: 2 },
+      { action: 'start_break', position: { x: 4, y: 5, z: 6 }, face: 3 }
+    ],
+    'raw relay mode must remove only identical actions from one auth-input packet'
+  )
+  assert.deepStrictEqual(deduped.input_data, { block_action: true })
+
   process.env.NETHERNET_RELAY_BLOCK_ACTION_MODE = 'survival_safe'
   const rewrittenActions = normalizePlayerAuthInputBlockActionsForRealm([
     { action: 'continue_break', position: { x: 1, y: 2, z: 3 }, face: 1 },

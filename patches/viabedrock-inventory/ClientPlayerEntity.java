@@ -88,6 +88,11 @@ public class ClientPlayerEntity extends PlayerEntity {
 
     // Riding
     private boolean requestedDismount = false;
+    private long clientPredictedVehicleRuntimeId = -1;
+    private Position3f clientPredictedVehiclePosition;
+    private Position3f previousClientPredictedVehiclePosition;
+    private Position3f clientPredictedVehicleRotation = Position3f.ZERO;
+    private boolean clientPredictedVehicleOnGround;
 
     // Misc data
     private GameType gameType;
@@ -314,6 +319,85 @@ public class ClientPlayerEntity extends PlayerEntity {
     public void setOnGround(final boolean onGround) {
         super.setOnGround(onGround);
         this.prevOnGround = onGround;
+    }
+
+    @Override
+    public void setMountEntityRId(final long runtimeId) {
+        if (runtimeId == this.mountRuntimeId) return;
+
+        // Java stops sending ordinary player positions while it is the local
+        // authority for a boat. When Bedrock removes the rider link, start the
+        // first unmounted auth-input tick at the last vehicle position instead
+        // of the stale coordinates where the player originally boarded.
+        if (runtimeId == -1 && this.clientPredictedVehicleRuntimeId == this.mountRuntimeId
+                && this.clientPredictedVehiclePosition != null) {
+            this.setPosition(bridgePlayerAuthorityPositionFromVehicle(this.clientPredictedVehiclePosition, this.eyeOffset()));
+            this.movementPositionHistory.clear();
+            this.movementPositionHistory.put((long) this.age(), this.position);
+        }
+
+        super.setMountEntityRId(runtimeId);
+        this.clearClientPredictedVehicleState();
+    }
+
+    static Position3f bridgePlayerAuthorityPositionFromVehicle(final Position3f vehiclePosition, final float eyeOffset) {
+        return new Position3f(vehiclePosition.x(), vehiclePosition.y() + eyeOffset, vehiclePosition.z());
+    }
+
+    public void updateClientPredictedVehicle(final long runtimeId, final Position3f position,
+                                             final Position3f rotation, final boolean onGround) {
+        if (runtimeId != this.mountRuntimeId) return;
+        if (this.clientPredictedVehicleRuntimeId != runtimeId) {
+            this.previousClientPredictedVehiclePosition = null;
+        }
+        this.clientPredictedVehicleRuntimeId = runtimeId;
+        this.clientPredictedVehiclePosition = position;
+        this.clientPredictedVehicleRotation = rotation;
+        this.clientPredictedVehicleOnGround = onGround;
+        // Java stops sending MOVE_PLAYER while it owns a boat. Advance the
+        // player's effective position as well so chunk selection and mounted
+        // interaction origins follow the boat instead of the boarding point.
+        this.setPosition(bridgePlayerAuthorityPositionFromVehicle(position, this.eyeOffset()));
+    }
+
+    public boolean hasClientPredictedVehicleState(final long runtimeId) {
+        return runtimeId != -1 && this.clientPredictedVehicleRuntimeId == runtimeId
+                && this.clientPredictedVehiclePosition != null;
+    }
+
+    public long clientPredictedVehicleRuntimeId() {
+        return this.clientPredictedVehicleRuntimeId;
+    }
+
+    public Position3f clientPredictedVehiclePosition() {
+        return this.clientPredictedVehiclePosition;
+    }
+
+    public Position3f previousClientPredictedVehiclePosition() {
+        return this.previousClientPredictedVehiclePosition;
+    }
+
+    public Position3f clientPredictedVehicleRotation() {
+        return this.clientPredictedVehicleRotation;
+    }
+
+    public boolean clientPredictedVehicleOnGround() {
+        return this.clientPredictedVehicleOnGround;
+    }
+
+    public void finishClientPredictedVehicleTick() {
+        this.previousClientPredictedVehiclePosition = this.clientPredictedVehiclePosition;
+    }
+
+    private void clearClientPredictedVehicleState() {
+        this.clientPredictedVehicleRuntimeId = -1;
+        this.clientPredictedVehiclePosition = null;
+        this.previousClientPredictedVehiclePosition = null;
+        this.clientPredictedVehicleRotation = Position3f.ZERO;
+        this.clientPredictedVehicleOnGround = false;
+        this.authInputData.remove(PlayerAuthInputPacketPayload_InputData.IsInClientPredictedVehicle);
+        this.authInputData.remove(PlayerAuthInputPacketPayload_InputData.PaddlingLeft);
+        this.authInputData.remove(PlayerAuthInputPacketPayload_InputData.PaddlingRight);
     }
 
     @Override

@@ -2475,6 +2475,146 @@ public final class ChestBlockEventFallbackSmoke {
   }
 }
 
+function assertPostCloseCanonicalInventoryResync () {
+  const trackerSource = fs.readFileSync(path.join(patchRoot, 'InventoryTracker.java'), 'utf8')
+  const inventorySource = fs.readFileSync(path.join(patchRoot, 'InventoryContainer.java'), 'utf8')
+  const unhandledSource = fs.readFileSync(path.join(patchRoot, 'UnhandledPackets.java'), 'utf8')
+
+  const closeOverrideStart = unhandledSource.indexOf(
+    'registerServerbound(ServerboundPackets26_1.CONTAINER_CLOSE, ServerboundBedrockPackets.CONTAINER_CLOSE'
+  )
+  const closeOverrideEnd = unhandledSource.indexOf(
+    'protocol.registerClientbound(ClientboundBedrockPackets.ITEM_STACK_RESPONSE',
+    closeOverrideStart
+  )
+  const closeOverride = unhandledSource.slice(closeOverrideStart, closeOverrideEnd)
+  const externalCloseStart = closeOverride.indexOf('wrapper.write(Types.BYTE, container.containerId())')
+  const externalClose = closeOverride.slice(externalCloseStart)
+  const markPending = externalClose.indexOf('inventoryTracker.markPendingClose(container)')
+  const publishCanonical = externalClose.indexOf('inventoryTracker.bridgePublishCanonicalInventoryAfterJavaClose(container)')
+  if (externalCloseStart < 0 || markPending < 0 || publishCanonical <= markPending) {
+    throw new Error('an external Java container close must detach the active window before publishing canonical player inventory')
+  }
+
+  const publishStart = trackerSource.indexOf('public void bridgePublishCanonicalInventoryAfterJavaClose(Container closedContainer)')
+  const publishEnd = trackerSource.indexOf('public void setCurrentContainerClosed', publishStart)
+  const publishMethod = trackerSource.slice(publishStart, publishEnd)
+  for (const marker of [
+    'bridgeShouldPublishCanonicalInventoryAfterJavaClose(',
+    'this.inventoryContainer.bridgePublishCanonicalJavaInventorySnapshot(',
+    'currentContainer == null',
+    'pendingCloseContainer == closedContainer'
+  ]) {
+    if (!publishMethod.includes(marker)) throw new Error(`post-close inventory resync is missing guard/publish marker: ${marker}`)
+  }
+
+  const ackStart = trackerSource.indexOf('if (!sendBedrockClose)', publishEnd)
+  const ackEnd = trackerSource.indexOf('            return;', ackStart)
+  const delayedAckBranch = trackerSource.slice(ackStart, ackEnd)
+  if (delayedAckBranch.includes('bridgePublishCanonical')) {
+    throw new Error('a delayed Bedrock close ACK must not publish window 0 over a newer Java container')
+  }
+
+  const forceCloseStart = trackerSource.indexOf('private void forceCloseCurrentContainer()')
+  const forceCloseEnd = trackerSource.indexOf('\n    }', forceCloseStart)
+  const forceClose = trackerSource.slice(forceCloseStart, forceCloseEnd)
+  const captureClosing = forceClose.indexOf('final Container closingContainer = this.currentContainer')
+  const markForcedClose = forceClose.indexOf('this.markPendingClose(closingContainer)')
+  const sendJavaClose = forceClose.indexOf('PacketFactory.sendJavaContainerClose(this.user(), closingContainer.javaContainerId())')
+  const publishForcedClose = forceClose.indexOf('this.bridgePublishCanonicalInventoryAfterJavaClose(closingContainer)')
+  const sendBedrockClose = forceClose.indexOf('PacketFactory.sendBedrockContainerClose(this.user(), closingContainer.containerId(), ContainerType.NONE)')
+  if (captureClosing < 0 || markForcedClose <= captureClosing || sendJavaClose <= markForcedClose ||
+      publishForcedClose <= sendJavaClose || sendBedrockClose <= publishForcedClose) {
+    throw new Error('forced workbench close must capture the active window, close Java, publish window 0, then close Bedrock')
+  }
+
+  const canonicalStart = inventorySource.indexOf('private void publishCanonicalJavaInventorySnapshot(String reason)')
+  const canonicalEnd = inventorySource.indexOf('private int nextJavaStateId()', canonicalStart)
+  const canonicalMethod = inventorySource.slice(canonicalStart, canonicalEnd)
+  for (const marker of [
+    'ContainerID.CONTAINER_ID_INVENTORY.getValue()',
+    'this.bridgePlayerInventoryJavaItems()',
+    'this.sendJavaCursorItem()'
+  ]) {
+    if (!canonicalMethod.includes(marker)) throw new Error(`canonical player inventory publisher is missing marker: ${marker}`)
+  }
+  if (canonicalMethod.includes('this.javaContainerId()') || canonicalMethod.includes('this.getJavaItems()')) {
+    throw new Error('post-close inventory resync must not inherit the just-closed or newly-opened external window layout')
+  }
+
+  const trackerBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/protocol/storage/InventoryTracker.class'
+  )]).stdout
+  for (const marker of [
+    'bridgeShouldPublishCanonicalInventoryAfterJavaClose',
+    'InventoryContainer.bridgePublishCanonicalJavaInventorySnapshot'
+  ]) {
+    if (!trackerBytecode.includes(marker)) throw new Error(`compiled InventoryTracker.class is missing post-close resync bytecode: ${marker}`)
+  }
+
+  const inventoryBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/api/model/container/player/InventoryContainer.class'
+  )]).stdout
+  const compiledCanonicalStart = inventoryBytecode.indexOf('private void publishCanonicalJavaInventorySnapshot')
+  const compiledCanonicalEnd = inventoryBytecode.indexOf('private int nextJavaStateId', compiledCanonicalStart)
+  const compiledCanonical = inventoryBytecode.slice(compiledCanonicalStart, compiledCanonicalEnd)
+  for (const marker of ['ContainerID.CONTAINER_ID_INVENTORY', 'bridgePlayerInventoryJavaItems']) {
+    if (!compiledCanonical.includes(marker)) throw new Error(`compiled canonical player inventory publisher is missing bytecode: ${marker}`)
+  }
+
+  const unhandledBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/protocol/packet/UnhandledPackets.class'
+  )]).stdout
+  if (!unhandledBytecode.includes('InventoryTracker.bridgePublishCanonicalInventoryAfterJavaClose')) {
+    throw new Error('compiled Java close handler does not publish canonical player inventory after detaching the external window')
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-close-resync-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const sourcePath = path.join(packageDir, 'PostCloseInventoryResyncSmoke.java')
+    fs.writeFileSync(sourcePath, `
+package net.raphimc.viabedrock.protocol.storage;
+
+import net.raphimc.viabedrock.api.model.container.Container;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
+
+public final class PostCloseInventoryResyncSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static Container container(byte id) {
+        return new Container(null, id, ContainerType.WORKBENCH, null, null, 1) {};
+    }
+
+    public static void main(String[] args) {
+        final Container closed = container((byte) 2);
+        final Container newer = container((byte) 3);
+        final Container stalePending = container((byte) 4);
+
+        check(InventoryTracker.bridgeShouldPublishCanonicalInventoryAfterJavaClose(closed, null, closed),
+                "the exact detached active container publishes canonical window 0");
+        check(!InventoryTracker.bridgeShouldPublishCanonicalInventoryAfterJavaClose(closed, newer, closed),
+                "a newer active window blocks a stale post-close snapshot");
+        check(!InventoryTracker.bridgeShouldPublishCanonicalInventoryAfterJavaClose(closed, null, stalePending),
+                "an unrelated pending close cannot publish another container's snapshot");
+        check(!InventoryTracker.bridgeShouldPublishCanonicalInventoryAfterJavaClose(closed, null, null),
+                "an already-consumed delayed close ACK cannot republish window 0");
+        check(!InventoryTracker.bridgeShouldPublishCanonicalInventoryAfterJavaClose(null, null, null),
+                "a missing close target cannot publish window 0");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.protocol.storage.PostCloseInventoryResyncSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
 function assertAuthoritativeContainerSlotCodec () {
   const source = fs.readFileSync(path.join(patchRoot, 'Container.java'), 'utf8')
   for (const marker of [
@@ -3254,6 +3394,7 @@ assertInitialJoinReadinessLifecycle()
 assertDoubleChestUpgrade()
 assertGenericStorageLifecycle()
 assertChestBlockEventLifecycleFallback()
+assertPostCloseCanonicalInventoryResync()
 assertAuthoritativeContainerSlotCodec()
 assertMouseActionStateMachine()
 assertRenderingBehavior()

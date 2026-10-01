@@ -1478,23 +1478,55 @@ function hasMeaningfulBreakFinish (actions = []) {
     actions.some(entry => isContinueBreakAction(entry?.action))
 }
 
+function dedupePlayerAuthInputBlockActions (actions) {
+  const seen = new Set()
+  const out = []
+  let changed = false
+
+  for (const entry of actions) {
+    if (!entry || typeof entry !== 'object') {
+      out.push(entry)
+      continue
+    }
+
+    const position = entry.position
+    const key = [
+      normalizeBedrockActionName(entry.action),
+      position && typeof position === 'object' ? String(position.x) : '',
+      position && typeof position === 'object' ? String(position.y) : '',
+      position && typeof position === 'object' ? String(position.z) : '',
+      entry.face == null ? '' : String(entry.face)
+    ].join('\u0000')
+
+    if (seen.has(key)) {
+      changed = true
+      continue
+    }
+    seen.add(key)
+    out.push(entry)
+  }
+
+  return changed ? out : actions
+}
+
 function normalizePlayerAuthInputBlockActionsForRealm (actions) {
   if (!Array.isArray(actions) || actions.length === 0) return actions
-  if (process.env.NETHERNET_RELAY_BLOCK_ACTION_MODE === 'raw') return actions
+  const dedupedActions = dedupePlayerAuthInputBlockActions(actions)
+  if (process.env.NETHERNET_RELAY_BLOCK_ACTION_MODE === 'raw') return dedupedActions
 
   const mode = process.env.NETHERNET_RELAY_BLOCK_ACTION_MODE || 'raw'
-  if (mode !== 'survival_safe') return actions
+  if (mode !== 'survival_safe') return dedupedActions
 
   const finishPositions = new Set(
-    actions
+    dedupedActions
       .filter(entry => isPredictBreakAction(entry?.action))
       .map(entry => blockPositionKey(entry.position))
       .filter(Boolean)
   )
-  const finishingBreak = hasMeaningfulBreakFinish(actions)
+  const finishingBreak = hasMeaningfulBreakFinish(dedupedActions)
   const out = []
 
-  for (const entry of actions) {
+  for (const entry of dedupedActions) {
     if (!entry || typeof entry !== 'object') continue
     const posKey = blockPositionKey(entry.position)
 
@@ -1523,9 +1555,12 @@ function normalizePlayerAuthInputBlockActionsForRealm (actions) {
 
 function markPlayerAuthInputAsServerAuthoritativeBreak (params = {}) {
   if (!params || typeof params !== 'object' || !Array.isArray(params.block_action) || params.block_action.length === 0) return params
-  if ((process.env.NETHERNET_RELAY_BLOCK_ACTION_MODE || 'raw') !== 'survival_safe') return params
+  const mode = process.env.NETHERNET_RELAY_BLOCK_ACTION_MODE || 'raw'
+  const blockAction = normalizePlayerAuthInputBlockActionsForRealm(params.block_action)
+  if (mode !== 'survival_safe' && blockAction === params.block_action) return params
   const out = { ...params }
-  out.block_action = normalizePlayerAuthInputBlockActionsForRealm(params.block_action)
+  out.block_action = blockAction
+  if (mode !== 'survival_safe') return out
   out.input_data = { ...(params.input_data || {}) }
   if (out.block_action.some(entry => isStartBreakAction(entry?.action) || isContinueBreakAction(entry?.action) || String(entry?.action) === 'stop_break')) {
     out.input_data.block_breaking_delay_enabled = true

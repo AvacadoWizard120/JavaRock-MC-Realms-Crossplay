@@ -20,6 +20,7 @@ package net.raphimc.viabedrock.protocol.packet;
 import com.viaversion.viaversion.api.connection.UserConnection;
 import com.viaversion.viaversion.api.minecraft.BlockPosition;
 import com.viaversion.viaversion.api.minecraft.Vector3d;
+import com.viaversion.viaversion.api.minecraft.entities.EntityTypes26_2;
 import com.viaversion.viaversion.api.protocol.packet.PacketWrapper;
 import com.viaversion.viaversion.api.protocol.remapper.PacketHandler;
 import com.viaversion.viaversion.api.protocol.remapper.PacketHandlers;
@@ -69,6 +70,52 @@ import java.util.UUID;
 import java.util.logging.Level;
 
 public class ClientPlayerPackets {
+
+    static boolean bridgeIsClientPredictedBoat(final EntityTypes26_2 entityType) {
+        return entityType != null && entityType.isOrHasParent(EntityTypes26_2.ABSTRACT_BOAT);
+    }
+
+    static Position3f bridgePredictedVehicleDelta(final long previousRuntimeId, final Position3f previousPosition,
+                                                   final long runtimeId, final Position3f position) {
+        if (position == null || previousPosition == null || previousRuntimeId != runtimeId) {
+            return Position3f.ZERO;
+        }
+        return position.subtract(previousPosition);
+    }
+
+    static Position2f bridgeBedrockBoatRotation(final Position3f javaRotation) {
+        // ViaBedrock's existing clientbound entity path exposes Bedrock boat
+        // yaw to Java unchanged. Keep the serverbound predicted-vehicle path
+        // in that same basis so a Realm correction round-trips without a
+        // quarter-turn heading jump.
+        return new Position2f(javaRotation.x(), MathUtil.wrapDegrees(javaRotation.y()));
+    }
+
+    static int bridgeBedrockPaddleMask(final boolean javaPaddlingLeft, final boolean javaPaddlingRight) {
+        // Java and Bedrock name the two boat paddle directions from opposite
+        // steering bases. Bit 0 is Bedrock left; bit 1 is Bedrock right.
+        return (javaPaddlingRight ? 1 : 0) | (javaPaddlingLeft ? 2 : 0);
+    }
+
+    static boolean bridgeMovementCorrectionTickInWindow(final long tick, final int currentTick,
+                                                         final int rewindHistorySize) {
+        return tick <= currentTick && tick >= (long) currentTick - rewindHistorySize;
+    }
+
+    static Position3f bridgeAuthoritativeVehicleCorrectionPosition(final Position3f correctedPosition) {
+        return bridgeIsFinitePosition(correctedPosition) ? correctedPosition : null;
+    }
+
+    static Position3f bridgeVehicleCorrectionVelocity(final Position3f correctedVelocity) {
+        return bridgeIsFinitePosition(correctedVelocity) ? correctedVelocity : Position3f.ZERO;
+    }
+
+    private static boolean bridgeIsFinitePosition(final Position3f position) {
+        return position != null
+                && Float.isFinite(position.x())
+                && Float.isFinite(position.y())
+                && Float.isFinite(position.z());
+    }
 
     static float bridgeVerticalVelocity(final float observedDeltaY, final boolean levitating, final int levitationAmplifier, final boolean climbing) {
         if (climbing && observedDeltaY > 0F) {
@@ -243,22 +290,23 @@ public class ClientPlayerPackets {
                 ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "Unknown RewindType: " + rawRewindType);
                 return;
             }
-            final Position3f position = wrapper.read(BedrockTypes.POSITION_3F); // position
-            wrapper.read(BedrockTypes.POSITION_3F); // position delta
-            wrapper.read(BedrockTypes.POSITION_2F); // vehicle rotation
+            final Position3f position = wrapper.read(BedrockTypes.POSITION_3F); // position at the corrected tick
+            final Position3f positionDelta = wrapper.read(BedrockTypes.POSITION_3F); // corrected velocity
+            final Position2f vehicleRotation = wrapper.read(BedrockTypes.POSITION_2F); // vehicle rotation
             if (wrapper.read(Types.BOOLEAN)) {
-                wrapper.read(BedrockTypes.FLOAT_LE); // vehicle angular velocity
+                wrapper.read(BedrockTypes.FLOAT_LE); // Java's entity position sync has no angular velocity field
             }
+            final boolean onGround = wrapper.read(Types.BOOLEAN); // on ground at the corrected tick
+            final long tick = wrapper.read(BedrockTypes.UNSIGNED_VAR_LONG); // corrected movement tick
+            final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
+            final ClientPlayerEntity clientPlayer = entityTracker.getClientPlayer();
+            if (!bridgeMovementCorrectionTickInWindow(tick, clientPlayer.age(), gameSession.getMovementRewindHistorySize())) {
+                wrapper.cancel();
+                return;
+            }
+
             switch (rewindType) {
                 case Player -> {
-                    final ClientPlayerEntity clientPlayer = wrapper.user().get(EntityTracker.class).getClientPlayer();
-                    final boolean onGround = wrapper.read(Types.BOOLEAN); // on ground
-                    final long tick = wrapper.read(BedrockTypes.UNSIGNED_VAR_LONG); // tick
-                    if (tick > clientPlayer.age() || tick < clientPlayer.age() - gameSession.getMovementRewindHistorySize()) {
-                        wrapper.cancel();
-                        return;
-                    }
-
                     if (clientPlayer.isWaitingForPositionSync()) {
                         wrapper.cancel();
                         return;
@@ -278,7 +326,48 @@ public class ClientPlayerPackets {
                     clientPlayer.beginPositionSync();
                     clientPlayer.writePlayerPositionPacketToClient(wrapper, Relative.union(Relative.ROTATION, Relative.VELOCITY), true);
                 }
-                case Vehicle -> wrapper.cancel();
+                case Vehicle -> {
+                    final Entity vehicle = entityTracker.getEntityByRid(clientPlayer.mountEntityRId());
+                    if (vehicle == null || !bridgeIsClientPredictedBoat(vehicle.javaType())
+                            || !clientPlayer.hasClientPredictedVehicleState(vehicle.runtimeId())) {
+                        wrapper.cancel();
+                        return;
+                    }
+
+                    // Bedrock's position is authoritative. Its delta field is
+                    // corrected velocity, not a positional correction offset.
+                    final Position3f correctedPosition = bridgeAuthoritativeVehicleCorrectionPosition(position);
+                    if (correctedPosition == null) {
+                        wrapper.cancel();
+                        return;
+                    }
+                    final Position3f correctedVelocity = bridgeVehicleCorrectionVelocity(positionDelta);
+
+                    final Position3f correctedRotation = new Position3f(
+                            vehicleRotation.x(), MathUtil.wrapDegrees(vehicleRotation.y()), MathUtil.wrapDegrees(vehicleRotation.y())
+                    );
+                    vehicle.setPosition(correctedPosition);
+                    vehicle.setRotation(correctedRotation);
+                    vehicle.setOnGround(onGround);
+                    clientPlayer.updateClientPredictedVehicle(
+                            vehicle.runtimeId(), correctedPosition, correctedRotation, onGround
+                    );
+                    // The next auth-input tick starts at the corrected position;
+                    // do not echo the server's correction back as client motion.
+                    clientPlayer.finishClientPredictedVehicleTick();
+
+                    wrapper.setPacketType(ClientboundPackets26_1.ENTITY_POSITION_SYNC);
+                    wrapper.write(Types.VAR_INT, vehicle.javaId()); // entity id
+                    wrapper.write(Types.DOUBLE, (double) correctedPosition.x()); // x
+                    wrapper.write(Types.DOUBLE, (double) correctedPosition.y() - vehicle.eyeOffset()); // y
+                    wrapper.write(Types.DOUBLE, (double) correctedPosition.z()); // z
+                    wrapper.write(Types.DOUBLE, (double) correctedVelocity.x()); // velocity x
+                    wrapper.write(Types.DOUBLE, (double) correctedVelocity.y()); // velocity y
+                    wrapper.write(Types.DOUBLE, (double) correctedVelocity.z()); // velocity z
+                    wrapper.write(Types.FLOAT, correctedRotation.y()); // yaw
+                    wrapper.write(Types.FLOAT, correctedRotation.x()); // pitch
+                    wrapper.write(Types.BOOLEAN, onGround); // on ground
+                }
                 default -> throw new IllegalStateException("Unhandled RewindType: " + rewindType);
             }
         });
@@ -563,6 +652,50 @@ public class ClientPlayerPackets {
             );
             wrapper.write(wrapper.user().get(InventoryTransactionRewriter.class).getInventoryTransactionType(), transaction);
         });
+        protocol.registerServerbound(ServerboundPackets26_1.MOVE_VEHICLE, null, wrapper -> {
+            wrapper.cancel();
+
+            final Position3f position = new Position3f(
+                    wrapper.read(Types.DOUBLE).floatValue(),
+                    wrapper.read(Types.DOUBLE).floatValue(),
+                    wrapper.read(Types.DOUBLE).floatValue()
+            );
+            final float yaw = MathUtil.wrapDegrees(wrapper.read(Types.FLOAT));
+            final float pitch = wrapper.read(Types.FLOAT);
+            final boolean onGround = wrapper.read(Types.BOOLEAN);
+
+            final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
+            final ClientPlayerEntity clientPlayer = entityTracker.getClientPlayer();
+            final Entity vehicle = entityTracker.getEntityByRid(clientPlayer.mountEntityRId());
+            // MOVE_VEHICLE can arrive just after an unlink or for server-driven
+            // mounts. It must never revive stale predicted-vehicle authority.
+            if (vehicle == null || !bridgeIsClientPredictedBoat(vehicle.javaType())) return;
+
+            final Position3f rotation = new Position3f(pitch, yaw, yaw);
+            vehicle.setPosition(position);
+            vehicle.setRotation(rotation);
+            vehicle.setOnGround(onGround);
+            clientPlayer.updateClientPredictedVehicle(vehicle.runtimeId(), position, rotation, onGround);
+        });
+        protocol.registerServerbound(ServerboundPackets26_1.PADDLE_BOAT, null, wrapper -> {
+            wrapper.cancel();
+
+            final boolean paddlingLeft = wrapper.read(Types.BOOLEAN);
+            final boolean paddlingRight = wrapper.read(Types.BOOLEAN);
+            final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
+            final ClientPlayerEntity clientPlayer = entityTracker.getClientPlayer();
+            final Entity vehicle = entityTracker.getEntityByRid(clientPlayer.mountEntityRId());
+            if (vehicle == null || !bridgeIsClientPredictedBoat(vehicle.javaType())
+                    || !clientPlayer.hasClientPredictedVehicleState(vehicle.runtimeId())) return;
+
+            final int bedrockPaddleMask = bridgeBedrockPaddleMask(paddlingLeft, paddlingRight);
+            if ((bedrockPaddleMask & 1) != 0) {
+                clientPlayer.addAuthInputData(PlayerAuthInputPacketPayload_InputData.PaddlingLeft);
+            }
+            if ((bedrockPaddleMask & 2) != 0) {
+                clientPlayer.addAuthInputData(PlayerAuthInputPacketPayload_InputData.PaddlingRight);
+            }
+        });
         protocol.registerServerbound(ServerboundPackets26_1.MOVE_PLAYER_STATUS_ONLY, null, wrapper -> {
             wrapper.cancel();
             final ClientPlayerEntity clientPlayer = wrapper.user().get(EntityTracker.class).getClientPlayer();
@@ -596,6 +729,7 @@ public class ClientPlayerPackets {
         });
         protocol.registerServerbound(ServerboundPackets26_1.CLIENT_TICK_END, ServerboundBedrockPackets.PLAYER_AUTH_INPUT, wrapper -> {
             final ClientPlayerEntity clientPlayer = wrapper.user().get(EntityTracker.class).getClientPlayer();
+            final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
             final Position3f prevPosition = clientPlayer.prevPosition();
             final boolean prevOnGround = clientPlayer.prevOnGround();
             final Set<InputFlag> prevInputFlags = clientPlayer.prevInputFlags();
@@ -622,7 +756,14 @@ public class ClientPlayerPackets {
             }
 
             clientPlayer.addAuthInputData(PlayerAuthInputPacketPayload_InputData.BlockBreakingDelayEnabled);
-            if (clientPlayer.isOnGround()) {
+            final Entity vehicle = entityTracker.getEntityByRid(clientPlayer.mountEntityRId());
+            final boolean inClientPredictedVehicle = vehicle != null
+                    && bridgeIsClientPredictedBoat(vehicle.javaType())
+                    && clientPlayer.hasClientPredictedVehicleState(vehicle.runtimeId());
+            if (inClientPredictedVehicle) {
+                clientPlayer.addAuthInputData(PlayerAuthInputPacketPayload_InputData.IsInClientPredictedVehicle);
+            }
+            if (inClientPredictedVehicle ? clientPlayer.clientPredictedVehicleOnGround() : clientPlayer.isOnGround()) {
                 clientPlayer.addAuthInputData(PlayerAuthInputPacketPayload_InputData.VerticalCollision);
             }
             if (clientPlayer.horizontalCollision()) {
@@ -664,9 +805,19 @@ public class ClientPlayerPackets {
                 clientPlayer.addAuthInputData(PlayerAuthInputPacketPayload_InputData.SneakReleasedRaw, PlayerAuthInputPacketPayload_InputData.StopSneaking);
             }
 
-            final Position3f positionDelta = clientPlayer.position().subtract(prevPosition);
+            final Position3f authPosition = inClientPredictedVehicle
+                    ? clientPlayer.clientPredictedVehiclePosition()
+                    : clientPlayer.position();
+            final Position3f positionDelta = inClientPredictedVehicle
+                    ? bridgePredictedVehicleDelta(
+                            clientPlayer.clientPredictedVehicleRuntimeId(),
+                            clientPlayer.previousClientPredictedVehiclePosition(),
+                            vehicle.runtimeId(),
+                            authPosition
+                    )
+                    : clientPlayer.position().subtract(prevPosition);
             final Position3f velocity;
-            if (!clientPlayer.isInitiallySpawned() || clientPlayer.dimensionChangeInfo() != null || clientPlayer.abilities().getBooleanValue(AbilitiesIndex.Flying)) {
+            if (inClientPredictedVehicle || !clientPlayer.isInitiallySpawned() || clientPlayer.dimensionChangeInfo() != null || clientPlayer.abilities().getBooleanValue(AbilitiesIndex.Flying)) {
                 velocity = positionDelta;
             } else {
                 float dx = positionDelta.x() * 0.98F;
@@ -688,7 +839,7 @@ public class ClientPlayerPackets {
 
             wrapper.write(BedrockTypes.FLOAT_LE, clientPlayer.rotation().x()); // pitch
             wrapper.write(BedrockTypes.FLOAT_LE, clientPlayer.rotation().y()); // yaw
-            wrapper.write(BedrockTypes.POSITION_3F, clientPlayer.position()); // position
+            wrapper.write(BedrockTypes.POSITION_3F, authPosition); // player or client-predicted vehicle position
             wrapper.write(BedrockTypes.POSITION_2F, MathUtil.calculateMovementDirections(clientPlayer.authInputData(), clientPlayer.isSneaking())); // move vector
             wrapper.write(BedrockTypes.FLOAT_LE, clientPlayer.rotation().z()); // head yaw
             wrapper.write(Types.BOOLEAN, true); // input flags present
@@ -721,15 +872,25 @@ public class ClientPlayerPackets {
                 }
             }
             wrapper.write(Types.BOOLEAN, true); // vehicle rotation optional reflected
-            wrapper.write(Types.BOOLEAN, false); // not in predicted vehicle
+            wrapper.write(Types.BOOLEAN, inClientPredictedVehicle);
+            if (inClientPredictedVehicle) {
+                wrapper.write(BedrockTypes.POSITION_2F, bridgeBedrockBoatRotation(clientPlayer.clientPredictedVehicleRotation()));
+            }
             wrapper.write(Types.BOOLEAN, true); // predicted vehicle id optional reflected
-            wrapper.write(Types.BOOLEAN, false); // not in predicted vehicle
+            wrapper.write(Types.BOOLEAN, inClientPredictedVehicle);
+            if (inClientPredictedVehicle) {
+                // PlayerAuthInput carries ActorUniqueID here, not runtime ID.
+                wrapper.write(BedrockTypes.VAR_LONG, vehicle.uniqueId());
+            }
             wrapper.write(BedrockTypes.POSITION_2F, new Position2f(0F, 0F)); // analog move vector
             wrapper.write(BedrockTypes.POSITION_3F, MathUtil.calculateCameraOrientation(clientPlayer.rotation().y(), clientPlayer.rotation().x())); // camera orientation
             wrapper.write(BedrockTypes.POSITION_2F, MathUtil.calculateMovementDirections(clientPlayer.authInputData(), false)); // raw move vector
 
             clientPlayer.authInputData().clear();
             clientPlayer.authInputBlockActions().clear();
+            if (inClientPredictedVehicle) {
+                clientPlayer.finishClientPredictedVehicleTick();
+            }
         });
         protocol.registerServerbound(ServerboundPackets26_1.PLAYER_ABILITIES, null, wrapper -> {
             wrapper.cancel();
