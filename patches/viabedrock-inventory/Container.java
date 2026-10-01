@@ -30,6 +30,7 @@ import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnumName;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySourceType;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.InventorySource_InventorySourceFlags;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ItemStackRequestActionType;
 import net.raphimc.viabedrock.protocol.data.enums.java.generated.ContainerInput;
 import net.raphimc.viabedrock.protocol.model.BedrockItem;
 import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
@@ -130,6 +131,15 @@ public abstract class Container {
                 boolean handled = this.bridgeHandlePickupAllClick(javaSlot, button, inventory);
                 if (!handled) this.bridgeLogIgnoredClick(javaSlot, button, input, "pickup_all_unsupported", stateId);
                 return handled;
+            }
+            if (input == ContainerInput.THROW) {
+                boolean handled = this.bridgeHandleThrowClick(javaSlot, button, inventory);
+                if (!handled) this.bridgeLogIgnoredClick(javaSlot, button, input, "throw_unsupported_slot_or_button", stateId);
+                return handled;
+            }
+            if (input == ContainerInput.CLONE) {
+                bridgePublishJavaContainerSnapshot(inventory, "container_clone_noop");
+                return true;
             }
             this.bridgeLogIgnoredClick(javaSlot, button, input, "unsupported_input", stateId);
         } catch (Throwable t) {
@@ -258,6 +268,7 @@ public abstract class Container {
     public int size() { return this.items.length; }
     public byte containerId() { return this.containerId; }
     public ContainerType type() { return this.type; }
+    public ContainerType bridgeBedrockCloseType() { return ContainerType.NONE; }
     public TextComponent title() { return this.title; }
     public BlockPosition position() { return this.position; }
     public void bridgeConfigureContainerBlockTag(String blockTag) {
@@ -279,6 +290,12 @@ public abstract class Container {
         }
         if ("crafter".equals(blockTag)) return ContainerEnumName.CrafterLevelEntityContainer;
         return ContainerEnumName.LevelEntityContainer;
+    }
+    public ContainerEnumName bridgeNativeStackRequestContainerName(int bedrockSlot) {
+        return this.bridgeNativeStackRequestContainerName();
+    }
+    public int bridgeNativeStackRequestSlot(int bedrockSlot) {
+        return bedrockSlot;
     }
     boolean bridgeCanPromoteToDoubleChest(int incomingSize) {
         return this.bridgeChestStorage && this.items.length == SINGLE_CHEST_SIZE && incomingSize == DOUBLE_CHEST_SIZE;
@@ -386,17 +403,35 @@ public abstract class Container {
                 cursorAfter = BedrockItem.empty();
             } else if (!isEmpty(cursorBefore) && !isEmpty(slotBefore)) {
                 if (canStack(cursorBefore, slotBefore)) {
-                    int move = Math.min(cursorBefore.amount(), Math.max(0, bridgeMaxStackSize(slotBefore) - slotBefore.amount()));
-                    if (move <= 0) {
-                        bridgePublishJavaContainerSnapshot(inventory, "container_pickup_stack_full");
-                        return true;
+                    boolean canPlaceCursor = slotContainer != this || this.bridgeCanPlaceItem(bedrockSlot, cursorBefore);
+                    if (!canPlaceCursor) {
+                        int take = bridgeCompatibleCursorTakeCount(slotBefore, cursorBefore);
+                        if (take <= 0) {
+                            bridgePublishJavaContainerSnapshot(inventory, "container_pickup_stack_full");
+                            return true;
+                        }
+                        slotAfter = slotBefore.copy();
+                        slotAfter.setAmount(slotBefore.amount() - take);
+                        if (slotAfter.amount() <= 0) slotAfter = BedrockItem.empty();
+                        cursorAfter = cursorBefore.copy();
+                        cursorAfter.setAmount(cursorBefore.amount() + take);
+                        preserveCarriedSource = true;
+                        // A read-only result slot reverses the normal compatible-stack
+                        // direction: Java takes output into the carried stack rather than
+                        // trying to place the carried stack into the result slot.
+                    } else {
+                        int move = Math.min(cursorBefore.amount(), Math.max(0, bridgeMaxStackSize(slotBefore) - slotBefore.amount()));
+                        if (move <= 0) {
+                            bridgePublishJavaContainerSnapshot(inventory, "container_pickup_stack_full");
+                            return true;
+                        }
+                        slotAfter = slotBefore.copy();
+                        slotAfter.setAmount(slotBefore.amount() + move);
+                        cursorAfter = cursorBefore.copy();
+                        cursorAfter.setAmount(cursorBefore.amount() - move);
+                        if (cursorAfter.amount() <= 0) cursorAfter = BedrockItem.empty();
+                        preserveCarriedSource = !isEmpty(cursorAfter);
                     }
-                    slotAfter = slotBefore.copy();
-                    slotAfter.setAmount(slotBefore.amount() + move);
-                    cursorAfter = cursorBefore.copy();
-                    cursorAfter.setAmount(cursorBefore.amount() - move);
-                    if (cursorAfter.amount() <= 0) cursorAfter = BedrockItem.empty();
-                    preserveCarriedSource = !isEmpty(cursorAfter);
                 } else {
                     slotAfter = cursorBefore.copy();
                     cursorAfter = slotBefore.copy();
@@ -425,16 +460,31 @@ public abstract class Container {
                 if (cursorAfter.amount() <= 0) cursorAfter = BedrockItem.empty();
                 preserveCarriedSource = true;
             } else if (!isEmpty(cursorBefore) && !isEmpty(slotBefore) && canStack(cursorBefore, slotBefore)) {
-                if (slotBefore.amount() >= bridgeMaxStackSize(slotBefore)) {
-                    bridgePublishJavaContainerSnapshot(inventory, "container_pickup_stack_full");
-                    return true;
+                boolean canPlaceCursor = slotContainer != this || this.bridgeCanPlaceItem(bedrockSlot, cursorBefore);
+                if (!canPlaceCursor) {
+                    int take = bridgeCompatibleCursorTakeCount(slotBefore, cursorBefore);
+                    if (take <= 0) {
+                        bridgePublishJavaContainerSnapshot(inventory, "container_pickup_stack_full");
+                        return true;
+                    }
+                    slotAfter = slotBefore.copy();
+                    slotAfter.setAmount(slotBefore.amount() - take);
+                    if (slotAfter.amount() <= 0) slotAfter = BedrockItem.empty();
+                    cursorAfter = cursorBefore.copy();
+                    cursorAfter.setAmount(cursorBefore.amount() + take);
+                    preserveCarriedSource = true;
+                } else {
+                    if (slotBefore.amount() >= bridgeMaxStackSize(slotBefore)) {
+                        bridgePublishJavaContainerSnapshot(inventory, "container_pickup_stack_full");
+                        return true;
+                    }
+                    slotAfter = slotBefore.copy();
+                    slotAfter.setAmount(slotBefore.amount() + 1);
+                    cursorAfter = cursorBefore.copy();
+                    cursorAfter.setAmount(cursorBefore.amount() - 1);
+                    if (cursorAfter.amount() <= 0) cursorAfter = BedrockItem.empty();
+                    preserveCarriedSource = true;
                 }
-                slotAfter = slotBefore.copy();
-                slotAfter.setAmount(slotBefore.amount() + 1);
-                cursorAfter = cursorBefore.copy();
-                cursorAfter.setAmount(cursorBefore.amount() - 1);
-                if (cursorAfter.amount() <= 0) cursorAfter = BedrockItem.empty();
-                preserveCarriedSource = true;
             } else if (!isEmpty(cursorBefore) && !isEmpty(slotBefore)) {
                 slotAfter = cursorBefore.copy();
                 cursorAfter = slotBefore.copy();
@@ -442,6 +492,13 @@ public abstract class Container {
                 bridgePublishJavaContainerSnapshot(inventory, "container_pickup_noop");
                 return true;
             }
+        }
+
+        if (slotContainer == this &&
+                bridgeWouldPlaceIntoSlot(slotBefore, slotAfter) &&
+                !this.bridgeCanPlaceItem(bedrockSlot, slotAfter)) {
+            bridgePublishJavaContainerSnapshot(inventory, "container_pickup_rejected_by_slot");
+            return true;
         }
 
         if (inventory.bridgeTrySendNativeCursorMove(
@@ -489,6 +546,29 @@ public abstract class Container {
 
         BedrockItem slotBefore = safeCopy(slotContainer.getItem(bedrockSlot));
         BedrockItem hotbarBefore = safeCopy(inventory.getItem(hotbarSlot));
+        if (slotContainer == this && isEmpty(hotbarBefore) && !isEmpty(slotBefore) &&
+                !this.bridgeCanPlaceItem(bedrockSlot, slotBefore)) {
+            int moved = inventory.bridgeTrySendNativeContainerQuickMove(
+                    slotContainer,
+                    bridgeSourceContainerIdForJavaSlot(javaSlot, inventory),
+                    bedrockSlot,
+                    List.of(inventory),
+                    List.of(Integer.valueOf(inventory.containerId() & 0xFF)),
+                    List.of(Integer.valueOf(hotbarSlot)),
+                    ItemStackRequestActionType.Take,
+                    "container_number_key_take_from_read_only_slot");
+            bridgePublishJavaContainerSnapshot(
+                    inventory,
+                    moved > 0
+                            ? "container_number_key_take_from_read_only_slot"
+                            : "container_number_key_take_from_read_only_slot_blocked");
+            return true;
+        }
+        if (slotContainer == this && !isEmpty(hotbarBefore) &&
+                !this.bridgeCanPlaceItem(bedrockSlot, hotbarBefore)) {
+            bridgePublishJavaContainerSnapshot(inventory, "container_number_key_swap_rejected_by_slot");
+            return true;
+        }
         if (inventory.bridgeTrySendNativeSlotSwap(
                 slotContainer,
                 bridgeSourceContainerIdForJavaSlot(javaSlot, inventory),
@@ -512,12 +592,44 @@ public abstract class Container {
         return true;
     }
 
+    private boolean bridgeHandleThrowClick(int javaSlot, byte button, InventoryContainer inventory) {
+        if (button != 0 && button != 1) return false;
+        Container sourceContainer = bridgeContainerFromJavaSlot(javaSlot, inventory);
+        int sourceSlot = bridgeBedrockSlotFromJavaSlot(javaSlot);
+        if (sourceContainer == null || sourceSlot < 0) return false;
+        if (!isEmpty(inventory.bridgeGetCarriedItem())) {
+            bridgePublishJavaContainerSnapshot(inventory, "container_throw_blocked_with_cursor");
+            return true;
+        }
+
+        BedrockItem sourceBefore = safeCopy(sourceContainer.getItem(sourceSlot));
+        if (isEmpty(sourceBefore)) {
+            bridgePublishJavaContainerSnapshot(inventory, "container_throw_noop");
+            return true;
+        }
+        int requestedCount = bridgeThrowCount(sourceBefore, button);
+        int dropped = inventory.bridgeTrySendNativeDrop(
+                sourceContainer,
+                bridgeSourceContainerIdForJavaSlot(javaSlot, inventory),
+                sourceSlot,
+                requestedCount,
+                "external_container_throw");
+        bridgePublishJavaContainerSnapshot(
+                inventory,
+                dropped > 0 ? "container_throw_native_stack_request" : "container_throw_blocked_no_native_stack_request");
+        return true;
+    }
+
     private boolean bridgeHandleQuickMoveClick(int javaSlot, InventoryContainer inventory) {
         if (!isEmpty(inventory.bridgeGetCarriedItem())) {
             bridgePublishJavaContainerSnapshot(inventory, "container_quick_move_blocked_with_cursor");
             ViaBedrock.getPlatform().getLogger().log(Level.INFO,
                     "[BedrockRealmBridge] blocked generic container quick_move while cursor is non-empty; waiting for server-authoritative cursor state");
             return true;
+        }
+
+        if (this.bridgeUsesCustomQuickMove()) {
+            return this.bridgeHandleCustomQuickMove(javaSlot, inventory);
         }
 
         Container fromContainer = bridgeContainerFromJavaSlot(javaSlot, inventory);
@@ -608,6 +720,7 @@ public abstract class Container {
         Container slotContainer = bridgeContainerFromJavaSlot(javaSlot, inventory);
         int bedrockSlot = bridgeBedrockSlotFromJavaSlot(javaSlot);
         if (slotContainer == null || bedrockSlot < 0) return false;
+        if (slotContainer == this && !this.bridgeCanPlaceItem(bedrockSlot, carried)) return false;
         BedrockItem slot = safeCopy(slotContainer.getItem(bedrockSlot));
         return isEmpty(slot) || (canStack(carried, slot) && slot.amount() < bridgeMaxStackSize(slot));
     }
@@ -670,7 +783,7 @@ public abstract class Container {
         return true;
     }
 
-    private void bridgePublishJavaContainerSnapshot(InventoryContainer inventory, String reason) {
+    public void bridgePublishJavaContainerSnapshot(InventoryContainer inventory, String reason) {
         try {
             inventory.bridgePublishJavaInventorySnapshot(reason + ":player_inventory");
             bridgeSendJavaContainerSetContentWithState(inventory.bridgeNextJavaStateId());
@@ -740,14 +853,14 @@ public abstract class Container {
                 safeCopy(to));
     }
 
-    private Container bridgeContainerFromJavaSlot(int javaSlot, InventoryContainer inventory) {
+    protected Container bridgeContainerFromJavaSlot(int javaSlot, InventoryContainer inventory) {
         if (javaSlot >= 0 && javaSlot < this.size()) return this;
         int offset = javaSlot - this.size();
         if (offset >= 0 && offset < 36) return inventory;
         return null;
     }
 
-    private int bridgeBedrockSlotFromJavaSlot(int javaSlot) {
+    protected int bridgeBedrockSlotFromJavaSlot(int javaSlot) {
         if (javaSlot >= 0 && javaSlot < this.size()) return javaSlot;
         int offset = javaSlot - this.size();
         if (offset >= 0 && offset < 27) return 9 + offset;
@@ -755,7 +868,7 @@ public abstract class Container {
         return -1;
     }
 
-    private int bridgeSourceContainerIdForJavaSlot(int javaSlot, InventoryContainer inventory) {
+    protected int bridgeSourceContainerIdForJavaSlot(int javaSlot, InventoryContainer inventory) {
         if (javaSlot >= 0 && javaSlot < this.size()) return this.containerId & 0xFF;
         int offset = javaSlot - this.size();
         if (offset >= 0 && offset < 36) return inventory.containerId() & 0xFF;
@@ -833,24 +946,56 @@ public abstract class Container {
         return "none";
     }
 
-    private static boolean isEmpty(BedrockItem item) {
+    protected boolean bridgeCanPlaceItem(int bedrockSlot, BedrockItem item) {
+        return true;
+    }
+
+    protected boolean bridgeUsesCustomQuickMove() {
+        return false;
+    }
+
+    protected boolean bridgeHandleCustomQuickMove(int javaSlot, InventoryContainer inventory) {
+        return false;
+    }
+
+    protected static boolean bridgeWouldPlaceIntoSlot(BedrockItem before, BedrockItem after) {
+        if (isEmpty(after)) return false;
+        if (isEmpty(before)) return true;
+        if (!canStack(before, after)) return true;
+        return amountOrZero(after) > amountOrZero(before);
+    }
+
+    protected static int bridgeCompatibleCursorTakeCount(BedrockItem slot, BedrockItem cursor) {
+        if (!canStack(slot, cursor)) return 0;
+        int room = Math.max(0, bridgeMaxStackSize(cursor) - amountOrZero(cursor));
+        return Math.min(amountOrZero(slot), room);
+    }
+
+    protected static int bridgeThrowCount(BedrockItem source, byte button) {
+        if (isEmpty(source)) return 0;
+        if (button == 0) return 1;
+        if (button == 1) return amountOrZero(source);
+        return 0;
+    }
+
+    protected static boolean isEmpty(BedrockItem item) {
         return item == null || item.isEmpty();
     }
 
-    private static BedrockItem safeCopy(BedrockItem item) {
+    protected static BedrockItem safeCopy(BedrockItem item) {
         return item == null ? BedrockItem.empty() : item.copy();
     }
 
-    private static boolean canStack(BedrockItem a, BedrockItem b) {
+    protected static boolean canStack(BedrockItem a, BedrockItem b) {
         if (isEmpty(a) || isEmpty(b)) return false;
         return !a.isDifferent(b);
     }
 
-    private static int amountOrZero(BedrockItem item) {
+    protected static int amountOrZero(BedrockItem item) {
         return isEmpty(item) ? 0 : Math.max(0, item.amount());
     }
 
-    private static int bridgeMaxStackSize(BedrockItem item) {
+    protected static int bridgeMaxStackSize(BedrockItem item) {
         return 64;
     }
 

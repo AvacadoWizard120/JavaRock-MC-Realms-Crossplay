@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0 - 2026-10-01
+
+- Furnaces, smokers, and blast furnaces now open and stay synchronized, including fuel, ingredient, result, burn time, and cook progress.
+- Normal clicks, shift-click, number-key moves, dragging, double-click pickup, and Q/Ctrl-Q drops now work across furnace-family inventories.
+- Lit furnaces, smokers, and blast furnaces emit the correct block light as the Realm switches them on and off.
+
 ## 0.3.120 - 2026-10-01
 
 - Realm movement corrections now replace Java's divergent velocity instead of preserving it, stopping the repeated sinking and vertical snaps captured during spider combat.

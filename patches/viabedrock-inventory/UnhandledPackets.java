@@ -16,6 +16,7 @@ import net.raphimc.viabedrock.api.chunk.BedrockBlockEntity;
 import net.raphimc.viabedrock.api.model.entity.ClientPlayerEntity;
 import net.raphimc.viabedrock.api.model.container.ChestContainer;
 import net.raphimc.viabedrock.api.model.container.Container;
+import net.raphimc.viabedrock.api.model.container.FurnaceContainer;
 import net.raphimc.viabedrock.api.model.container.player.InventoryContainer;
 import net.raphimc.viabedrock.api.util.PacketFactory;
 import net.raphimc.viabedrock.api.util.TextUtil;
@@ -38,6 +39,7 @@ public class UnhandledPackets {
     // so ViaVersion cancels the Java-inexpressible camera data instead of
     // reporting it (and its payload bytes) as unknown PLAY packets.
     private static final int CAMERA_SPLINE_PACKET_ID = 338;
+    private static final int SET_PLAYER_FURNACE_OPTIONS_PACKET_ID = 351;
 
     public static void register(final BedrockProtocol protocol) {
         protocol.registerClientbound(ClientboundBedrockPackets.CONTAINER_OPEN, ClientboundPackets26_1.OPEN_SCREEN, wrapper -> {
@@ -79,6 +81,10 @@ public class UnhandledPackets {
             final String titleKey;
             if (type == ContainerType.WORKBENCH) {
                 titleKey = "container.crafting";
+            } else if (FurnaceContainer.bridgeIsFurnaceType(type)) {
+                titleKey = "container." + (type == ContainerType.BLAST_FURNACE
+                        ? "blast_furnace"
+                        : type == ContainerType.SMOKER ? "smoker" : "furnace");
             } else if (type == ContainerType.CONTAINER) {
                 titleKey = blockTag == null ? "container.chest" : "container." + blockTag;
             } else {
@@ -104,6 +110,8 @@ public class UnhandledPackets {
                 }
                 case WORKBENCH -> container = new InventoryContainer(
                         wrapper.user(), containerId, title, position, inventoryTracker.getInventoryContainer(), true);
+                case FURNACE, BLAST_FURNACE, SMOKER -> container = new FurnaceContainer(
+                        wrapper.user(), containerId, type, title, position);
                 case NONE, CAULDRON, JUKEBOX, ARMOR, HAND, HUD, DECORATED_POT -> {
                     wrapper.cancel();
                     return;
@@ -124,8 +132,18 @@ public class UnhandledPackets {
             if (container instanceof InventoryContainer workbench && workbench.bridgeIsCraftingTable()) {
                 wrapper.user().getChannel().eventLoop().execute(
                         () -> workbench.bridgePublishJavaInventorySnapshot("crafting_table_open"));
+            } else if (container instanceof FurnaceContainer furnace) {
+                wrapper.user().getChannel().eventLoop().execute(furnace::bridgePublishInitialProperties);
             }
         }, true);
+
+        protocol.registerClientbound(ClientboundBedrockPackets.CONTAINER_SET_DATA, null, wrapper -> {
+            wrapper.cancel();
+            final byte containerId = wrapper.read(Types.BYTE);
+            final int property = wrapper.read(BedrockTypes.VAR_INT);
+            final int value = wrapper.read(BedrockTypes.VAR_INT);
+            wrapper.user().get(InventoryTracker.class).bridgeHandleContainerSetData(containerId, property, value);
+        });
 
         // Override ViaBedrock's generic close mapper. Java window 0 is a local
         // player-inventory screen, not a Bedrock external container. Forwarding
@@ -147,7 +165,7 @@ public class UnhandledPackets {
             }
 
             wrapper.write(Types.BYTE, container.containerId());
-            wrapper.write(Types.BYTE, (byte) ContainerType.NONE.getValue());
+            wrapper.write(Types.BYTE, (byte) container.bridgeBedrockCloseType().getValue());
             wrapper.write(Types.BOOLEAN, false);
             inventoryTracker.markPendingClose(container);
             inventoryTracker.bridgePublishCanonicalInventoryAfterJavaClose(container);
@@ -205,6 +223,10 @@ public class UnhandledPackets {
         protocol.cancelClientbound(ClientboundBedrockPackets.CAMERA_AIM_ASSIST_PRESETS);
         protocol.cancelClientbound(ClientboundBedrockPackets.PLAYER_VIDEO_CAPTURE);
         protocol.cancelClientbound(State.PLAY, CAMERA_SPLINE_PACKET_ID);
+        // Bedrock's recipe-screen preference packet has no Java equivalent and
+        // is newer than the pinned packet enum. Cancel it by wire id so it does
+        // not surface as an unknown packet while opening furnace-family menus.
+        protocol.cancelClientbound(State.PLAY, SET_PLAYER_FURNACE_OPTIONS_PACKET_ID);
 
         protocol.registerServerboundTransition(ServerboundConfigurationPackets1_21_9.KEEP_ALIVE, null, PacketWrapper::cancel);
         protocol.cancelServerbound(ServerboundPackets26_1.CHAT_ACK);

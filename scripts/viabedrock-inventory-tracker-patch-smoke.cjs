@@ -2740,9 +2740,10 @@ function assertPostCloseCanonicalInventoryResync () {
   const markForcedClose = forceClose.indexOf('this.markPendingClose(closingContainer)')
   const sendJavaClose = forceClose.indexOf('PacketFactory.sendJavaContainerClose(this.user(), closingContainer.javaContainerId())')
   const publishForcedClose = forceClose.indexOf('this.bridgePublishCanonicalInventoryAfterJavaClose(closingContainer)')
-  const sendBedrockClose = forceClose.indexOf('PacketFactory.sendBedrockContainerClose(this.user(), closingContainer.containerId(), ContainerType.NONE)')
+  const sendBedrockClose = forceClose.indexOf('PacketFactory.sendBedrockContainerClose(')
   if (captureClosing < 0 || markForcedClose <= captureClosing || sendJavaClose <= markForcedClose ||
-      publishForcedClose <= sendJavaClose || sendBedrockClose <= publishForcedClose) {
+      publishForcedClose <= sendJavaClose || sendBedrockClose <= publishForcedClose ||
+      !forceClose.includes('closingContainer.bridgeBedrockCloseType()')) {
     throw new Error('forced workbench close must capture the active window, close Java, publish window 0, then close Bedrock')
   }
 
@@ -2874,6 +2875,10 @@ function assertMouseActionStateMachine () {
     'inventory.bridgeTrySendNativeCursorMove(',
     'inventory.bridgeTrySendNativeSlotSwap(',
     'inventory.bridgeTakeMatchingSlotsToCursor(',
+    'input == ContainerInput.THROW',
+    'bridgeHandleThrowClick(javaSlot, button, inventory)',
+    'bridgeTrySendNativeDrop(',
+    'container_clone_noop',
     'container_quick_craft_complete'
   ]) {
     if (!containerSource.includes(marker)) throw new Error(`patched Container.java is missing mouse-action marker: ${marker}`)
@@ -2887,7 +2892,7 @@ function assertMouseActionStateMachine () {
   }
   for (const marker of [
     'ContainerEnumName.LevelEntityContainer',
-    'clickSlot.container.bridgeNativeStackRequestContainerName()',
+    'clickSlot.container.bridgeNativeStackRequestContainerName(clickSlot.bedrockSlot)',
     'public boolean bridgeTrySendNativeCursorMove(',
     'public boolean bridgeTrySendNativeSlotSwap(',
     'private static BridgeNativeStackSlot bridgeSwapStackSlotFromClickSlot(',
@@ -2898,6 +2903,13 @@ function assertMouseActionStateMachine () {
     '(isEmpty(slotBefore) || canStack(cursorBefore, slotBefore))',
     '(isEmpty(cursorBefore) || canStack(cursorBefore, slotBefore))',
     'public int bridgeTakeMatchingSlotsToCursor(',
+    'public int bridgeTrySendNativeDrop(',
+    'ItemStackRequestActionType.Drop',
+    'private void sendItemStackRequestDrop(',
+    'wrapper.write(Types.BOOLEAN, false)',
+    'input == ContainerInput.THROW',
+    'handleThrowClick(javaSlot, button)',
+    'clone_noop',
     'final int craftingInputCount = bridgePickupAllCraftingInputCount(this.bridgeCraftingTable)',
     'static int bridgePickupAllCraftingInputCount(final boolean craftingTable)',
     'for (int craftingJavaSlot = 1; craftingJavaSlot <= craftingInputCount; craftingJavaSlot++)',
@@ -2942,7 +2954,7 @@ function assertMouseActionStateMachine () {
   if (stackSlotWriter.includes('BedrockTypes.VAR_INT, slot.stackId')) {
     throw new Error('native StackRequestSlotInfo regressed to the pre-1.26.40 zigzag stack-ID wire shape')
   }
-  if ((inventorySource.match(/writeItemStackRequestActionType\(wrapper,/g) || []).length !== 8) {
+  if ((inventorySource.match(/writeItemStackRequestActionType\(wrapper,/g) || []).length !== 10) {
     throw new Error('every native item_stack_request action writer must include the 1.26.45 legacy action-type byte')
   }
   const nativeSwapWriterStart = inventorySource.indexOf('private void sendItemStackRequestSwap(')
@@ -2971,6 +2983,26 @@ function assertMouseActionStateMachine () {
   }
   if (nativeSwapPath.includes('ContainerEnumName.CombinedHotbarAndInventoryContainer')) {
     throw new Error('number-key Swap endpoints must not be flattened into the combined player inventory container')
+  }
+  const nativeDropStart = inventorySource.indexOf('public int bridgeTrySendNativeDrop(')
+  const nativeDropEnd = inventorySource.indexOf('private static boolean bridgeIsCraftingInputSlot(', nativeDropStart)
+  const nativeDropPath = inventorySource.slice(nativeDropStart, nativeDropEnd)
+  const rememberDrop = nativeDropPath.indexOf('this.bridgeRememberPendingNativeRequest(')
+  const sendDrop = nativeDropPath.indexOf('this.sendItemStackRequestDrop(requestId, count, nativeSource)')
+  const predictDrop = nativeDropPath.indexOf('sourceContainer.setItem(sourceBedrockSlot, safeCopy(sourceAfter))')
+  if (nativeDropStart < 0 || nativeDropEnd < 0 || rememberDrop < 0 || sendDrop <= rememberDrop || predictDrop <= sendDrop) {
+    throw new Error('native Drop must remember correction-safe state before sending and applying local prediction')
+  }
+  const dropWriterStart = inventorySource.indexOf('private void sendItemStackRequestDrop(')
+  const dropWriterEnd = inventorySource.indexOf('private void sendBatchedItemStackRequestMoves(', dropWriterStart)
+  const dropWriter = inventorySource.slice(dropWriterStart, dropWriterEnd)
+  const dropAction = dropWriter.indexOf('writeItemStackRequestActionType(wrapper, ItemStackRequestActionType.Drop)')
+  const dropCount = dropWriter.indexOf('wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(64, count)))')
+  const dropSource = dropWriter.indexOf('this.writeStackRequestSlot(wrapper, source)')
+  const dropRandomly = dropWriter.indexOf('wrapper.write(Types.BOOLEAN, false)')
+  if (dropWriterStart < 0 || dropWriterEnd < 0 || dropAction < 0 || dropCount <= dropAction ||
+      dropSource <= dropCount || dropRandomly <= dropSource || dropWriter.includes('destination')) {
+    throw new Error('native Drop wire shape must be action, uint8 count, source slot, then randomly=false with no destination')
   }
   const nativeQuickMoveStart = inventorySource.indexOf('private boolean bridgeTrySendNativeQuickMove(')
   const nativeQuickMoveEnd = inventorySource.indexOf('private static boolean bridgeIsCraftingInputSlot(', nativeQuickMoveStart)
@@ -3103,7 +3135,10 @@ public final class BridgeBlockRenderingSmoke {
         check(BridgeBlockRendering.emission(state("minecraft:torch")) == 14, "torch emission");
         check(BridgeBlockRendering.emission(state("minecraft:redstone_lamp[lit=false]")) == 0, "unlit lamp emission");
         check(BridgeBlockRendering.emission(state("minecraft:redstone_lamp[lit=true]")) == 15, "lit lamp emission");
+        check(BridgeBlockRendering.emission(state("minecraft:furnace[facing=north,lit=false]")) == 0, "unlit furnace emission");
         check(BridgeBlockRendering.emission(state("minecraft:furnace[facing=north,lit=true]")) == 13, "lit furnace emission");
+        check(BridgeBlockRendering.emission(state("minecraft:smoker[facing=north,lit=true]")) == 13, "lit smoker emission");
+        check(BridgeBlockRendering.emission(state("minecraft:blast_furnace[facing=north,lit=true]")) == 13, "lit blast furnace emission");
         check(BridgeBlockRendering.emission(state("minecraft:candle[candles=4,lit=true,waterlogged=false]")) == 12, "candle emission");
         check(BridgeBlockRendering.emission(state("minecraft:sea_pickle[pickles=4,waterlogged=true]")) == 15, "sea pickle emission");
         check(BridgeBlockRendering.emission(state("minecraft:respawn_anchor[charges=4]")) == 15, "anchor emission");
@@ -3579,7 +3614,9 @@ function assertUnsupportedCameraSplineCancelled () {
   const source = fs.readFileSync(path.join(patchRoot, 'UnhandledPackets.java'), 'utf8')
   for (const marker of [
     'private static final int CAMERA_SPLINE_PACKET_ID = 338;',
-    'protocol.cancelClientbound(State.PLAY, CAMERA_SPLINE_PACKET_ID);'
+    'protocol.cancelClientbound(State.PLAY, CAMERA_SPLINE_PACKET_ID);',
+    'private static final int SET_PLAYER_FURNACE_OPTIONS_PACKET_ID = 351;',
+    'protocol.cancelClientbound(State.PLAY, SET_PLAYER_FURNACE_OPTIONS_PACKET_ID);'
   ]) {
     if (!source.includes(marker)) {
       throw new Error(`UnhandledPackets.java is missing raw Bedrock CAMERA_SPLINE cancellation marker: ${marker}`)
@@ -3591,10 +3628,177 @@ function assertUnsupportedCameraSplineCancelled () {
     throw new Error('UnhandledPackets.class is not registered in the ViaProxy patch')
   }
   const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(className)]).stdout
-  for (const marker of ['sipush        338', 'cancelClientbound:(Lcom/viaversion/viaversion/api/protocol/packet/State;I)V']) {
+  for (const marker of ['sipush        338', 'sipush        351', 'cancelClientbound:(Lcom/viaversion/viaversion/api/protocol/packet/State;I)V']) {
     if (!bytecode.includes(marker)) {
       throw new Error(`compiled UnhandledPackets.class is missing raw Bedrock CAMERA_SPLINE cancellation bytecode: ${marker}`)
     }
+  }
+}
+
+function assertFurnaceFamilyBridge () {
+  const furnaceSourceName = 'FurnaceContainer.java'
+  const fuelSourceName = 'BridgeFurnaceFuelData.java'
+  const furnaceClassName = 'net/raphimc/viabedrock/api/model/container/FurnaceContainer.class'
+  const fuelClassName = 'net/raphimc/viabedrock/api/model/container/BridgeFurnaceFuelData.class'
+  for (const sourceName of [furnaceSourceName, fuelSourceName]) {
+    if (!PATCH_SOURCE_RELATIVE_PATHS.includes(sourceName)) throw new Error(`${sourceName} is not registered in the ViaProxy patch`)
+  }
+  for (const className of [furnaceClassName, fuelClassName]) {
+    if (!CLASS_RELATIVE_PATHS.includes(className)) throw new Error(`${className} is not registered in the ViaProxy patch`)
+  }
+
+  const furnaceSource = fs.readFileSync(path.join(patchRoot, furnaceSourceName), 'utf8')
+  for (const marker of [
+    'public static final int INGREDIENT_SLOT = 0',
+    'public static final int FUEL_SLOT = 1',
+    'public static final int RESULT_SLOT = 2',
+    'ContainerEnumName.FurnaceIngredientContainer',
+    'ContainerEnumName.BlastFurnaceIngredientContainer',
+    'ContainerEnumName.SmokerIngredientContainer',
+    'ContainerEnumName.FurnaceFuelContainer',
+    'ContainerEnumName.FurnaceResultContainer',
+    'if (bedrockSlot == RESULT_SLOT) return false',
+    '"minecraft:bucket".equals(identifier)',
+    'bridgeTrySendNativeContainerQuickMove(',
+    'bridgeQuickMoveActionType(sourceContainer, sourceSlot)',
+    'ItemStackRequestActionType.Take',
+    'bridgeStationIngredients()',
+    'case 0 -> 2',
+    'case 1 -> 0',
+    'case 2 -> 1',
+    'bridgeDefaultCookTime(this.type)',
+    'return this.type;'
+  ]) {
+    if (!furnaceSource.includes(marker)) throw new Error(`FurnaceContainer.java is missing furnace-family marker: ${marker}`)
+  }
+  const containerSource = fs.readFileSync(path.join(patchRoot, 'Container.java'), 'utf8')
+  for (const marker of [
+    'bridgeCompatibleCursorTakeCount(slotBefore, cursorBefore)',
+    'container_number_key_take_from_read_only_slot',
+    'ItemStackRequestActionType.Take'
+  ]) {
+    if (!containerSource.includes(marker)) throw new Error(`Container.java is missing read-only result-slot marker: ${marker}`)
+  }
+  if ((containerSource.match(/bridgeCompatibleCursorTakeCount\(slotBefore, cursorBefore\)/g) || []).length !== 2) {
+    throw new Error('Container.java must apply compatible-cursor extraction to both left and right clicks')
+  }
+  const inventorySource = fs.readFileSync(path.join(patchRoot, 'InventoryContainer.java'), 'utf8')
+  for (const marker of [
+    'ItemStackRequestActionType transferActionType',
+    'bridgeCanUseStackRequestSource(transferActionType, nativeSource)',
+    'this.sendItemStackRequestTransfers(\n                requestId,\n                transferActionType,'
+  ]) {
+    if (!inventorySource.includes(marker)) throw new Error(`InventoryContainer.java is missing selectable native-transfer marker: ${marker}`)
+  }
+  const fuelSource = fs.readFileSync(path.join(patchRoot, fuelSourceName), 'utf8')
+  for (const marker of ['Mojang FuelValues.vanillaBurnTimes', 'minecraft:lava_bucket', 'minecraft:wooden_spear']) {
+    if (!fuelSource.includes(marker)) throw new Error(`BridgeFurnaceFuelData.java is missing generated fuel marker: ${marker}`)
+  }
+
+  const unhandled = fs.readFileSync(path.join(patchRoot, 'UnhandledPackets.java'), 'utf8')
+  for (const marker of [
+    'case FURNACE, BLAST_FURNACE, SMOKER -> container = new FurnaceContainer(',
+    'ClientboundBedrockPackets.CONTAINER_SET_DATA',
+    'bridgeHandleContainerSetData(containerId, property, value)',
+    'furnace::bridgePublishInitialProperties',
+    'container.bridgeBedrockCloseType().getValue()'
+  ]) {
+    if (!unhandled.includes(marker)) throw new Error(`UnhandledPackets.java is missing furnace-family marker: ${marker}`)
+  }
+  const tracker = fs.readFileSync(path.join(patchRoot, 'InventoryTracker.java'), 'utf8')
+  for (const marker of [
+    'private final Map<Byte, int[]> bridgePendingFurnaceProperties',
+    'public void bridgeHandleContainerSetData(byte containerId, int property, int value)',
+    'furnace.bridgeApplyBedrockProperty(property, pendingProperties[property], false)',
+    'furnace.bridgeApplyBedrockProperty(property, value, true)'
+  ]) {
+    if (!tracker.includes(marker)) throw new Error(`InventoryTracker.java is missing early furnace-property buffering marker: ${marker}`)
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-furnace-family-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'api', 'model', 'container')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const sourcePath = path.join(packageDir, 'FurnaceFamilySmoke.java')
+    fs.writeFileSync(sourcePath, `
+package net.raphimc.viabedrock.api.model.container;
+
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnumName;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ItemStackRequestActionType;
+import net.raphimc.viabedrock.protocol.model.BedrockItem;
+
+public final class FurnaceFamilySmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    private static BedrockItem item(int identifier, int amount) {
+        return new BedrockItem(identifier, (short) 0, (byte) amount);
+    }
+
+    public static void main(String[] args) {
+        check(BridgeFurnaceFuelData.size() == 280, "generated Java 26.1 fuel set size");
+        check(BridgeFurnaceFuelData.isFuel("minecraft:coal"), "coal fuel");
+        check(BridgeFurnaceFuelData.isFuel("minecraft:red_banner"), "banner fuel");
+        check(BridgeFurnaceFuelData.isFuel("minecraft:wooden_spear"), "26.1 wooden spear fuel");
+        check(!BridgeFurnaceFuelData.isFuel("minecraft:crimson_planks"), "non-burning nether planks");
+        check(!BridgeFurnaceFuelData.isFuel("minecraft:bucket"), "empty bucket is slot-compatible but not fuel");
+
+        FurnaceContainer furnace = new FurnaceContainer(null, (byte) 7, ContainerType.FURNACE, null, null);
+        FurnaceContainer smoker = new FurnaceContainer(null, (byte) 8, ContainerType.SMOKER, null, null);
+        FurnaceContainer blast = new FurnaceContainer(null, (byte) 9, ContainerType.BLAST_FURNACE, null, null);
+        check(furnace.size() == 3, "furnace size");
+        check(furnace.bridgeNativeStackRequestContainerName(0) == ContainerEnumName.FurnaceIngredientContainer, "furnace input name");
+        check(smoker.bridgeNativeStackRequestContainerName(0) == ContainerEnumName.SmokerIngredientContainer, "smoker input name");
+        check(blast.bridgeNativeStackRequestContainerName(0) == ContainerEnumName.BlastFurnaceIngredientContainer, "blast input name");
+        check(furnace.bridgeNativeStackRequestContainerName(1) == ContainerEnumName.FurnaceFuelContainer, "fuel name");
+        check(furnace.bridgeNativeStackRequestContainerName(2) == ContainerEnumName.FurnaceResultContainer, "result name");
+        check(furnace.bridgeNativeStackRequestSlot(2) == 2, "raw result slot");
+        check(furnace.bridgeBedrockCloseType() == ContainerType.FURNACE, "furnace close type");
+        check(furnace.isValidBlockTag("furnace"), "furnace block tag");
+        check(smoker.isValidBlockTag("smoker"), "smoker block tag");
+        check(blast.isValidBlockTag("blast_furnace"), "blast block tag");
+
+        check(Container.bridgeCompatibleCursorTakeCount(item(3, 8), item(3, 60)) == 4,
+                "read-only output fills compatible cursor to its limit");
+        check(Container.bridgeCompatibleCursorTakeCount(item(3, 2), item(3, 60)) == 2,
+                "read-only output takes the whole result when it fits");
+        check(Container.bridgeCompatibleCursorTakeCount(item(3, 2), item(4, 60)) == 0,
+                "read-only output rejects an incompatible cursor");
+        check(Container.bridgeCompatibleCursorTakeCount(item(3, 2), item(3, 64)) == 0,
+                "read-only output rejects a full cursor");
+        check(Container.bridgeThrowCount(item(3, 10), (byte) 0) == 1,
+                "Q drops one item");
+        check(Container.bridgeThrowCount(item(3, 10), (byte) 1) == 10,
+                "Ctrl-Q drops the whole stack");
+        check(Container.bridgeThrowCount(item(3, 10), (byte) 2) == 0,
+                "unsupported throw button is rejected");
+        check(Container.bridgeThrowCount(BedrockItem.empty(), (byte) 1) == 0,
+                "empty throw source is a no-op");
+        check(FurnaceContainer.bridgeQuickMoveActionType(furnace, FurnaceContainer.RESULT_SLOT) == ItemStackRequestActionType.Take,
+                "furnace result quick-move uses Take");
+        check(FurnaceContainer.bridgeQuickMoveActionType(furnace, FurnaceContainer.INGREDIENT_SLOT) == ItemStackRequestActionType.Place,
+                "furnace ingredient quick-move preserves Place");
+        Container generic = new Container(null, (byte) 10, ContainerType.CONTAINER, null, null, 3, "chest") {};
+        check(FurnaceContainer.bridgeQuickMoveActionType(generic, FurnaceContainer.RESULT_SLOT) == ItemStackRequestActionType.Place,
+                "ordinary container quick-move remains Place");
+
+        check(FurnaceContainer.bridgeJavaPropertyForBedrockProperty(0) == 2, "cook progress property");
+        check(FurnaceContainer.bridgeJavaPropertyForBedrockProperty(1) == 0, "lit time property");
+        check(FurnaceContainer.bridgeJavaPropertyForBedrockProperty(2) == 1, "lit duration property");
+        check(FurnaceContainer.bridgeJavaPropertyForBedrockProperty(3) == -1, "stored XP is not Java total cook time");
+        check(FurnaceContainer.bridgeDefaultCookTime(ContainerType.FURNACE) == 200, "furnace cook duration");
+        check(FurnaceContainer.bridgeDefaultCookTime(ContainerType.SMOKER) == 100, "smoker cook duration");
+        check(FurnaceContainer.bridgeDefaultCookTime(ContainerType.BLAST_FURNACE) == 100, "blast cook duration");
+    }
+}
+`)
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.api.model.container.FurnaceFamilySmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
   }
 }
 
@@ -3643,6 +3847,7 @@ assertAuthoritativeContainerSlotCodec()
 assertMouseActionStateMachine()
 assertRenderingBehavior()
 assertCraftingTableBridge()
+assertFurnaceFamilyBridge()
 assertUnsupportedCameraSplineCancelled()
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-inventory-patch-'))
