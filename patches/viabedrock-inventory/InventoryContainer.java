@@ -315,6 +315,15 @@ public class InventoryContainer extends Container {
                 if (!handled) this.logIgnoredClick(javaSlot, button, input, "pickup_all_unsupported", stateId);
                 return handled;
             }
+            if (input == ContainerInput.THROW) {
+                boolean handled = this.handleThrowClick(javaSlot, button);
+                if (!handled) this.logIgnoredClick(javaSlot, button, input, "throw_unsupported_slot_or_button", stateId);
+                return handled;
+            }
+            if (input == ContainerInput.CLONE) {
+                this.publishJavaInventorySnapshot("clone_noop");
+                return true;
+            }
             this.logIgnoredClick(javaSlot, button, input, "unsupported_input", stateId);
         } catch (Throwable t) {
             ViaBedrock.getPlatform().getLogger().log(Level.WARNING, "[BedrockRealmBridge] Inventory click patch failed; falling back to ViaBedrock correction", t);
@@ -467,6 +476,32 @@ public class InventoryContainer extends Container {
         return true;
     }
 
+    private boolean handleThrowClick(int javaSlot, byte button) {
+        if (button != 0 && button != 1) return false;
+        ClickSlot source = this.clickSlotFromJavaSlot(javaSlot);
+        if (source == null) return false;
+        if (!isEmpty(this.carriedItem)) {
+            this.publishJavaInventorySnapshot("throw_blocked_with_cursor");
+            return true;
+        }
+
+        BedrockItem sourceBefore = safeCopy(source.container.getItem(source.bedrockSlot));
+        if (isEmpty(sourceBefore)) {
+            this.publishJavaInventorySnapshot("throw_noop");
+            return true;
+        }
+        int requestedCount = bridgeThrowCount(sourceBefore, button);
+        int dropped = this.bridgeTrySendNativeDrop(
+                source.container,
+                source.sourceContainerId,
+                source.bedrockSlot,
+                requestedCount,
+                "player_inventory_throw");
+        this.publishJavaInventorySnapshot(
+                dropped > 0 ? "throw_native_stack_request" : "throw_blocked_no_native_stack_request");
+        return true;
+    }
+
     private boolean handleQuickMoveClick(int javaSlot) {
         if (!isEmpty(this.carriedItem)) {
             this.publishJavaInventorySnapshot("quick_move_blocked_with_cursor");
@@ -567,6 +602,169 @@ public class InventoryContainer extends Container {
                         " source=" + source.describe() +
                         " destination=" + destination.describe());
         return true;
+    }
+
+    public int bridgeTrySendNativeContainerQuickMove(
+            Container sourceContainer,
+            int sourceContainerId,
+            int sourceBedrockSlot,
+            List<Container> destinationContainers,
+            List<Integer> destinationContainerIds,
+            List<Integer> destinationBedrockSlots,
+            String reason) {
+        return this.bridgeTrySendNativeContainerQuickMove(
+                sourceContainer,
+                sourceContainerId,
+                sourceBedrockSlot,
+                destinationContainers,
+                destinationContainerIds,
+                destinationBedrockSlots,
+                ItemStackRequestActionType.Place,
+                reason);
+    }
+
+    public int bridgeTrySendNativeContainerQuickMove(
+            Container sourceContainer,
+            int sourceContainerId,
+            int sourceBedrockSlot,
+            List<Container> destinationContainers,
+            List<Integer> destinationContainerIds,
+            List<Integer> destinationBedrockSlots,
+            ItemStackRequestActionType transferActionType,
+            String reason) {
+        if (sourceContainer == null || sourceBedrockSlot < 0 || sourceBedrockSlot >= sourceContainer.size()) return 0;
+        if (destinationContainers == null || destinationContainerIds == null || destinationBedrockSlots == null ||
+                destinationContainers.size() != destinationContainerIds.size() ||
+                destinationContainers.size() != destinationBedrockSlots.size()) return 0;
+        if (transferActionType != ItemStackRequestActionType.Place &&
+                transferActionType != ItemStackRequestActionType.Take) return 0;
+
+        BedrockItem sourceBefore = safeCopy(sourceContainer.getItem(sourceBedrockSlot));
+        if (isEmpty(sourceBefore)) return 0;
+        ClickSlot sourceClickSlot = new ClickSlot(sourceContainer, sourceContainerId, sourceBedrockSlot);
+        BridgeNativeStackSlot nativeSource = bridgeStackSlotFromClickSlot(sourceClickSlot, sourceBefore);
+        if (!bridgeCanUseStackRequestSource(transferActionType, nativeSource)) return 0;
+
+        int remaining = sourceBefore.amount();
+        int moved = 0;
+        List<ClickSlot> changedSlots = new ArrayList<>();
+        List<BedrockItem> predictedItems = new ArrayList<>();
+        List<Integer> counts = new ArrayList<>();
+        List<BridgeNativeStackSlot> nativeSources = new ArrayList<>();
+        List<BridgeNativeStackSlot> nativeDestinations = new ArrayList<>();
+        List<BedrockItem> destinationAfterItems = new ArrayList<>();
+
+        for (int index = 0; index < destinationContainers.size() && remaining > 0; index++) {
+            Container destinationContainer = destinationContainers.get(index);
+            int destinationSlot = destinationBedrockSlots.get(index).intValue();
+            if (destinationContainer == null || destinationSlot < 0 || destinationSlot >= destinationContainer.size()) continue;
+            if (destinationContainer == sourceContainer && destinationSlot == sourceBedrockSlot) continue;
+
+            BedrockItem destinationBefore = safeCopy(destinationContainer.getItem(destinationSlot));
+            if (!isEmpty(destinationBefore) && !canStack(sourceBefore, destinationBefore)) continue;
+            int room = bridgeMaxStackSize(isEmpty(destinationBefore) ? sourceBefore : destinationBefore) - amountOrZero(destinationBefore);
+            int count = Math.min(remaining, Math.max(0, room));
+            if (count <= 0) continue;
+
+            ClickSlot destinationClickSlot = new ClickSlot(
+                    destinationContainer,
+                    destinationContainerIds.get(index).intValue(),
+                    destinationSlot);
+            BridgeNativeStackSlot nativeDestination = bridgeStackSlotFromClickSlot(destinationClickSlot, destinationBefore);
+            if (!bridgeCanUseStackRequestSwapSlot(nativeDestination, destinationBefore)) continue;
+
+            BedrockItem destinationAfter = isEmpty(destinationBefore) ? sourceBefore.copy() : destinationBefore.copy();
+            destinationAfter.setAmount(amountOrZero(destinationBefore) + count);
+            changedSlots.add(destinationClickSlot);
+            predictedItems.add(destinationAfter);
+            destinationAfterItems.add(destinationAfter);
+            counts.add(Integer.valueOf(count));
+            nativeSources.add(nativeSource);
+            nativeDestinations.add(nativeDestination);
+            remaining -= count;
+            moved += count;
+        }
+        if (moved <= 0) return 0;
+
+        BedrockItem sourceAfter = sourceBefore.copy();
+        sourceAfter.setAmount(remaining);
+        if (remaining <= 0) sourceAfter = BedrockItem.empty();
+        changedSlots.add(0, sourceClickSlot);
+        predictedItems.add(0, sourceAfter);
+
+        int requestId = this.nextItemStackRequestId();
+        if (!isEmpty(sourceAfter)) sourceAfter.setNetId(Integer.valueOf(requestId));
+        for (BedrockItem destinationAfter : destinationAfterItems) {
+            if (!isEmpty(destinationAfter)) destinationAfter.setNetId(Integer.valueOf(requestId));
+        }
+        this.bridgeRememberPendingNativeRequest(
+                requestId,
+                changedSlots,
+                predictedItems,
+                this.carriedItem,
+                this.carriedItem);
+        this.sendItemStackRequestTransfers(
+                requestId,
+                transferActionType,
+                counts,
+                nativeSources,
+                nativeDestinations);
+
+        sourceContainer.setItem(sourceBedrockSlot, safeCopy(sourceAfter));
+        for (int index = 0; index < destinationAfterItems.size(); index++) {
+            ClickSlot destination = changedSlots.get(index + 1);
+            destination.container.setItem(destination.bedrockSlot, safeCopy(destinationAfterItems.get(index)));
+        }
+        this.bridgeClearPendingCraft();
+        ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                "[BedrockRealmBridge] sent native container quick_move item_stack_request" +
+                        " reason=" + reason +
+                        " requestId=" + requestId +
+                        " moved=" + moved +
+                        " transfers=" + counts.size() +
+                        " action=" + transferActionType +
+                        " source=" + nativeSource.describe());
+        return moved;
+    }
+
+    public int bridgeTrySendNativeDrop(
+            Container sourceContainer,
+            int sourceContainerId,
+            int sourceBedrockSlot,
+            int requestedCount,
+            String reason) {
+        if (sourceContainer == null || sourceBedrockSlot < 0 || sourceBedrockSlot >= sourceContainer.size()) return 0;
+        BedrockItem sourceBefore = safeCopy(sourceContainer.getItem(sourceBedrockSlot));
+        if (isEmpty(sourceBefore) || requestedCount <= 0) return 0;
+
+        int count = Math.min(Math.min(requestedCount, sourceBefore.amount()), 64);
+        if (count <= 0) return 0;
+        ClickSlot sourceClickSlot = new ClickSlot(sourceContainer, sourceContainerId, sourceBedrockSlot);
+        BridgeNativeStackSlot nativeSource = bridgeStackSlotFromClickSlot(sourceClickSlot, sourceBefore);
+        if (!bridgeCanUseStackRequestSource(ItemStackRequestActionType.Drop, nativeSource)) return 0;
+
+        BedrockItem sourceAfter = sourceBefore.copy();
+        sourceAfter.setAmount(sourceBefore.amount() - count);
+        if (sourceAfter.amount() <= 0) sourceAfter = BedrockItem.empty();
+
+        int requestId = this.nextItemStackRequestId();
+        if (!isEmpty(sourceAfter)) sourceAfter.setNetId(Integer.valueOf(requestId));
+        this.bridgeRememberPendingNativeRequest(
+                requestId,
+                List.of(sourceClickSlot),
+                List.of(sourceAfter),
+                this.carriedItem,
+                this.carriedItem);
+        this.sendItemStackRequestDrop(requestId, count, nativeSource);
+        sourceContainer.setItem(sourceBedrockSlot, safeCopy(sourceAfter));
+        this.bridgeClearPendingCraft();
+        ViaBedrock.getPlatform().getLogger().log(Level.INFO,
+                "[BedrockRealmBridge] sent native drop item_stack_request" +
+                        " reason=" + reason +
+                        " requestId=" + requestId +
+                        " count=" + count +
+                        " source=" + nativeSource.describe());
+        return count;
     }
 
     private static boolean bridgeIsCraftingInputSlot(ClickSlot slot) {
@@ -1935,14 +2133,15 @@ public class InventoryContainer extends Container {
     }
 
     private static BridgeNativeStackSlot bridgeStackSlotFromClickSlot(ClickSlot clickSlot, BedrockItem item) {
-        if (clickSlot != null && clickSlot.container != null &&
-                clickSlot.container.type() == ContainerType.CONTAINER && clickSlot.bedrockSlot >= 0) {
+        if (clickSlot != null && clickSlot.container != null && clickSlot.bedrockSlot >= 0) {
+            ContainerEnumName containerName = clickSlot.container.bridgeNativeStackRequestContainerName(clickSlot.bedrockSlot);
+            if (containerName == null) return BridgeNativeStackSlot.fromClickSlot(clickSlot, item);
             int stackId = isEmpty(item)
                     ? 0
                     : clickSlot.container.bridgeAuthoritativeStackId(clickSlot.bedrockSlot);
             return new BridgeNativeStackSlot(
-                    clickSlot.container.bridgeNativeStackRequestContainerName(),
-                    clickSlot.bedrockSlot,
+                    containerName,
+                    clickSlot.container.bridgeNativeStackRequestSlot(clickSlot.bedrockSlot),
                     stackId);
         }
         return BridgeNativeStackSlot.fromClickSlot(clickSlot, item);
@@ -2044,6 +2243,20 @@ public class InventoryContainer extends Container {
         wrapper.sendToServer(BedrockProtocol.class);
     }
 
+    private void sendItemStackRequestDrop(int requestId, int count, BridgeNativeStackSlot source) {
+        PacketWrapper wrapper = PacketWrapper.create(ServerboundBedrockPackets.ITEM_STACK_REQUEST, this.user);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
+        wrapper.write(BedrockTypes.VAR_INT, requestId);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
+        this.writeItemStackRequestActionType(wrapper, ItemStackRequestActionType.Drop);
+        wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(64, count)));
+        this.writeStackRequestSlot(wrapper, source);
+        wrapper.write(Types.BOOLEAN, false);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0);
+        wrapper.write(BedrockTypes.INT_LE, -1);
+        wrapper.sendToServer(BedrockProtocol.class);
+    }
+
     private void sendBatchedItemStackRequestMoves(
             List<Integer> requestIds,
             List<ItemStackRequestActionType> actionTypes,
@@ -2081,6 +2294,30 @@ public class InventoryContainer extends Container {
             wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, counts.get(index).intValue())));
             this.writeStackRequestSlot(wrapper, sources.get(index));
             this.writeStackRequestSlot(wrapper, destination);
+        }
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0);
+        wrapper.write(BedrockTypes.INT_LE, -1);
+        wrapper.sendToServer(BedrockProtocol.class);
+    }
+
+    private void sendItemStackRequestTransfers(
+            int requestId,
+            ItemStackRequestActionType actionType,
+            List<Integer> counts,
+            List<BridgeNativeStackSlot> sources,
+            List<BridgeNativeStackSlot> destinations) {
+        if (counts.size() != sources.size() || counts.size() != destinations.size() || counts.isEmpty()) {
+            throw new IllegalArgumentException("mismatched native transfer actions");
+        }
+        PacketWrapper wrapper = PacketWrapper.create(ServerboundBedrockPackets.ITEM_STACK_REQUEST, this.user);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 1);
+        wrapper.write(BedrockTypes.VAR_INT, requestId);
+        wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, counts.size());
+        for (int index = 0; index < counts.size(); index++) {
+            this.writeItemStackRequestActionType(wrapper, actionType);
+            wrapper.write(Types.BYTE, (byte) Math.max(1, Math.min(255, counts.get(index).intValue())));
+            this.writeStackRequestSlot(wrapper, sources.get(index));
+            this.writeStackRequestSlot(wrapper, destinations.get(index));
         }
         wrapper.write(BedrockTypes.UNSIGNED_VAR_INT, 0);
         wrapper.write(BedrockTypes.INT_LE, -1);
@@ -2261,7 +2498,12 @@ public class InventoryContainer extends Container {
             }
 
             if (changedSlots > 0 || rolledBackRequests > 0) {
-                this.publishJavaInventorySnapshot("native_item_stack_response");
+                Container visibleContainer = this.user.get(InventoryTracker.class).getCurrentContainer();
+                if (visibleContainer != null && !(visibleContainer instanceof InventoryContainer)) {
+                    visibleContainer.bridgePublishJavaContainerSnapshot(this, "native_item_stack_response");
+                } else {
+                    this.publishJavaInventorySnapshot("native_item_stack_response");
+                }
             }
             ViaBedrock.getPlatform().getLogger().log(Level.INFO,
                     "[BedrockRealmBridge] applied native item_stack_response" +
@@ -2318,7 +2560,12 @@ public class InventoryContainer extends Container {
         } else if (name == ContainerEnumName.LevelEntityContainer ||
                 name == ContainerEnumName.BarrelContainer ||
                 name == ContainerEnumName.ShulkerBoxContainer ||
-                name == ContainerEnumName.CrafterLevelEntityContainer) {
+                name == ContainerEnumName.CrafterLevelEntityContainer ||
+                name == ContainerEnumName.FurnaceIngredientContainer ||
+                name == ContainerEnumName.FurnaceFuelContainer ||
+                name == ContainerEnumName.FurnaceResultContainer ||
+                name == ContainerEnumName.BlastFurnaceIngredientContainer ||
+                name == ContainerEnumName.SmokerIngredientContainer) {
             target = tracker.getCurrentContainer();
         }
 
@@ -2367,7 +2614,7 @@ public class InventoryContainer extends Container {
                     clickSlot.bedrockSlot >= clickSlot.container.size()) continue;
 
             BedrockItem before = safeCopy(clickSlot.container.getItem(clickSlot.bedrockSlot));
-            if (clickSlot.container.type() == ContainerType.CONTAINER && !isEmpty(before)) {
+            if (clickSlot.container.bridgeNativeStackRequestContainerName(clickSlot.bedrockSlot) != null && !isEmpty(before)) {
                 int authoritativeStackId = clickSlot.container.bridgeAuthoritativeStackId(clickSlot.bedrockSlot);
                 if (authoritativeStackId != 0) before.setNetId(Integer.valueOf(authoritativeStackId));
             }
@@ -2934,11 +3181,11 @@ public class InventoryContainer extends Container {
         return "unsupported";
     }
 
-    private static boolean isEmpty(BedrockItem item) {
+    protected static boolean isEmpty(BedrockItem item) {
         return item == null || item.isEmpty();
     }
 
-    private static BedrockItem safeCopy(BedrockItem item) {
+    protected static BedrockItem safeCopy(BedrockItem item) {
         return item == null ? BedrockItem.empty() : item.copy();
     }
 
@@ -2976,16 +3223,16 @@ public class InventoryContainer extends Container {
         return out;
     }
 
-    private static boolean canStack(BedrockItem a, BedrockItem b) {
+    protected static boolean canStack(BedrockItem a, BedrockItem b) {
         if (isEmpty(a) || isEmpty(b)) return false;
         return !a.isDifferent(b);
     }
 
-    private static int amountOrZero(BedrockItem item) {
+    protected static int amountOrZero(BedrockItem item) {
         return isEmpty(item) ? 0 : Math.max(0, item.amount());
     }
 
-    private static int bridgeMaxStackSize(BedrockItem item) {
+    protected static int bridgeMaxStackSize(BedrockItem item) {
         return 64;
     }
 
@@ -3156,7 +3403,7 @@ public class InventoryContainer extends Container {
             return null;
         }
 
-        boolean matches(InventoryContainer owner, BedrockItem item) {
+        public boolean matches(InventoryContainer owner, BedrockItem item) {
             if (isEmpty(item)) return false;
             if ("any_of".equals(this.kind)) {
                 if (this.anyOf == null) return false;

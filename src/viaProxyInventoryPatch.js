@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.3.120-viaproxy-3.4.13-movement-crafting-light-fix'
+const PATCH_ID = 'v0.4.0-viaproxy-3.4.13-furnace-family'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/rewriter/BlockStateRewriter.class',
   'net/raphimc/viabedrock/protocol/packet/JoinPackets.class',
@@ -48,7 +48,10 @@ const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/storage/BedrockBlockStateCompatibility.class',
   'net/raphimc/viabedrock/protocol/storage/BridgeBlockRendering.class',
   'net/raphimc/viabedrock/protocol/storage/BridgeBlockRenderingData.class',
+  'net/raphimc/viabedrock/api/model/container/BridgeFurnaceFuelData.class',
   'net/raphimc/viabedrock/api/model/container/Container.class',
+  'net/raphimc/viabedrock/api/model/container/FurnaceContainer.class',
+  'net/raphimc/viabedrock/api/model/container/FurnaceContainer$1.class',
   'net/raphimc/viabedrock/api/model/container/player/InventoryContainer.class',
   'net/raphimc/viabedrock/api/model/container/player/InventoryContainer$ClickSlot.class',
   'net/raphimc/viabedrock/api/model/container/player/InventoryContainer$BridgePendingNativeRequest.class',
@@ -73,7 +76,9 @@ const PATCH_SOURCE_RELATIVE_PATHS = [
   'ChunkTrackerTickTask.java',
   'ClientPlayerEntity.java',
   'ClientPlayerPackets.java',
+  'BridgeFurnaceFuelData.java',
   'Container.java',
+  'FurnaceContainer.java',
   'EntityTracker.java',
   'EntityPackets.java',
   'InventoryContainer.java',

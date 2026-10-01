@@ -16,6 +16,7 @@ import java.util.logging.Level;
 import net.lenni0451.mcstructs_bedrock.forms.Form;
 import net.raphimc.viabedrock.ViaBedrock;
 import net.raphimc.viabedrock.api.model.container.Container;
+import net.raphimc.viabedrock.api.model.container.FurnaceContainer;
 import net.raphimc.viabedrock.api.model.container.dynamic.BundleContainer;
 import net.raphimc.viabedrock.api.model.container.player.ArmorContainer;
 import net.raphimc.viabedrock.api.model.container.player.HudContainer;
@@ -46,6 +47,7 @@ public class InventoryTracker extends StoredObject {
     private final ArmorContainer armorContainer;
     private final HudContainer hudContainer;
     private final Map<FullContainerName, BundleContainer> dynamicContainerRegistry;
+    private final Map<Byte, int[]> bridgePendingFurnaceProperties;
     private Container currentContainer;
     private Container pendingCloseContainer;
     private IntObjectPair<Form> currentForm;
@@ -74,6 +76,7 @@ public class InventoryTracker extends StoredObject {
         this.armorContainer = new ArmorContainer(this.user());
         this.hudContainer = new HudContainer(this.user());
         this.dynamicContainerRegistry = new HashMap<>();
+        this.bridgePendingFurnaceProperties = new HashMap<>();
         this.currentContainer = null;
         this.pendingCloseContainer = null;
         this.currentForm = null;
@@ -248,7 +251,10 @@ public class InventoryTracker extends StoredObject {
         }
         if (sendBedrockClose && this.currentContainer != null) {
             this.bridgeExpectChestBlockEvent(this.currentContainer, false);
-            PacketFactory.sendBedrockContainerClose(this.user(), this.currentContainer.containerId(), ContainerType.NONE);
+            PacketFactory.sendBedrockContainerClose(
+                    this.user(),
+                    this.currentContainer.containerId(),
+                    this.currentContainer.bridgeBedrockCloseType());
         }
         this.currentContainer = null;
         this.pendingCloseContainer = null;
@@ -326,10 +332,46 @@ public class InventoryTracker extends StoredObject {
         }
         this.bridgeChestViewerCount = 0;
         this.currentContainer = container;
+        if (container instanceof FurnaceContainer furnace) {
+            int[] pendingProperties = this.bridgePendingFurnaceProperties.remove(Byte.valueOf(container.containerId()));
+            if (pendingProperties != null) {
+                for (int property = 0; property < pendingProperties.length; property++) {
+                    if (pendingProperties[property] != Integer.MIN_VALUE) {
+                        furnace.bridgeApplyBedrockProperty(property, pendingProperties[property], false);
+                    }
+                }
+            }
+        } else if (container != null) {
+            this.bridgePendingFurnaceProperties.remove(Byte.valueOf(container.containerId()));
+        }
         this.bridgeOpenedExternalContainerPosition = container == null ? null : container.position();
         this.bridgeOpenedExternalContainerType = container == null ? null : container.type();
         this.bridgeOpenedExternalContainerChest = container != null && container.bridgeIsChestStorage();
         this.bridgeExpectChestBlockEvent(container, true);
+    }
+
+    public void bridgeHandleContainerSetData(byte containerId, int property, int value) {
+        if (property < 0 || property > 4) return;
+        if (this.currentContainer instanceof FurnaceContainer furnace &&
+                this.currentContainer.containerId() == containerId) {
+            furnace.bridgeApplyBedrockProperty(property, value, true);
+            return;
+        }
+
+        if (this.bridgePendingFurnaceProperties.size() >= 32 &&
+                !this.bridgePendingFurnaceProperties.containsKey(Byte.valueOf(containerId))) {
+            this.bridgePendingFurnaceProperties.clear();
+        }
+        int[] properties = this.bridgePendingFurnaceProperties.computeIfAbsent(
+                Byte.valueOf(containerId),
+                ignored -> new int[] {
+                        Integer.MIN_VALUE,
+                        Integer.MIN_VALUE,
+                        Integer.MIN_VALUE,
+                        Integer.MIN_VALUE,
+                        Integer.MIN_VALUE
+                });
+        properties[property] = value;
     }
 
     public Container getPendingCloseContainer() { return this.pendingCloseContainer; }
@@ -795,6 +837,9 @@ public class InventoryTracker extends StoredObject {
         this.markPendingClose(closingContainer);
         PacketFactory.sendJavaContainerClose(this.user(), closingContainer.javaContainerId());
         this.bridgePublishCanonicalInventoryAfterJavaClose(closingContainer);
-        PacketFactory.sendBedrockContainerClose(this.user(), closingContainer.containerId(), ContainerType.NONE);
+        PacketFactory.sendBedrockContainerClose(
+                this.user(),
+                closingContainer.containerId(),
+                closingContainer.bridgeBedrockCloseType());
     }
 }
