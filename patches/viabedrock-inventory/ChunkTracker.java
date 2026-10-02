@@ -101,6 +101,8 @@ public class ChunkTracker extends StoredObject {
     // a burst, so a callback count is not a real timeout.
     private static final long DOOR_INTERACTION_ACK_FALLBACK_NANOS = 5_000_000_000L;
     private static final long BLOCK_PLACEMENT_ACK_FALLBACK_NANOS = 1_000_000_000L;
+    private static final long DOOR_SOUND_ECHO_WINDOW_NANOS = 2_000_000_000L;
+    private static final int MAX_PENDING_DOOR_SOUND_ECHOES = 32;
     private static final Set<String> ALWAYS_INTERACTIVE_BLOCKS = Set.of(
             "anvil", "barrel", "beacon", "bell", "blast_furnace", "brewing_stand", "cartography_table",
             "chest", "chipped_anvil", "crafter", "crafting_table", "damaged_anvil", "daylight_detector", "dispenser",
@@ -154,6 +156,7 @@ public class ChunkTracker extends StoredObject {
     private final Map<BlockPosition, Integer> pendingDoorUpdates = new HashMap<>();
     private final NavigableSet<Integer> readyBlockInteractionAcks = new TreeSet<>();
     private final NavigableMap<Integer, PendingDoorInteractionAck> pendingDoorInteractionAcks = new TreeMap<>();
+    private final Deque<PendingDoorSoundEcho> pendingDoorSoundEchoes = new ArrayDeque<>();
     private final AtomicBoolean chunkTrackerTickQueued = new AtomicBoolean();
 
     private int centerX = 0;
@@ -308,9 +311,11 @@ public class ChunkTracker extends StoredObject {
     }
 
     public void deferDoorInteractionAck(final BlockPosition blockPosition, final int sequence) {
+        final BlockPosition lowerPosition = this.lowerDoorPosition(blockPosition);
         this.readyBlockInteractionAcks.remove(sequence);
+        this.rememberPredictedDoorSound(lowerPosition);
         this.pendingDoorInteractionAcks.put(sequence, new PendingDoorInteractionAck(
-                this.lowerDoorPosition(blockPosition),
+                lowerPosition,
                 null,
                 null,
                 doorInteractionAckDeadlineNanos(System.nanoTime())
@@ -344,6 +349,97 @@ public class ChunkTracker extends StoredObject {
 
     static long blockPlacementAckDeadlineNanos(final long nowNanos) {
         return nowNanos + BLOCK_PLACEMENT_ACK_FALLBACK_NANOS;
+    }
+
+    static long doorSoundEchoDeadlineNanos(final long nowNanos) {
+        return nowNanos + DOOR_SOUND_ECHO_WINDOW_NANOS;
+    }
+
+    static String expectedDoorSoundEvent(final boolean authoritativeOpen, final int javaStateParityFromAuthoritative) {
+        final boolean predictedOpenBeforeClick = authoritativeOpen ^ ((javaStateParityFromAuthoritative & 1) != 0);
+        return predictedOpenBeforeClick ? "door.close" : "door.open";
+    }
+
+    static int pendingDoorPredictionParity(final int unresolvedSameDoorClicks, final int unflushedDoorTransitions) {
+        // The cache already includes queued authoritative transitions, while
+        // Java has not seen them yet. Both those transitions and Java's local
+        // unacknowledged clicks toggle its visible state relative to the cache.
+        return (unresolvedSameDoorClicks + unflushedDoorTransitions) & 1;
+    }
+
+    private void rememberPredictedDoorSound(final BlockPosition lowerPosition) {
+        final BlockState state = this.javaBlockState(this.getRawJavaBlockState(lowerPosition));
+        if (!BridgeBlockRendering.isDoor(state)) return;
+
+        int unresolvedSameDoorClicks = 0;
+        for (PendingDoorInteractionAck pending : this.pendingDoorInteractionAcks.values()) {
+            if (lowerPosition.equals(pending.lowerPosition())) unresolvedSameDoorClicks++;
+        }
+        final int javaStateParityFromAuthoritative = pendingDoorPredictionParity(
+                unresolvedSameDoorClicks,
+                this.pendingDoorUpdates.getOrDefault(lowerPosition, 0)
+        );
+
+        final long nowNanos = System.nanoTime();
+        pruneExpiredDoorSoundEchoes(this.pendingDoorSoundEchoes, nowNanos);
+        while (this.pendingDoorSoundEchoes.size() >= MAX_PENDING_DOOR_SOUND_ECHOES) {
+            this.pendingDoorSoundEchoes.removeFirst();
+        }
+        this.pendingDoorSoundEchoes.addLast(new PendingDoorSoundEcho(
+                lowerPosition,
+                expectedDoorSoundEvent(state.hasProperty("open", "true"), javaStateParityFromAuthoritative),
+                doorSoundEchoDeadlineNanos(nowNanos)
+        ));
+    }
+
+    public boolean consumePredictedDoorSound(final String soundEvent, final Position3f position) {
+        if (position == null || !Float.isFinite(position.x()) || !Float.isFinite(position.y()) || !Float.isFinite(position.z())) {
+            return false;
+        }
+
+        final BlockPosition soundPosition = new BlockPosition(
+                (int) Math.floor(position.x()),
+                (int) Math.floor(position.y()),
+                (int) Math.floor(position.z())
+        );
+        final BlockState state = this.javaBlockState(this.getRawJavaBlockState(soundPosition));
+        if (!BridgeBlockRendering.isDoor(state)) return false;
+        return consumePredictedDoorSound(
+                this.pendingDoorSoundEchoes,
+                soundEvent,
+                this.lowerDoorPosition(soundPosition),
+                System.nanoTime()
+        );
+    }
+
+    static boolean consumePredictedDoorSound(
+            final Deque<PendingDoorSoundEcho> pending,
+            final String soundEvent,
+            final BlockPosition lowerPosition,
+            final long nowNanos
+    ) {
+        if (!"door.open".equals(soundEvent) && !"door.close".equals(soundEvent)) return false;
+
+        final Iterator<PendingDoorSoundEcho> iterator = pending.iterator();
+        while (iterator.hasNext()) {
+            final PendingDoorSoundEcho echo = iterator.next();
+            if (doorInteractionAckDeadlineReached(nowNanos, echo.deadlineNanos())) {
+                iterator.remove();
+                continue;
+            }
+            if (!lowerPosition.equals(echo.lowerPosition())) continue;
+            if (!soundEvent.equals(echo.expectedSoundEvent())) return false;
+            iterator.remove();
+            return true;
+        }
+        return false;
+    }
+
+    private static void pruneExpiredDoorSoundEchoes(
+            final Deque<PendingDoorSoundEcho> pending,
+            final long nowNanos
+    ) {
+        pending.removeIf(echo -> doorInteractionAckDeadlineReached(nowNanos, echo.deadlineNanos()));
     }
 
     static boolean doorInteractionAckDeadlineReached(final long nowNanos, final long deadlineNanos) {
@@ -1703,6 +1799,13 @@ public class ChunkTracker extends StoredObject {
             return !this.isDoorInteraction()
                     && placementResponseMatches(this.clickedPosition, this.placementPosition, position);
         }
+    }
+
+    record PendingDoorSoundEcho(
+            BlockPosition lowerPosition,
+            String expectedSoundEvent,
+            long deadlineNanos
+    ) {
     }
 
     private void syncItemFramesAfterChunkSend(final long chunkKey, final Set<BlockPosition> currentFrames) {
