@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.3 - 2026-10-02
+
+- Placing a block now consumes its matching Realm sound echo, so one placement plays one sound while other players' placements remain audible.
+- Tools, armor, weapons, and other damageable items now carry Bedrock's live damage value into Java and show their durability bar.
+- Java's locally rendered mining particles no longer overlap the matching Realm particle echo for the same block and state.
+- A new launcher window starts at the end of the saved logs instead of slowly replaying the previous session. **View → Open Logs Folder** opens the saved log directory.
+- If background diagnostics cannot finish draining during shutdown, the final JSON trace and run summary are recovered instead of leaving `latest-run.json` stale.
+
 ## 0.4.2 - 2026-10-02
 
 - A locally predicted door click now consumes its matching Realm sound echo, so each open or close plays once while unrelated doors used by other players remain audible.

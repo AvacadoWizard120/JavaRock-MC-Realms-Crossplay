@@ -672,6 +672,17 @@ public class ClientPlayerEntity extends PlayerEntity {
                 );
     }
 
+    static boolean bridgePredictedBlockBreakParticleMatches(final BlockBreakingInfo active,
+                                                             final BlockPosition position, final int bedrockBlockState,
+                                                             final int javaBlockState) {
+        return active != null
+                && bridgeSameBlockPosition(active.position(), position)
+                && bridgePredictedBlockBreakStatesMatch(
+                        active.bedrockBlockState(), active.javaBlockState(),
+                        bedrockBlockState, javaBlockState
+                );
+    }
+
     static void bridgeRememberPredictedBlockBreakCompletion(final Deque<Pair<BlockBreakingInfo, Integer>> pendingCompletions,
                                                             final BlockBreakingInfo blockBreakingInfo, final int currentTick) {
         pendingCompletions.removeIf(entry -> currentTick > entry.value());
@@ -717,6 +728,13 @@ public class ClientPlayerEntity extends PlayerEntity {
         return bridgeConsumePredictedBlockBreakCompletion(
                 this.pendingPredictedBlockBreakCompletions,
                 position, bedrockBlockState, javaBlockState, this.age()
+        );
+    }
+
+    public boolean isPredictedBlockBreakParticleEcho(final BlockPosition position, final int bedrockBlockState,
+                                                      final int javaBlockState) {
+        return bridgePredictedBlockBreakParticleMatches(
+                this.blockBreakingInfo, position, bedrockBlockState, javaBlockState
         );
     }
 

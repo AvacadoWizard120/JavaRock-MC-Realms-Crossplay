@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.4.2-viaproxy-3.4.13-door-sound-echo'
+const PATCH_ID = 'v0.4.3-viaproxy-3.4.13-placement-particles-durability'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/rewriter/BlockStateRewriter.class',
   'net/raphimc/viabedrock/protocol/packet/JoinPackets.class',
@@ -43,6 +43,7 @@ const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$BiomeAggregator.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingDoorInteractionAck.class',
   'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingDoorSoundEcho.class',
+  'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingBlockPlacementSoundEcho.class',
   'net/raphimc/viabedrock/protocol/task/ChunkTrackerTickTask.class',
   'net/raphimc/viabedrock/experimental/ExperimentalFeatures.class',
   'net/raphimc/viabedrock/experimental/ExperimentalFeatures$1.class',

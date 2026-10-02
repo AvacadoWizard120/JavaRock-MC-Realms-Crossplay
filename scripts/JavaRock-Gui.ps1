@@ -512,6 +512,20 @@ function Clear-LogDisplay {
     $Control.SelectionLength = 0
 }
 
+function Open-LogsDirectory {
+    try {
+        [void][IO.Directory]::CreateDirectory($RuntimeDir)
+        Invoke-Item -LiteralPath $RuntimeDir
+    } catch {
+        [void][Windows.Forms.MessageBox]::Show(
+            "JavaRock could not open the logs folder.`r`n`r`n$RuntimeDir`r`n`r`n$($_.Exception.Message)",
+            'Open logs folder failed',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Error
+        )
+    }
+}
+
 function Add-Log {
     param(
         [string]$Source,
@@ -631,9 +645,11 @@ $viewMenu = New-Object System.Windows.Forms.ToolStripMenuItem('View')
 $darkMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Dark mode')
 $darkMenuItem.CheckOnClick = $true
 $darkMenuItem.Checked = $script:DarkMode
+$openLogsFolderMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Open Logs Folder')
 $clearConsoleMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Clear Console Output')
 [void]$viewMenu.DropDownItems.Add($darkMenuItem)
 [void]$viewMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$viewMenu.DropDownItems.Add($openLogsFolderMenuItem)
 [void]$viewMenu.DropDownItems.Add($clearConsoleMenuItem)
 $diagnosticsMenu = New-Object System.Windows.Forms.ToolStripMenuItem('Diagnostics')
 $createSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Create support ZIP...')
@@ -982,7 +998,7 @@ function Set-DarkTheme {
     $menu.ForeColor = $foreground
     $menuRenderer = [JavaRockNativeWindow]::CreateMenuRenderer($Enabled)
     $menu.Renderer = $menuRenderer
-    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $clearConsoleMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $changelogMenuItem, $versionMenuItem)) {
+    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $openLogsFolderMenuItem, $clearConsoleMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $changelogMenuItem, $versionMenuItem)) {
         $menuItem.BackColor = $panel
         $menuItem.ForeColor = $foreground
     }
@@ -2136,12 +2152,13 @@ $logoutButton.Add_Click({ Remove-AccountProfile })
 $logoutMenuItem.Add_Click({ Remove-AccountProfile })
 $refreshButton.Add_Click({ Refresh-Realms })
 $refreshMenuItem.Add_Click({ Refresh-Realms })
+$openLogsFolderMenuItem.Add_Click({ Open-LogsDirectory })
 $clearConsoleMenuItem.Add_Click({ Clear-LogDisplay -Control $logBox })
 $startButton.Add_Click({
     if (Test-BridgeActivity) { Stop-BridgeOrRecorder } else { Start-BridgeOrRecorder }
     Update-PrimaryActionButton
 })
-$logsButton.Add_Click({ Start-Process -FilePath 'explorer.exe' -ArgumentList (Quote-NativeArgument $RuntimeDir) })
+$logsButton.Add_Click({ Open-LogsDirectory })
 $supportButton.Add_Click({ Start-SupportBundle })
 $createSupportMenuItem.Add_Click({ Start-SupportBundle })
 $configureSupportMenuItem.Add_Click({ Set-SupportUploadDestination })
@@ -2186,6 +2203,11 @@ $script:LogSources = @(
     [pscustomobject]@{ Path = $SupportStdoutLog; Key = 'support-out'; Source = 'support' },
     [pscustomobject]@{ Path = $SupportStderrLog; Key = 'support-err'; Source = 'support' }
 )
+# Saved logs remain on disk for support bundles, but a new launcher window
+# should display only output written after that window opened.
+foreach ($entry in $script:LogSources) {
+    Move-LogCursorToEnd -Path $entry.Path -Key $entry.Key
+}
 $timer.Add_Tick({
     foreach ($entry in $script:LogSources) {
         if ($script:SuppressBridgeLogs -and ($entry.Key -eq 'bridge-out' -or $entry.Key -eq 'bridge-err')) {

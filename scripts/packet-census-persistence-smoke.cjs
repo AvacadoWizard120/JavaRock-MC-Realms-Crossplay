@@ -140,6 +140,98 @@ async function main () {
     'fatal worker shutdown must synchronously preserve the final run summary'
   )
 
+  const timeoutFallbackDirectory = temporaryDirectory('packet-census-timeout-fallback-smoke')
+  const timeoutFallbackCensus = new PacketCensus({
+    enabled: true,
+    dir: timeoutFallbackDirectory,
+    runId: 'timeout-fallback',
+    eventMode: 'all',
+    sqliteEnabled: false,
+    bufferFlushMs: 60000,
+    persistenceDrainTimeoutMs: 40
+  })
+  assert.strictEqual(timeoutFallbackCensus.persistence.drain(), true)
+  timeoutFallbackCensus.persistence.maxInFlight = 0
+  timeoutFallbackCensus.record({
+    lane: 'realm_to_bridge',
+    direction: 'realm_to_bridge',
+    source_version: '1.26.50',
+    target_version: '1.26.45',
+    name: 'text',
+    params: { message: 'retained after a nonfatal drain timeout' }
+  })
+  timeoutFallbackCensus.close('timeout_fallback_smoke')
+  const timeoutFallbackEvents = fs.readFileSync(
+    path.join(timeoutFallbackDirectory, 'events-timeout-fallback.jsonl'),
+    'utf8'
+  ).trim().split('\n').map(line => JSON.parse(line))
+  assert.strictEqual(timeoutFallbackEvents.length, 1, 'drain timeout recovery must preserve buffered JSONL events')
+  assert.strictEqual(
+    JSON.parse(fs.readFileSync(path.join(timeoutFallbackDirectory, 'run-summary-timeout-fallback.json'), 'utf8')).event_count,
+    1,
+    'drain timeout recovery must preserve the final run summary'
+  )
+  const timeoutLatestRun = JSON.parse(fs.readFileSync(path.join(timeoutFallbackDirectory, 'latest-run.json'), 'utf8'))
+  assert.strictEqual(timeoutLatestRun.event_count, 1, 'drain timeout recovery must replace the stale latest-run snapshot')
+  assert.strictEqual(timeoutLatestRun.close_reason, 'timeout_fallback_smoke')
+  assert.ok(timeoutLatestRun.ended_at, 'drain timeout recovery must record the run end time')
+
+  const quiescedFallbackDirectory = temporaryDirectory('packet-census-quiesced-fallback-smoke')
+  const quiescedFallbackCensus = new PacketCensus({
+    enabled: true,
+    dir: quiescedFallbackDirectory,
+    runId: 'quiesced-fallback',
+    eventMode: 'all',
+    sqliteEnabled: false,
+    bufferFlushBytes: 1,
+    bufferFlushMs: 60000,
+    persistenceMaxInFlight: 1,
+    persistenceDrainTimeoutMs: 30,
+    persistenceCompletionAckDelayMs: 500
+  })
+  assert.strictEqual(quiescedFallbackCensus.persistence.drain(), true)
+  quiescedFallbackCensus.record({
+    lane: 'realm_to_bridge',
+    direction: 'realm_to_bridge',
+    source_version: '1.26.50',
+    target_version: '1.26.45',
+    name: 'text',
+    context: 'committed_before_ack',
+    params: { message: 'committed before its delayed acknowledgement' }
+  })
+  await waitFor(() => {
+    if (!fs.existsSync(quiescedFallbackCensus.eventsFile)) return false
+    return fs.statSync(quiescedFallbackCensus.eventsFile).size > 0
+  }, 'the worker did not enter the post-append acknowledgement window')
+  assert(
+    Array.from(quiescedFallbackCensus.persistence.inFlight.keys())
+      .some(id => id > Atomics.load(quiescedFallbackCensus.persistence.shared, 0)),
+    'the race smoke must close while a committed append still awaits its completion marker'
+  )
+  quiescedFallbackCensus.record({
+    lane: 'realm_to_bridge',
+    direction: 'realm_to_bridge',
+    source_version: '1.26.50',
+    target_version: '1.26.45',
+    name: 'text',
+    context: 'queued_behind_committed_append',
+    params: { message: 'queued behind the committed append' }
+  })
+  quiescedFallbackCensus.close('quiesced_fallback_smoke')
+  const quiescedEvents = fs.readFileSync(
+    path.join(quiescedFallbackDirectory, 'events-quiesced-fallback.jsonl'),
+    'utf8'
+  ).trim().split('\n').map(line => JSON.parse(line))
+  assert.strictEqual(quiescedEvents.length, 2, 'quiesced recovery must neither duplicate a committed append nor lose its queued tail')
+  assert.deepStrictEqual(
+    quiescedEvents.map(event => event.context),
+    ['committed_before_ack', 'queued_behind_committed_append']
+  )
+  const quiescedLatestRun = JSON.parse(fs.readFileSync(path.join(quiescedFallbackDirectory, 'latest-run.json'), 'utf8'))
+  assert.strictEqual(quiescedLatestRun.event_count, 2)
+  assert.strictEqual(quiescedLatestRun.close_reason, 'quiesced_fallback_smoke')
+  assert.ok(quiescedLatestRun.ended_at)
+
   const saturationDirectory = temporaryDirectory('packet-census-saturation-smoke')
   const saturationQueue = createPacketCensusPersistenceQueue({
     sqliteEnabled: false,
@@ -168,7 +260,7 @@ async function main () {
   saturationQueue.shutdownQueued = true
   await saturationQueue.worker.terminate()
 
-  console.log('[smoke] packet census background persistence passed idle-tail, immutable-snapshot, failure-ack, synchronous-failure ordering, fatal-worker recovery, nonblocking-capacity, and bounded-drain checks')
+  console.log('[smoke] packet census background persistence passed idle-tail, immutable-snapshot, failure-ack, synchronous-failure ordering, fatal-worker recovery, quiesced timeout recovery, nonblocking-capacity, and bounded-drain checks')
 }
 
 main().catch(error => {

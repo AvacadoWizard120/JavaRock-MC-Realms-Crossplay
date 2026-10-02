@@ -1066,7 +1066,8 @@ class PacketCensus {
         maxInFlight: options.persistenceMaxInFlight,
         maxQueuedBytes: options.persistenceMaxQueuedBytes,
         maxAppendBatchBytes: options.persistenceMaxAppendBatchBytes,
-        drainTimeoutMs: options.persistenceDrainTimeoutMs
+        drainTimeoutMs: options.persistenceDrainTimeoutMs,
+        completionAckDelayMs: options.persistenceCompletionAckDelayMs
       })
       if (!this.persistence.available) {
         this.enabled = false
@@ -1677,7 +1678,13 @@ class PacketCensus {
     this.persistence?.drain()
     this.withSqlite('recordRunClose', this.db.runs[this.runId])
     const persisted = this.persistence?.close()
-    const recovered = persisted === false && this.persistence?.fatalTaskId?.() > 0
+    // A bounded drain timeout is just as capable of stranding the final JSONL
+    // buffers and run snapshots as a fatal worker task. Recover only after the
+    // queue reaches its cooperative task boundary: committed append callbacks
+    // have then settled successfully and only the unprocessed tail is retried.
+    // SQLite may remain partial, but support bundles must not inherit a stale
+    // latest-run.json or lose the readable JSON tail.
+    const recovered = persisted === false && this.persistence?.canRecoverSynchronously?.()
       ? this.persistFatalWorkerFallback(finalSummary)
       : false
     const persistenceState = persisted === false

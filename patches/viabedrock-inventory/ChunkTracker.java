@@ -102,7 +102,9 @@ public class ChunkTracker extends StoredObject {
     private static final long DOOR_INTERACTION_ACK_FALLBACK_NANOS = 5_000_000_000L;
     private static final long BLOCK_PLACEMENT_ACK_FALLBACK_NANOS = 1_000_000_000L;
     private static final long DOOR_SOUND_ECHO_WINDOW_NANOS = 2_000_000_000L;
+    private static final long BLOCK_PLACEMENT_SOUND_ECHO_WINDOW_NANOS = 2_000_000_000L;
     private static final int MAX_PENDING_DOOR_SOUND_ECHOES = 32;
+    private static final int MAX_PENDING_BLOCK_PLACEMENT_SOUND_ECHOES = 64;
     private static final Set<String> ALWAYS_INTERACTIVE_BLOCKS = Set.of(
             "anvil", "barrel", "beacon", "bell", "blast_furnace", "brewing_stand", "cartography_table",
             "chest", "chipped_anvil", "crafter", "crafting_table", "damaged_anvil", "daylight_detector", "dispenser",
@@ -157,6 +159,7 @@ public class ChunkTracker extends StoredObject {
     private final NavigableSet<Integer> readyBlockInteractionAcks = new TreeSet<>();
     private final NavigableMap<Integer, PendingDoorInteractionAck> pendingDoorInteractionAcks = new TreeMap<>();
     private final Deque<PendingDoorSoundEcho> pendingDoorSoundEchoes = new ArrayDeque<>();
+    private final Deque<PendingBlockPlacementSoundEcho> pendingBlockPlacementSoundEchoes = new ArrayDeque<>();
     private final AtomicBoolean chunkTrackerTickQueued = new AtomicBoolean();
 
     private int centerX = 0;
@@ -331,6 +334,7 @@ public class ChunkTracker extends StoredObject {
             final int sequence
     ) {
         this.readyBlockInteractionAcks.remove(sequence);
+        this.rememberPredictedBlockPlacementSound(clickedPosition, placementPosition);
         this.pendingDoorInteractionAcks.put(sequence, new PendingDoorInteractionAck(
                 null,
                 clickedPosition,
@@ -353,6 +357,10 @@ public class ChunkTracker extends StoredObject {
 
     static long doorSoundEchoDeadlineNanos(final long nowNanos) {
         return nowNanos + DOOR_SOUND_ECHO_WINDOW_NANOS;
+    }
+
+    static long blockPlacementSoundEchoDeadlineNanos(final long nowNanos) {
+        return nowNanos + BLOCK_PLACEMENT_SOUND_ECHO_WINDOW_NANOS;
     }
 
     static String expectedDoorSoundEvent(final boolean authoritativeOpen, final int javaStateParityFromAuthoritative) {
@@ -437,6 +445,68 @@ public class ChunkTracker extends StoredObject {
 
     private static void pruneExpiredDoorSoundEchoes(
             final Deque<PendingDoorSoundEcho> pending,
+            final long nowNanos
+    ) {
+        pending.removeIf(echo -> doorInteractionAckDeadlineReached(nowNanos, echo.deadlineNanos()));
+    }
+
+    private void rememberPredictedBlockPlacementSound(
+            final BlockPosition clickedPosition,
+            final BlockPosition placementPosition
+    ) {
+        final long nowNanos = System.nanoTime();
+        pruneExpiredBlockPlacementSoundEchoes(this.pendingBlockPlacementSoundEchoes, nowNanos);
+        while (this.pendingBlockPlacementSoundEchoes.size() >= MAX_PENDING_BLOCK_PLACEMENT_SOUND_ECHOES) {
+            this.pendingBlockPlacementSoundEchoes.removeFirst();
+        }
+        this.pendingBlockPlacementSoundEchoes.addLast(new PendingBlockPlacementSoundEcho(
+                clickedPosition,
+                placementPosition,
+                blockPlacementSoundEchoDeadlineNanos(nowNanos)
+        ));
+    }
+
+    public boolean consumePredictedBlockPlacementSound(final String soundEvent, final Position3f position) {
+        if (position == null || !Float.isFinite(position.x()) || !Float.isFinite(position.y()) || !Float.isFinite(position.z())) {
+            return false;
+        }
+
+        return consumePredictedBlockPlacementSound(
+                this.pendingBlockPlacementSoundEchoes,
+                soundEvent,
+                new BlockPosition(
+                        (int) Math.floor(position.x()),
+                        (int) Math.floor(position.y()),
+                        (int) Math.floor(position.z())
+                ),
+                System.nanoTime()
+        );
+    }
+
+    static boolean consumePredictedBlockPlacementSound(
+            final Deque<PendingBlockPlacementSoundEcho> pending,
+            final String soundEvent,
+            final BlockPosition soundPosition,
+            final long nowNanos
+    ) {
+        if (!"place".equals(soundEvent)) return false;
+
+        final Iterator<PendingBlockPlacementSoundEcho> iterator = pending.iterator();
+        while (iterator.hasNext()) {
+            final PendingBlockPlacementSoundEcho echo = iterator.next();
+            if (doorInteractionAckDeadlineReached(nowNanos, echo.deadlineNanos())) {
+                iterator.remove();
+                continue;
+            }
+            if (!placementResponseMatches(echo.clickedPosition(), echo.placementPosition(), soundPosition)) continue;
+            iterator.remove();
+            return true;
+        }
+        return false;
+    }
+
+    private static void pruneExpiredBlockPlacementSoundEchoes(
+            final Deque<PendingBlockPlacementSoundEcho> pending,
             final long nowNanos
     ) {
         pending.removeIf(echo -> doorInteractionAckDeadlineReached(nowNanos, echo.deadlineNanos()));
@@ -1804,6 +1874,13 @@ public class ChunkTracker extends StoredObject {
     record PendingDoorSoundEcho(
             BlockPosition lowerPosition,
             String expectedSoundEvent,
+            long deadlineNanos
+    ) {
+    }
+
+    record PendingBlockPlacementSoundEcho(
+            BlockPosition clickedPosition,
+            BlockPosition placementPosition,
             long deadlineNanos
     ) {
     }

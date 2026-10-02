@@ -1,7 +1,9 @@
 package net.raphimc.viabedrock.api.model.container;
 
+import com.viaversion.nbt.tag.NumberTag;
 import com.viaversion.viaversion.api.connection.UserConnection;
 import com.viaversion.viaversion.api.minecraft.BlockPosition;
+import com.viaversion.viaversion.api.minecraft.data.StructuredDataKey;
 import com.viaversion.viaversion.api.minecraft.item.Item;
 import com.viaversion.viaversion.api.minecraft.item.StructuredItem;
 import com.viaversion.viaversion.api.protocol.packet.PacketWrapper;
@@ -157,11 +159,28 @@ public abstract class Container {
     }
 
     public Item getJavaItem(int slot) {
-        return this.user.get(ItemRewriter.class).javaItem(this.getItem(slot));
+        final BedrockItem bedrockItem = this.getItem(slot);
+        return bridgeApplyDamageComponent(bedrockItem, this.user.get(ItemRewriter.class).javaItem(bedrockItem));
     }
 
     public Item[] getJavaItems() {
-        return this.user.get(ItemRewriter.class).javaItems(this.items);
+        final Item[] javaItems = new Item[this.items.length];
+        final ItemRewriter itemRewriter = this.user.get(ItemRewriter.class);
+        for (int slot = 0; slot < this.items.length; slot++) {
+            final BedrockItem bedrockItem = this.items[slot];
+            javaItems[slot] = bridgeApplyDamageComponent(bedrockItem, itemRewriter.javaItem(bedrockItem));
+        }
+        return javaItems;
+    }
+
+    static Item bridgeApplyDamageComponent(final BedrockItem bedrockItem, final Item javaItem) {
+        if (bedrockItem.tag() != null && bedrockItem.tag().get("Damage") instanceof NumberTag damage) {
+            // Damage is standard Bedrock item data, not an experimental custom
+            // item feature. Java needs the component on every damageable stack
+            // to render its durability bar and update it as the Realm wears it.
+            javaItem.dataContainer().set(StructuredDataKey.DAMAGE, Math.max(0, damage.asInt()));
+        }
+        return javaItem;
     }
 
     public BedrockItem getItem(int slot) {
