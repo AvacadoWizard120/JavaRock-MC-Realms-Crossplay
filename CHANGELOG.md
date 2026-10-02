@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 - 2026-10-02
+
+- A locally predicted door click now consumes its matching Realm sound echo, so each open or close plays once while unrelated doors used by other players remain audible.
+
 ## 0.4.1 - 2026-10-02
 
 - Furnace output shift-click now publishes one coherent inventory update instead of duplicate per-slot correction waves.

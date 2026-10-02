@@ -945,6 +945,9 @@ function assertDeferredDoorInteractionAck () {
   for (const marker of [
     'private static final long DOOR_INTERACTION_ACK_FALLBACK_NANOS = 5_000_000_000L',
     'private static final long BLOCK_PLACEMENT_ACK_FALLBACK_NANOS = 1_000_000_000L',
+    'private static final long DOOR_SOUND_ECHO_WINDOW_NANOS = 2_000_000_000L',
+    'private static final int MAX_PENDING_DOOR_SOUND_ECHOES = 32',
+    'private final Deque<PendingDoorSoundEcho> pendingDoorSoundEchoes',
     'public boolean shouldDeferDoorInteractionAck(final BlockPosition blockPosition)',
     'public boolean shouldPredictBlockPlacement(final BlockPosition blockPosition, final boolean secondaryUseActive)',
     'static boolean isAlwaysInteractiveBlockIdentifier(final String identifier)',
@@ -953,6 +956,12 @@ function assertDeferredDoorInteractionAck () {
     'public void deferBlockPlacementAck(',
     'static long doorInteractionAckDeadlineNanos(final long nowNanos)',
     'static long blockPlacementAckDeadlineNanos(final long nowNanos)',
+    'static long doorSoundEchoDeadlineNanos(final long nowNanos)',
+    'static String expectedDoorSoundEvent(final boolean authoritativeOpen, final int javaStateParityFromAuthoritative)',
+    'static int pendingDoorPredictionParity(final int unresolvedSameDoorClicks, final int unflushedDoorTransitions)',
+    'private void rememberPredictedDoorSound(final BlockPosition lowerPosition)',
+    'public boolean consumePredictedDoorSound(final String soundEvent, final Position3f position)',
+    'static boolean consumePredictedDoorSound(',
     'static boolean doorInteractionAckDeadlineReached(final long nowNanos, final long deadlineNanos)',
     'static boolean tryAcquireChunkTrackerTick(final AtomicBoolean gate)',
     'static void releaseChunkTrackerTick(final AtomicBoolean gate)',
@@ -969,6 +978,26 @@ function assertDeferredDoorInteractionAck () {
     'return readySequences.lower(deferredSequences.first())'
   ]) {
     if (!chunkSource.includes(marker)) throw new Error(`ChunkTracker is missing deferred-door marker: ${marker}`)
+  }
+  const deferDoorStart = chunkSource.indexOf('public void deferDoorInteractionAck(final BlockPosition blockPosition, final int sequence)')
+  const deferDoorEnd = chunkSource.indexOf('public void deferBlockPlacementAck(', deferDoorStart)
+  const deferDoor = chunkSource.slice(deferDoorStart, deferDoorEnd)
+  const rememberDoorSound = deferDoor.indexOf('this.rememberPredictedDoorSound(lowerPosition)')
+  const storeDoorAck = deferDoor.indexOf('this.pendingDoorInteractionAcks.put(sequence')
+  if (rememberDoorSound < 0 || storeDoorAck < rememberDoorSound) {
+    throw new Error('door sound prediction must be remembered before the current door acknowledgement changes rapid-click parity')
+  }
+
+  const worldEffectSource = fs.readFileSync(path.join(patchRoot, 'WorldEffectPackets.java'), 'utf8')
+  const soundHandlerStart = worldEffectSource.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.LEVEL_SOUND_EVENT')
+  const soundHandlerEnd = worldEffectSource.indexOf('protocol.registerClientbound(', soundHandlerStart + 1)
+  const soundHandler = worldEffectSource.slice(soundHandlerStart, soundHandlerEnd < 0 ? undefined : soundHandlerEnd)
+  const finalFieldRead = soundHandler.indexOf('wrapper.read(BedrockTypes.OPTIONAL_POSITION_3F)')
+  const consumeDoorSound = soundHandler.indexOf('consumePredictedDoorSound(soundEvent, position)')
+  const genericSoundMapping = soundHandler.indexOf('tryFindSound(wrapper.user(), soundEvent')
+  if (finalFieldRead < 0 || consumeDoorSound < finalFieldRead || genericSoundMapping < consumeDoorSound ||
+      !soundHandler.slice(consumeDoorSound, genericSoundMapping).includes('wrapper.cancel()')) {
+    throw new Error('predicted door sound echoes must be consumed after the Bedrock packet is fully read and before generic sound mapping')
   }
   for (const removed of [
     'DOOR_INTERACTION_ACK_FALLBACK_TICKS',
@@ -1059,10 +1088,11 @@ function assertDeferredDoorInteractionAck () {
   const tickTaskSourceName = 'ChunkTrackerTickTask.java'
   const tickTaskClassName = 'net/raphimc/viabedrock/protocol/task/ChunkTrackerTickTask.class'
   const pendingAckClassName = 'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingDoorInteractionAck.class'
+  const pendingSoundClassName = 'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingDoorSoundEcho.class'
   if (!PATCH_SOURCE_RELATIVE_PATHS.includes(tickTaskSourceName)) {
     throw new Error('ChunkTrackerTickTask.java is not registered in the ViaProxy patch source set')
   }
-  for (const className of [tickTaskClassName, pendingAckClassName]) {
+  for (const className of [tickTaskClassName, pendingAckClassName, pendingSoundClassName]) {
     if (!CLASS_RELATIVE_PATHS.includes(className)) throw new Error(`door/tick patch class is not registered: ${className}`)
   }
   const tickTaskSource = fs.readFileSync(path.join(patchRoot, tickTaskSourceName), 'utf8')
@@ -1100,6 +1130,8 @@ function assertDeferredDoorInteractionAck () {
 package net.raphimc.viabedrock.protocol.storage;
 
 import com.viaversion.viaversion.api.minecraft.BlockPosition;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 import java.util.NavigableMap;
 import java.util.NavigableSet;
@@ -1205,6 +1237,57 @@ public final class DoorAckOrderSmoke {
         check(!ChunkTracker.isAlwaysInteractiveBlockIdentifier("composter"),
                 "composters remain item-consumption-capable");
 
+        check("door.open".equals(ChunkTracker.expectedDoorSoundEvent(false, 0)),
+                "a closed authoritative door predicts one open sound");
+        check("door.close".equals(ChunkTracker.expectedDoorSoundEvent(true, 0)),
+                "an open authoritative door predicts one close sound");
+        check("door.close".equals(ChunkTracker.expectedDoorSoundEvent(false, 1)),
+                "a second rapid click alternates after a pending predicted open");
+        check("door.open".equals(ChunkTracker.expectedDoorSoundEvent(true, 1)),
+                "a second rapid click alternates after a pending predicted close");
+        check("door.open".equals(ChunkTracker.expectedDoorSoundEvent(false, 2)),
+                "two unresolved clicks return the next prediction to authoritative parity");
+        check(ChunkTracker.pendingDoorPredictionParity(1, 1) == 0,
+                "one predicted click and one unflushed transition leave Java at authoritative parity");
+        check(ChunkTracker.pendingDoorPredictionParity(0, 1) == 1,
+                "an unflushed remote transition leaves Java one toggle behind the authoritative cache");
+        check(ChunkTracker.pendingDoorPredictionParity(1, 2) == 1,
+                "two unflushed transitions plus one predicted click retain odd parity");
+        check(ChunkTracker.pendingDoorPredictionParity(2, 1) == 1,
+                "one unflushed transition plus two predicted clicks retain odd parity");
+        check("door.open".equals(ChunkTracker.expectedDoorSoundEvent(
+                        true, ChunkTracker.pendingDoorPredictionParity(0, 1))),
+                "a remote open still queued for Java means Java predicts an open from its visible closed state");
+
+        final long soundStart = 2_000_000L;
+        final long soundDeadline = ChunkTracker.doorSoundEchoDeadlineNanos(soundStart);
+        check(soundDeadline - soundStart == 2_000_000_000L,
+                "door sound echo suppression uses a two-second monotonic deadline");
+        final BlockPosition firstDoor = new BlockPosition(20, 64, 20);
+        final BlockPosition otherDoor = new BlockPosition(21, 64, 20);
+        final Deque<ChunkTracker.PendingDoorSoundEcho> soundEchoes = new ArrayDeque<>();
+        soundEchoes.addLast(new ChunkTracker.PendingDoorSoundEcho(firstDoor, "door.open", soundDeadline));
+        soundEchoes.addLast(new ChunkTracker.PendingDoorSoundEcho(firstDoor, "door.close", soundDeadline));
+        check(!ChunkTracker.consumePredictedDoorSound(soundEchoes, "door.close", firstDoor, soundStart + 1L),
+                "an out-of-order direction cannot skip the oldest prediction for the same door");
+        check(soundEchoes.size() == 2,
+                "an out-of-order direction leaves both rapid-click predictions intact");
+        check(!ChunkTracker.consumePredictedDoorSound(soundEchoes, "door.open", otherDoor, soundStart + 1L),
+                "another door remains audible and cannot consume a local prediction");
+        check(!ChunkTracker.consumePredictedDoorSound(soundEchoes, "button.click", firstDoor, soundStart + 1L),
+                "a non-door sound cannot consume a door prediction");
+        check(ChunkTracker.consumePredictedDoorSound(soundEchoes, "door.open", firstDoor, soundStart + 1L),
+                "the first rapid-click echo consumes exactly the predicted open");
+        check(!ChunkTracker.consumePredictedDoorSound(soundEchoes, "door.open", firstDoor, soundStart + 1L),
+                "one prediction cannot suppress the same sound twice");
+        check(ChunkTracker.consumePredictedDoorSound(soundEchoes, "door.close", firstDoor, soundStart + 1L),
+                "the second rapid-click echo consumes the following predicted close");
+        check(soundEchoes.isEmpty(), "both rapid-click tokens are consumed exactly once");
+        soundEchoes.addLast(new ChunkTracker.PendingDoorSoundEcho(firstDoor, "door.open", soundDeadline));
+        check(!ChunkTracker.consumePredictedDoorSound(soundEchoes, "door.open", firstDoor, soundDeadline),
+                "an expired prediction cannot hide a later door sound");
+        check(soundEchoes.isEmpty(), "expired door sound predictions are pruned");
+
         final long start = 1_000_000L;
         final long deadline = ChunkTracker.doorInteractionAckDeadlineNanos(start);
         check(deadline - start == 5_000_000_000L, "door fallback uses a five-second monotonic deadline");
@@ -1253,6 +1336,11 @@ public final class DoorAckOrderSmoke {
   for (const marker of [
     'doorInteractionAckDeadlineNanos',
     'blockPlacementAckDeadlineNanos',
+    'doorSoundEchoDeadlineNanos',
+    'expectedDoorSoundEvent',
+    'pendingDoorPredictionParity',
+    'rememberPredictedDoorSound',
+    'consumePredictedDoorSound',
     'doorInteractionAckDeadlineReached',
     'tryAcquireChunkTrackerTick',
     'releaseChunkTrackerTick',
@@ -1263,6 +1351,14 @@ public final class DoorAckOrderSmoke {
     'placementResponseMatches'
   ]) {
     if (!chunkBytecode.includes(marker)) throw new Error(`compiled ChunkTracker.class is missing interaction/tick bytecode: ${marker}`)
+  }
+  const worldEffectBytecode = run('javap', [
+    '-c',
+    '-p',
+    bundledPatchedClassPath('net/raphimc/viabedrock/protocol/packet/WorldEffectPackets.class')
+  ]).stdout
+  if (!worldEffectBytecode.includes('ChunkTracker.consumePredictedDoorSound')) {
+    throw new Error('compiled WorldEffectPackets.class is missing predicted door sound echo suppression')
   }
   const tickTaskBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(tickTaskClassName)]).stdout
   for (const marker of ['tryQueueTick', 'completeQueuedTick', 'ChunkTracker.tick']) {

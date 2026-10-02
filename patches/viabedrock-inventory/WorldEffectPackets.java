@@ -203,6 +203,12 @@ public class WorldEffectPackets {
             wrapper.read(BedrockTypes.LONG_LE); // entity unique id
             wrapper.read(BedrockTypes.OPTIONAL_POSITION_3F); // fire at position
 
+            final ChunkTracker chunkTracker = wrapper.user().get(ChunkTracker.class);
+            if (!isGlobal && chunkTracker != null && chunkTracker.consumePredictedDoorSound(soundEvent, position)) {
+                wrapper.cancel();
+                return;
+            }
+
             final boolean globalSound = isGlobal || Float.isNaN(position.x()) || Float.isNaN(position.y()) || Float.isNaN(position.z());
             SoundDefinitions.ConfiguredSound configuredSound;
             switch (soundEvent) {
