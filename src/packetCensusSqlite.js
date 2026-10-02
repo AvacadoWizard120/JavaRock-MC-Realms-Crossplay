@@ -757,10 +757,11 @@ class PacketCensusPersistenceQueue {
       : 5000
     this.warningShown = false
     // Shared slots: last completed task id, worker error count, fatal-worker
-    // flag, and the task id that caused a fatal worker shutdown. The failed id
-    // lets a synchronous shutdown drain distinguish earlier writes that really
-    // completed from the failed task and the unprocessed tail behind it.
-    this.shared = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 4))
+    // flag, fatal task id, cooperative-stop request, and worker-quiesced ack.
+    // The final two slots let a timed-out shutdown stop at a task boundary
+    // before the main thread retries JSON writes synchronously.
+    this.shared = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 6))
+    this.fallbackRecoveryReady = false
     this.worker = null
 
     try {
@@ -775,7 +776,10 @@ class PacketCensusPersistenceQueue {
             captureProfile: options.captureProfile,
             sourceLabel: options.sourceLabel,
             targetLabel: options.targetLabel
-          }
+          },
+          completionAckDelayMs: Number.isInteger(options.completionAckDelayMs) && options.completionAckDelayMs > 0
+            ? options.completionAckDelayMs
+            : 0
         }
       })
       this.available = true
@@ -1023,6 +1027,45 @@ class PacketCensusPersistenceQueue {
     return Atomics.load(this.shared, 3)
   }
 
+  quiesceForFallback (timeoutMs = Math.max(1000, this.drainTimeoutMs)) {
+    if (!this.worker || Atomics.load(this.shared, 2) !== 0) {
+      this.markUnavailable('Background diagnostics stopped before fallback recovery')
+      return true
+    }
+
+    Atomics.store(this.shared, 5, 0)
+    Atomics.store(this.shared, 4, 1)
+    try {
+      // Wake an idle worker. A task already running observes the same request
+      // after it commits and publishes its completion id.
+      this.worker.postMessage({ type: 'quiesce_for_fallback' })
+    } catch (error) {
+      this.warn(`Could not request a clean diagnostics stop: ${error.stack || error.message || error}`)
+      return false
+    }
+
+    const deadline = Date.now() + Math.max(1, timeoutMs)
+    while (Atomics.load(this.shared, 5) === 0) {
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        this.warn(`Timed out after ${timeoutMs}ms while stopping background diagnostics for recovery`)
+        return false
+      }
+      Atomics.wait(this.shared, 5, 0, Math.min(100, remainingMs))
+    }
+
+    // The worker is now between tasks. Reap the last task it actually committed
+    // before failing callbacks for the unprocessed tail, so append retries can
+    // neither duplicate a committed batch nor omit a queued one.
+    this.reapCompleted()
+    this.markUnavailable('Background diagnostics stopped after an incomplete drain')
+    return true
+  }
+
+  canRecoverSynchronously () {
+    return this.fallbackRecoveryReady
+  }
+
   close () {
     if (this.closed) return this.closeResult !== false
     let clean = !this.drainFailed && this.drain()
@@ -1033,8 +1076,15 @@ class PacketCensusPersistenceQueue {
     }
     this.closed = true
     if (!clean) {
-      this.markUnavailable('Background diagnostics did not shut down cleanly')
-      const termination = this.worker?.terminate()
+      this.fallbackRecoveryReady = this.quiesceForFallback()
+      if (!this.fallbackRecoveryReady) {
+        // An unresponsive in-flight filesystem operation has unknown commit
+        // status. Do not retry it and risk duplicate JSONL or a stale atomic
+        // rename winning after recovery.
+        this.markUnavailable('Background diagnostics could not reach a safe recovery boundary')
+      }
+      const worker = this.worker
+      const termination = worker?.terminate()
       termination?.catch?.(() => {})
     } else {
       this.worker?.unref()
@@ -1062,6 +1112,12 @@ function runPersistenceWorker () {
     // tail after a failed task: the main thread treats it as unpersisted and
     // may restore it for a later retry.
     if (fatalTaskId > 0) return
+    if (Atomics.load(shared, 4) !== 0) {
+      Atomics.store(shared, 5, 1)
+      Atomics.notify(shared, 5)
+      parentPort.close()
+      return
+    }
     let shutdown = false
     let taskError = null
     let taskWarning = null
@@ -1100,6 +1156,11 @@ function runPersistenceWorker () {
         default:
           throw new Error(`Unknown persistence task: ${task.type}`)
       }
+      if (task.type === 'append' && workerData.completionAckDelayMs > 0) {
+        // Internal deterministic race coverage: production leaves this at 0.
+        const completed = Atomics.load(shared, 0)
+        Atomics.wait(shared, 0, completed, workerData.completionAckDelayMs)
+      }
     } catch (error) {
       Atomics.add(shared, 1, 1)
       Atomics.store(shared, 2, 1)
@@ -1110,6 +1171,11 @@ function runPersistenceWorker () {
     } finally {
       Atomics.store(shared, 0, task.id)
       Atomics.notify(shared, 0)
+      if (Atomics.load(shared, 4) !== 0) {
+        Atomics.store(shared, 5, 1)
+        Atomics.notify(shared, 5)
+        shutdown = true
+      }
       // Atomics.notify wakes synchronous drain/backpressure waits, but it does
       // not schedule JavaScript on the main thread. Always send a completion
       // message so an idle queue can reap this task and post its pending tail.

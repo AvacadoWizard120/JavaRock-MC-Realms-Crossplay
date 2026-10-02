@@ -946,8 +946,11 @@ function assertDeferredDoorInteractionAck () {
     'private static final long DOOR_INTERACTION_ACK_FALLBACK_NANOS = 5_000_000_000L',
     'private static final long BLOCK_PLACEMENT_ACK_FALLBACK_NANOS = 1_000_000_000L',
     'private static final long DOOR_SOUND_ECHO_WINDOW_NANOS = 2_000_000_000L',
+    'private static final long BLOCK_PLACEMENT_SOUND_ECHO_WINDOW_NANOS = 2_000_000_000L',
     'private static final int MAX_PENDING_DOOR_SOUND_ECHOES = 32',
+    'private static final int MAX_PENDING_BLOCK_PLACEMENT_SOUND_ECHOES = 64',
     'private final Deque<PendingDoorSoundEcho> pendingDoorSoundEchoes',
+    'private final Deque<PendingBlockPlacementSoundEcho> pendingBlockPlacementSoundEchoes',
     'public boolean shouldDeferDoorInteractionAck(final BlockPosition blockPosition)',
     'public boolean shouldPredictBlockPlacement(final BlockPosition blockPosition, final boolean secondaryUseActive)',
     'static boolean isAlwaysInteractiveBlockIdentifier(final String identifier)',
@@ -957,11 +960,15 @@ function assertDeferredDoorInteractionAck () {
     'static long doorInteractionAckDeadlineNanos(final long nowNanos)',
     'static long blockPlacementAckDeadlineNanos(final long nowNanos)',
     'static long doorSoundEchoDeadlineNanos(final long nowNanos)',
+    'static long blockPlacementSoundEchoDeadlineNanos(final long nowNanos)',
     'static String expectedDoorSoundEvent(final boolean authoritativeOpen, final int javaStateParityFromAuthoritative)',
     'static int pendingDoorPredictionParity(final int unresolvedSameDoorClicks, final int unflushedDoorTransitions)',
     'private void rememberPredictedDoorSound(final BlockPosition lowerPosition)',
     'public boolean consumePredictedDoorSound(final String soundEvent, final Position3f position)',
     'static boolean consumePredictedDoorSound(',
+    'private void rememberPredictedBlockPlacementSound(',
+    'public boolean consumePredictedBlockPlacementSound(final String soundEvent, final Position3f position)',
+    'static boolean consumePredictedBlockPlacementSound(',
     'static boolean doorInteractionAckDeadlineReached(final long nowNanos, final long deadlineNanos)',
     'static boolean tryAcquireChunkTrackerTick(final AtomicBoolean gate)',
     'static void releaseChunkTrackerTick(final AtomicBoolean gate)',
@@ -987,6 +994,14 @@ function assertDeferredDoorInteractionAck () {
   if (rememberDoorSound < 0 || storeDoorAck < rememberDoorSound) {
     throw new Error('door sound prediction must be remembered before the current door acknowledgement changes rapid-click parity')
   }
+  const deferPlacementStart = chunkSource.indexOf('public void deferBlockPlacementAck(')
+  const deferPlacementEnd = chunkSource.indexOf('static long doorInteractionAckDeadlineNanos', deferPlacementStart)
+  const deferPlacement = chunkSource.slice(deferPlacementStart, deferPlacementEnd)
+  const rememberPlacementSound = deferPlacement.indexOf('this.rememberPredictedBlockPlacementSound(clickedPosition, placementPosition)')
+  const storePlacementAck = deferPlacement.indexOf('this.pendingDoorInteractionAcks.put(sequence')
+  if (rememberPlacementSound < 0 || storePlacementAck < rememberPlacementSound) {
+    throw new Error('placement sound prediction must be remembered before its deferred acknowledgement can resolve')
+  }
 
   const worldEffectSource = fs.readFileSync(path.join(patchRoot, 'WorldEffectPackets.java'), 'utf8')
   const soundHandlerStart = worldEffectSource.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.LEVEL_SOUND_EVENT')
@@ -994,10 +1009,11 @@ function assertDeferredDoorInteractionAck () {
   const soundHandler = worldEffectSource.slice(soundHandlerStart, soundHandlerEnd < 0 ? undefined : soundHandlerEnd)
   const finalFieldRead = soundHandler.indexOf('wrapper.read(BedrockTypes.OPTIONAL_POSITION_3F)')
   const consumeDoorSound = soundHandler.indexOf('consumePredictedDoorSound(soundEvent, position)')
+  const consumePlacementSound = soundHandler.indexOf('consumePredictedBlockPlacementSound(soundEvent, position)')
   const genericSoundMapping = soundHandler.indexOf('tryFindSound(wrapper.user(), soundEvent')
-  if (finalFieldRead < 0 || consumeDoorSound < finalFieldRead || genericSoundMapping < consumeDoorSound ||
+  if (finalFieldRead < 0 || consumeDoorSound < finalFieldRead || consumePlacementSound < consumeDoorSound || genericSoundMapping < consumePlacementSound ||
       !soundHandler.slice(consumeDoorSound, genericSoundMapping).includes('wrapper.cancel()')) {
-    throw new Error('predicted door sound echoes must be consumed after the Bedrock packet is fully read and before generic sound mapping')
+    throw new Error('predicted door and block-placement sound echoes must be consumed after the Bedrock packet is fully read and before generic sound mapping')
   }
   for (const removed of [
     'DOOR_INTERACTION_ACK_FALLBACK_TICKS',
@@ -1089,10 +1105,11 @@ function assertDeferredDoorInteractionAck () {
   const tickTaskClassName = 'net/raphimc/viabedrock/protocol/task/ChunkTrackerTickTask.class'
   const pendingAckClassName = 'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingDoorInteractionAck.class'
   const pendingSoundClassName = 'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingDoorSoundEcho.class'
+  const pendingPlacementSoundClassName = 'net/raphimc/viabedrock/protocol/storage/ChunkTracker$PendingBlockPlacementSoundEcho.class'
   if (!PATCH_SOURCE_RELATIVE_PATHS.includes(tickTaskSourceName)) {
     throw new Error('ChunkTrackerTickTask.java is not registered in the ViaProxy patch source set')
   }
-  for (const className of [tickTaskClassName, pendingAckClassName, pendingSoundClassName]) {
+  for (const className of [tickTaskClassName, pendingAckClassName, pendingSoundClassName, pendingPlacementSoundClassName]) {
     if (!CLASS_RELATIVE_PATHS.includes(className)) throw new Error(`door/tick patch class is not registered: ${className}`)
   }
   const tickTaskSource = fs.readFileSync(path.join(patchRoot, tickTaskSourceName), 'utf8')
@@ -1288,6 +1305,45 @@ public final class DoorAckOrderSmoke {
                 "an expired prediction cannot hide a later door sound");
         check(soundEchoes.isEmpty(), "expired door sound predictions are pruned");
 
+        final long placementSoundDeadline = ChunkTracker.blockPlacementSoundEchoDeadlineNanos(soundStart);
+        check(placementSoundDeadline - soundStart == 2_000_000_000L,
+                "placement sound echo suppression uses a two-second monotonic deadline");
+        final BlockPosition clickedPlacement = new BlockPosition(30, 64, 30);
+        final BlockPosition adjacentPlacement = new BlockPosition(30, 65, 30);
+        final BlockPosition secondClickedPlacement = new BlockPosition(31, 64, 30);
+        final BlockPosition secondAdjacentPlacement = new BlockPosition(32, 64, 30);
+        final Deque<ChunkTracker.PendingBlockPlacementSoundEcho> placementSoundEchoes = new ArrayDeque<>();
+        placementSoundEchoes.addLast(new ChunkTracker.PendingBlockPlacementSoundEcho(
+                clickedPlacement, adjacentPlacement, placementSoundDeadline));
+        placementSoundEchoes.addLast(new ChunkTracker.PendingBlockPlacementSoundEcho(
+                secondClickedPlacement, secondAdjacentPlacement, placementSoundDeadline));
+        check(!ChunkTracker.consumePredictedBlockPlacementSound(
+                        placementSoundEchoes, "hit", adjacentPlacement, soundStart + 1L),
+                "a non-placement sound cannot consume a placement prediction");
+        check(!ChunkTracker.consumePredictedBlockPlacementSound(
+                        placementSoundEchoes, "place", otherDoor, soundStart + 1L),
+                "an unrelated placement remains audible");
+        check(ChunkTracker.consumePredictedBlockPlacementSound(
+                        placementSoundEchoes, "place", secondAdjacentPlacement, soundStart + 1L),
+                "rapid placement echoes remain matchable out of order by exact target position");
+        check(ChunkTracker.consumePredictedBlockPlacementSound(
+                        placementSoundEchoes, "place", adjacentPlacement, soundStart + 1L),
+                "an accepted adjacent-target placement consumes exactly one Realm echo");
+        check(!ChunkTracker.consumePredictedBlockPlacementSound(
+                        placementSoundEchoes, "place", adjacentPlacement, soundStart + 1L),
+                "one placement prediction cannot suppress the same sound twice");
+        placementSoundEchoes.addLast(new ChunkTracker.PendingBlockPlacementSoundEcho(
+                clickedPlacement, adjacentPlacement, placementSoundDeadline));
+        check(ChunkTracker.consumePredictedBlockPlacementSound(
+                        placementSoundEchoes, "place", clickedPlacement, soundStart + 1L),
+                "replaceable-block placement can consume the echo at the clicked position");
+        placementSoundEchoes.addLast(new ChunkTracker.PendingBlockPlacementSoundEcho(
+                clickedPlacement, adjacentPlacement, placementSoundDeadline));
+        check(!ChunkTracker.consumePredictedBlockPlacementSound(
+                        placementSoundEchoes, "place", adjacentPlacement, placementSoundDeadline),
+                "an expired placement prediction cannot hide a later placement sound");
+        check(placementSoundEchoes.isEmpty(), "expired placement sound predictions are pruned");
+
         final long start = 1_000_000L;
         final long deadline = ChunkTracker.doorInteractionAckDeadlineNanos(start);
         check(deadline - start == 5_000_000_000L, "door fallback uses a five-second monotonic deadline");
@@ -1337,10 +1393,13 @@ public final class DoorAckOrderSmoke {
     'doorInteractionAckDeadlineNanos',
     'blockPlacementAckDeadlineNanos',
     'doorSoundEchoDeadlineNanos',
+    'blockPlacementSoundEchoDeadlineNanos',
     'expectedDoorSoundEvent',
     'pendingDoorPredictionParity',
     'rememberPredictedDoorSound',
     'consumePredictedDoorSound',
+    'rememberPredictedBlockPlacementSound',
+    'consumePredictedBlockPlacementSound',
     'doorInteractionAckDeadlineReached',
     'tryAcquireChunkTrackerTick',
     'releaseChunkTrackerTick',
@@ -1357,8 +1416,10 @@ public final class DoorAckOrderSmoke {
     '-p',
     bundledPatchedClassPath('net/raphimc/viabedrock/protocol/packet/WorldEffectPackets.class')
   ]).stdout
-  if (!worldEffectBytecode.includes('ChunkTracker.consumePredictedDoorSound')) {
-    throw new Error('compiled WorldEffectPackets.class is missing predicted door sound echo suppression')
+  for (const marker of ['ChunkTracker.consumePredictedDoorSound', 'ChunkTracker.consumePredictedBlockPlacementSound']) {
+    if (!worldEffectBytecode.includes(marker)) {
+      throw new Error(`compiled WorldEffectPackets.class is missing predicted sound echo suppression: ${marker}`)
+    }
   }
   const tickTaskBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(tickTaskClassName)]).stdout
   for (const marker of ['tryQueueTick', 'completeQueuedTick', 'ChunkTracker.tick']) {
@@ -1650,11 +1711,13 @@ function assertMiningSwingSuppression () {
     'static boolean bridgeShouldSuppressCompletedMiningSwing',
     'static boolean bridgeShouldPlayMiningHitSound',
     'static boolean bridgePredictedBlockBreakStatesMatch',
+    'static boolean bridgePredictedBlockBreakParticleMatches',
     'static boolean bridgePredictedBlockBreakCompletionMatches',
     'static void bridgeRememberPredictedBlockBreakCompletion',
     'static boolean bridgeConsumePredictedBlockBreakCompletion',
     'public void rememberPredictedBlockBreakCompletion',
     'public boolean consumePredictedBlockBreakCompletion',
+    'public boolean isPredictedBlockBreakParticleEcho',
     'public boolean consumeMiningHitSoundCadence()',
     'this.completedMiningSwingSuppressionThroughTick = this.age() + COMPLETED_MINING_SWING_SUPPRESSION_TICKS',
     'this.clearCompletedMiningSwingSuppression()'
@@ -1668,10 +1731,12 @@ function assertMiningSwingSuppression () {
   }
   const worldEffectSource = fs.readFileSync(path.join(patchRoot, 'WorldEffectPackets.java'), 'utf8')
   const completionGate = worldEffectSource.indexOf('if (levelEvent == LevelEvent.ParticlesDestroyBlock)')
+  const hitParticleGate = worldEffectSource.indexOf('if (bridgeIsBlockHitParticle(levelEvent))')
   const genericLevelEventMapping = worldEffectSource.indexOf('switch (levelEvent)', completionGate)
-  if (completionGate < 0 || genericLevelEventMapping < completionGate ||
+  if (hitParticleGate < 0 || completionGate < hitParticleGate || genericLevelEventMapping < completionGate ||
+      !worldEffectSource.slice(hitParticleGate, completionGate).includes('clientPlayer.isPredictedBlockBreakParticleEcho(') ||
       !worldEffectSource.slice(completionGate, genericLevelEventMapping).includes('clientPlayer.consumePredictedBlockBreakCompletion(')) {
-    throw new Error('the correlated local ParticlesDestroyBlock echo must be consumed before generic Java level-event translation')
+    throw new Error('correlated local mining particle echoes must be consumed before generic Java level-event translation')
   }
   if (worldEffectSource.slice(completionGate, genericLevelEventMapping).includes('ParticlesDestroyBlockNoSound')) {
     throw new Error('the local completion gate must not suppress the semantically distinct ParticlesDestroyBlockNoSound event')
@@ -1759,9 +1824,11 @@ function assertMiningSwingSuppression () {
     'bridgeSendJavaBlockHitSound',
     'bridgeJavaMiningHitVolume',
     'bridgeJavaMiningHitPitch',
+    'bridgeIsBlockHitParticle',
     'getBedrockBlockSounds',
     'getBedrockToJavaSounds',
-    'consumePredictedBlockBreakCompletion'
+    'consumePredictedBlockBreakCompletion',
+    'isPredictedBlockBreakParticleEcho'
   ]) {
     if (!worldEffectBytecode.includes(marker)) throw new Error(`compiled WorldEffectPackets.class is missing mining hit-sound bytecode: ${marker}`)
   }
@@ -1808,6 +1875,15 @@ public final class MiningTailSmoke {
         final ClientPlayerEntity.BlockBreakingInfo oak = new ClientPlayerEntity.BlockBreakingInfo(
                 oakPosition, null, 101, 5
         );
+        check(ClientPlayerEntity.bridgePredictedBlockBreakParticleMatches(oak, oakPosition, 101, 5),
+                "a matching local mining hit particle is recognized as an echo");
+        check(!ClientPlayerEntity.bridgePredictedBlockBreakParticleMatches(
+                        oak, new BlockPosition(11, 64, -4), 101, 5
+                ), "another player's mining position stays visible");
+        check(!ClientPlayerEntity.bridgePredictedBlockBreakParticleMatches(oak, oakPosition, 102, 6),
+                "a different block state at the local position stays visible");
+        check(!ClientPlayerEntity.bridgePredictedBlockBreakParticleMatches(null, oakPosition, 101, 5),
+                "particles stay visible when the local player is not mining");
         ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pending, oak, 100);
         check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
                         pending, oakPosition, 102, 6, 105
@@ -1889,6 +1965,8 @@ public final class MiningTailSmoke {
     fs.writeFileSync(hitSoundSource, `
 package net.raphimc.viabedrock.protocol.packet;
 
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.LevelEvent;
+
 public final class MiningHitSoundSmoke {
     private static void check(float actual, float expected, String message) {
         if (Math.abs(actual - expected) > 0.00001F) {
@@ -1897,6 +1975,10 @@ public final class MiningHitSoundSmoke {
     }
 
     public static void main(String[] args) {
+        if (!WorldEffectPackets.bridgeIsBlockHitParticle(LevelEvent.ParticlesCrackBlockWest) ||
+                WorldEffectPackets.bridgeIsBlockHitParticle(LevelEvent.ParticlesDestroyBlock)) {
+            throw new AssertionError("only per-swing block-hit particles use the local prediction echo gate");
+        }
         check(WorldEffectPackets.bridgeJavaMiningHitVolume("wood"), 0.25F,
                 "ordinary block-hit volume must match ClientLevel.playBreakingSound");
         check(WorldEffectPackets.bridgeJavaMiningHitPitch("wood"), 0.5F,
@@ -3842,12 +3924,21 @@ function assertFurnaceFamilyBridge () {
   for (const marker of [
     'bridgeCompatibleCursorTakeCount(slotBefore, cursorBefore)',
     'container_number_key_take_from_read_only_slot',
-    'ItemStackRequestActionType.Take'
+    'ItemStackRequestActionType.Take',
+    'bridgeApplyDamageComponent',
+    'StructuredDataKey.DAMAGE',
+    'damage.asInt()'
   ]) {
     if (!containerSource.includes(marker)) throw new Error(`Container.java is missing read-only result-slot marker: ${marker}`)
   }
   if ((containerSource.match(/bridgeCompatibleCursorTakeCount\(slotBefore, cursorBefore\)/g) || []).length !== 2) {
     throw new Error('Container.java must apply compatible-cursor extraction to both left and right clicks')
+  }
+  const containerBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/api/model/container/Container.class'
+  )]).stdout
+  for (const marker of ['bridgeApplyDamageComponent', 'StructuredDataKey.DAMAGE', 'NumberTag.asInt']) {
+    if (!containerBytecode.includes(marker)) throw new Error(`compiled Container.class is missing durability-component bytecode: ${marker}`)
   }
   const inventorySource = fs.readFileSync(path.join(patchRoot, 'InventoryContainer.java'), 'utf8')
   for (const marker of [

@@ -204,7 +204,10 @@ public class WorldEffectPackets {
             wrapper.read(BedrockTypes.OPTIONAL_POSITION_3F); // fire at position
 
             final ChunkTracker chunkTracker = wrapper.user().get(ChunkTracker.class);
-            if (!isGlobal && chunkTracker != null && chunkTracker.consumePredictedDoorSound(soundEvent, position)) {
+            if (!isGlobal && chunkTracker != null && (
+                    chunkTracker.consumePredictedDoorSound(soundEvent, position)
+                            || chunkTracker.consumePredictedBlockPlacementSound(soundEvent, position)
+            )) {
                 wrapper.cancel();
                 return;
             }
@@ -333,9 +336,25 @@ public class WorldEffectPackets {
                 wrapper.cancel();
                 return;
             }
+            final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
+            final ClientPlayerEntity clientPlayer = entityTracker != null ? entityTracker.getClientPlayer() : null;
+            if (bridgeIsBlockHitParticle(levelEvent)) {
+                final int javaBlockState = wrapper.user().get(BlockStateRewriter.class).javaId(data);
+                final BlockPosition blockPosition = new BlockPosition(
+                        MathUtil.floor(position.x()), MathUtil.floor(position.y()), MathUtil.floor(position.z())
+                );
+                if (clientPlayer != null && clientPlayer.isPredictedBlockBreakParticleEcho(
+                        blockPosition, data, javaBlockState
+                )) {
+                    // Java's continueAttack path already calls
+                    // ClientLevel.addBreakingBlockEffect every mining tick.
+                    // Drop only the Realm particle echo for that same local
+                    // target/state; other players' mining stays visible.
+                    wrapper.cancel();
+                    return;
+                }
+            }
             if (levelEvent == LevelEvent.ParticlesDestroyBlock) {
-                final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
-                final ClientPlayerEntity clientPlayer = entityTracker != null ? entityTracker.getClientPlayer() : null;
                 final int javaBlockState = wrapper.user().get(BlockStateRewriter.class).javaId(data);
                 final BlockPosition blockPosition = new BlockPosition(
                         MathUtil.floor(position.x()), MathUtil.floor(position.y()), MathUtil.floor(position.z())
@@ -789,6 +808,15 @@ public class WorldEffectPackets {
             default -> 1F;
         };
         return soundTypePitch * 0.5F;
+    }
+
+    static boolean bridgeIsBlockHitParticle(final LevelEvent levelEvent) {
+        return switch (levelEvent) {
+            case ParticlesCrackBlock, ParticlesCrackBlockDown, ParticlesCrackBlockUp,
+                 ParticlesCrackBlockNorth, ParticlesCrackBlockSouth,
+                 ParticlesCrackBlockWest, ParticlesCrackBlockEast -> true;
+            default -> false;
+        };
     }
 
     private static SoundDefinitions.ConfiguredSound tryFindSound(final UserConnection user, final String soundEvent, final int data, final String entityIdentifier, final boolean isBabyMob) {
