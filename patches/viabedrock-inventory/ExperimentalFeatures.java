@@ -332,14 +332,19 @@ public class ExperimentalFeatures {
                 return;
             }
 
-            // Java predicts interactive block state locally. Acknowledging a door
-            // before Bedrock's authoritative update arrives makes the client roll
-            // that prediction back to the old state, then open it a second time
-            // when the Realm reply is translated. Keep non-door interactions on
-            // ViaBedrock's immediate path, but let ChunkTracker acknowledge doors
-            // after it sends the coherent paired-half update.
-            if (chunkTracker.shouldDeferDoorInteractionAck(position)) {
+            final BedrockItem selectedHotbarItem = inventoryTracker.getInventoryContainer().getSelectedHotbarItem();
+            final boolean predictsBlockPlacement = selectedHotbarItem.blockRuntimeId() != 0
+                    && chunkTracker.shouldPredictBlockPlacement(position, clientPlayer.isSneaking());
+
+            // Java already predicts both block placement and interactive door
+            // state. Releasing its cumulative acknowledgement before the Realm
+            // answer rolls that state back, then applies it again when the
+            // authoritative update arrives. Door replies settle as a coherent
+            // paired update; placements settle on the clicked/adjacent target.
+            if (!predictsBlockPlacement && chunkTracker.shouldDeferDoorInteractionAck(position)) {
                 chunkTracker.deferDoorInteractionAck(position, sequence);
+            } else if (predictsBlockPlacement) {
+                chunkTracker.deferBlockPlacementAck(position, position.getRelative(face), sequence);
             } else {
                 chunkTracker.acknowledgeBlockInteraction(sequence);
             }
@@ -357,28 +362,26 @@ public class ExperimentalFeatures {
             // This is the main packet that the bedrock client use to interact with block.The rest of the
             final PacketWrapper transactionPacket = PacketWrapper.create(ServerboundBedrockPackets.INVENTORY_TRANSACTION, wrapper.user());
 
-            final BedrockItem selectedHotbarItem = inventoryTracker.getInventoryContainer().getSelectedHotbarItem();
             BedrockItem predictedToItem = selectedHotbarItem.copy();
-            // This is not entirely correct, but at least it's more accurate than not sending actions or sending the original item data.
-            if (predictedToItem.blockRuntimeId() != 0 && clientPlayer.javaGameMode() != GameMode.CREATIVE) {
+            // Only an actual placement predicts consumption. Java does not
+            // consume a held block when the clicked block handles the use
+            // itself (doors, furnaces, crafting tables, storage, and the other
+            // vanilla interactive blocks classified by ChunkTracker).
+            if (predictsBlockPlacement && clientPlayer.javaGameMode() != GameMode.CREATIVE) {
                 predictedToItem.setAmount(predictedToItem.amount() - 1);
             }
             if (predictedToItem.amount() <= 0) {
                 predictedToItem = BedrockItem.empty();
             }
-            // Empty-hand interactions (and tools/items which are not consumed)
-            // must not claim a Container_Inventory mutation. The old translator
-            // emitted empty -> empty actions for doors and chests; Realms then
-            // answered with full authoritative inventory replays for every
-            // click, delaying the actual block/container response downstream.
-            final List<InventoryActionData> actions = selectedHotbarItem.equals(predictedToItem)
-                    ? List.of()
-                    : List.of(new InventoryActionData(
-                            new InventorySource(InventorySourceType.Container_Inventory, ContainerID.CONTAINER_ID_INVENTORY.getValue(), InventorySource_InventorySourceFlags.No_Flag),
-                            inventoryTracker.getInventoryContainer().getSelectedHotbarSlot(),
-                            selectedHotbarItem,
-                            predictedToItem
-                    ));
+            // Native Bedrock item-use-on always carries the selected inventory
+            // slot action. Interactions that do not consume the held item use
+            // old -> old; real survival placements use old -> count-1.
+            final List<InventoryActionData> actions = List.of(new InventoryActionData(
+                    new InventorySource(InventorySourceType.Container_Inventory, ContainerID.CONTAINER_ID_INVENTORY.getValue(), InventorySource_InventorySourceFlags.No_Flag),
+                    inventoryTracker.getInventoryContainer().getSelectedHotbarSlot(),
+                    selectedHotbarItem,
+                    predictedToItem
+            ));
 
             BedrockInventoryTransaction inventoryTransaction = new BedrockInventoryTransaction(
                     0, // legacy request id

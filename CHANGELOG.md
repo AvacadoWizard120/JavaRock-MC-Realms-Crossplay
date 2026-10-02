@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-10-02
+
+- Furnace output shift-click now publishes one coherent inventory update instead of duplicate per-slot correction waves.
+- Doors, workstations, and storage no longer turn a held block into a fake placement. Door halves settle together, so one click no longer renders open-close-open or close-open-close.
+- Block placement waits for the Realm's matching block update before confirming Java's prediction, removing the place-disappear-reappear flicker.
+- Modern furnace-options packets are dropped before the older local codec can turn them into invalid packet-0 warnings.
+
 ## 0.4.0 - 2026-10-01
 
 - Furnaces, smokers, and blast furnaces now open and stay synchronized, including fuel, ingredient, result, burn time, and cook progress.

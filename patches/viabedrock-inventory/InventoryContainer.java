@@ -661,9 +661,7 @@ public class InventoryContainer extends Container {
             if (destinationContainer == sourceContainer && destinationSlot == sourceBedrockSlot) continue;
 
             BedrockItem destinationBefore = safeCopy(destinationContainer.getItem(destinationSlot));
-            if (!isEmpty(destinationBefore) && !canStack(sourceBefore, destinationBefore)) continue;
-            int room = bridgeMaxStackSize(isEmpty(destinationBefore) ? sourceBefore : destinationBefore) - amountOrZero(destinationBefore);
-            int count = Math.min(remaining, Math.max(0, room));
+            int count = bridgeQuickMoveTransferCount(sourceBefore, remaining, destinationBefore);
             if (count <= 0) continue;
 
             ClickSlot destinationClickSlot = new ClickSlot(
@@ -710,10 +708,12 @@ public class InventoryContainer extends Container {
                 nativeSources,
                 nativeDestinations);
 
-        sourceContainer.setItem(sourceBedrockSlot, safeCopy(sourceAfter));
+        sourceContainer.bridgeSetPredictedItem(sourceBedrockSlot, safeCopy(sourceAfter));
         for (int index = 0; index < destinationAfterItems.size(); index++) {
             ClickSlot destination = changedSlots.get(index + 1);
-            destination.container.setItem(destination.bedrockSlot, safeCopy(destinationAfterItems.get(index)));
+            destination.container.bridgeSetPredictedItem(
+                    destination.bedrockSlot,
+                    safeCopy(destinationAfterItems.get(index)));
         }
         this.bridgeClearPendingCraft();
         ViaBedrock.getPlatform().getLogger().log(Level.INFO,
@@ -725,6 +725,13 @@ public class InventoryContainer extends Container {
                         " action=" + transferActionType +
                         " source=" + nativeSource.describe());
         return moved;
+    }
+
+    public static int bridgeQuickMoveTransferCount(BedrockItem source, int remaining, BedrockItem destination) {
+        if (remaining <= 0 || isEmpty(source)) return 0;
+        if (!isEmpty(destination) && !canStack(source, destination)) return 0;
+        int room = bridgeMaxStackSize(isEmpty(destination) ? source : destination) - amountOrZero(destination);
+        return Math.min(remaining, Math.max(0, room));
     }
 
     public int bridgeTrySendNativeDrop(
@@ -2544,7 +2551,7 @@ public class InventoryContainer extends Container {
                 next.setNetId(stackId == 0 ? null : Integer.valueOf(stackId));
             }
             this.bridgeSetSharedCarriedItem(next);
-            tracker.getHudContainer().setItem(0, safeCopy(next));
+            tracker.getHudContainer().bridgeSetAuthoritativeItemSilently(0, safeCopy(next));
             if (isEmpty(next)) this.bridgeClearCarriedSource();
             return true;
         }
@@ -2591,7 +2598,7 @@ public class InventoryContainer extends Container {
             next.setNetId(stackId == 0 ? null : Integer.valueOf(stackId));
         }
 
-        target.setItem(targetSlot, safeCopy(next));
+        target.bridgeSetAuthoritativeItemSilently(targetSlot, safeCopy(next));
         if (target == tracker.getHudContainer()) {
             this.bridgeRememberCraftingGridSlotIfApplicable(
                     ContainerID.CONTAINER_ID_PLAYER_ONLY_UI.getValue(), targetSlot, next);
@@ -2702,7 +2709,9 @@ public class InventoryContainer extends Container {
             if (slot.clickSlot.bedrockSlot < 0 || slot.clickSlot.bedrockSlot >= slot.clickSlot.container.size()) continue;
             BedrockItem current = safeCopy(slot.clickSlot.container.getItem(slot.clickSlot.bedrockSlot));
             if (!bridgeSameItemState(current, slot.predicted)) continue;
-            slot.clickSlot.container.setItem(slot.clickSlot.bedrockSlot, safeCopy(slot.before));
+            slot.clickSlot.container.bridgeSetAuthoritativeItemSilently(
+                    slot.clickSlot.bedrockSlot,
+                    safeCopy(slot.before));
             this.bridgeRememberCraftingGridSlotIfApplicable(
                     slot.clickSlot.sourceContainerId,
                     slot.clickSlot.bedrockSlot,
@@ -2713,7 +2722,9 @@ public class InventoryContainer extends Container {
         if (requestId == this.bridgeLatestNativeRequestId &&
                 bridgeSameItemState(this.carriedItem, pending.cursorAfter)) {
             this.bridgeSetSharedCarriedItem(pending.cursorBefore);
-            this.user.get(InventoryTracker.class).getHudContainer().setItem(0, safeCopy(this.carriedItem));
+            this.user.get(InventoryTracker.class).getHudContainer().bridgeSetAuthoritativeItemSilently(
+                    0,
+                    safeCopy(this.carriedItem));
             this.bridgeClearCarriedSource();
             restored = true;
         }
