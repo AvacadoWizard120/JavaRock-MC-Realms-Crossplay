@@ -209,6 +209,19 @@ function makeOutboundRelay (downstreamMode = 'viabedrock') {
   assert.strictEqual(records[0].name, 'camera_spline')
   assert.strictEqual(records[0].phase, 'dropped')
   assert.strictEqual(records[0].extra.translation_status, 'dropped_unsupported_local_viabedrock_packet')
+
+  records.length = 0
+  assert.strictEqual(relay.queueClientbound('set_player_furnace_options', {
+    furnace_type: 'furnace',
+    left_tab: 'recipe_book',
+    filtering: false,
+    layout: 'default'
+  }, 'captured-modern-furnace-options-packet'), false)
+  assert.deepStrictEqual(sentPackets, [])
+  assert.strictEqual(records.length, 1)
+  assert.strictEqual(records[0].name, 'set_player_furnace_options')
+  assert.strictEqual(records[0].phase, 'dropped')
+  assert.strictEqual(records[0].extra.translation_status, 'dropped_unsupported_local_viabedrock_packet')
 }
 
 {

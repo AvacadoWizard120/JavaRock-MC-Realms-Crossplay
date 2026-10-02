@@ -303,6 +303,48 @@ withQuietRelayLogs(() => {
   const sentDownstream = []
   relayPlayer.queue = (name, packet) => sentDownstream.push({ name, packet })
 
+  const heldBlock = {
+    network_id: 58,
+    name: 'minecraft:crafting_table',
+    count: 2,
+    metadata: 0,
+    block_runtime_id: 1752181952
+  }
+  const interaction = {
+    transaction: {
+      transaction_type: 'item_use',
+      actions: [{
+        source_type: 'container',
+        window_id: 0,
+        slot: 6,
+        old_item: heldBlock,
+        new_item: { ...heldBlock }
+      }],
+      transaction_data: {
+        action_type: 'click_block',
+        block_position: { x: 184, y: 73, z: 36 },
+        face: 5,
+        hotbar_slot: 6,
+        held_item: heldBlock,
+        player_pos: { x: 183.5, y: 74.62, z: 36.5 },
+        click_pos: { x: 0.5, y: 0.5, z: 0.5 },
+        block_runtime_id: 1486885686,
+        client_prediction: 'success'
+      }
+    }
+  }
+
+  assert.strictEqual(relayPlayer.relayServerboundToUpstream('inventory_transaction', interaction, 'live:door_interaction'), true)
+  assert.strictEqual(sentUpstream.length, 1, 'unchanged selected-slot action must still reach the Realm')
+  assert.deepStrictEqual(sentDownstream, [], 'unchanged selected-slot action must not synthesize inventory or block placement')
+})
+
+withQuietRelayLogs(() => {
+  const sentUpstream = []
+  const { relayPlayer } = makeRelayPlayerHarness((name, params) => sentUpstream.push({ name, params }))
+  const sentDownstream = []
+  relayPlayer.queue = (name, packet) => sentDownstream.push({ name, packet })
+
   // Captured from support 0.3.107. The patched ViaBedrock item-frame path
   // deliberately insets the face-axis click coordinate by one pixel (1/16),
   // unlike an ordinary block-surface click. It is an entity-style insertion,

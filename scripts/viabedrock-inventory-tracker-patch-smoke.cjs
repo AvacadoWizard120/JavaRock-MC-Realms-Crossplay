@@ -465,7 +465,7 @@ function assertChunkLifecycleFixes () {
   const doorStateEnd = source.indexOf('private void acknowledgeDoorInteractions', doorStateStart)
   const doorFlushSource = source.slice(doorFlushStart, doorSendStart)
   const doorSendSource = source.slice(doorStateStart, doorStateEnd)
-  if (!doorFlushSource.includes('this.sendPairedDoorUpdate(lowerPosition, doorUpdate.getValue())') ||
+  if (!doorFlushSource.includes('this.sendPairedDoorUpdate(lowerPosition, observedTransitions)') ||
       !doorFlushSource.includes('this.markLoadedChunksDirtyAround(chunkX, chunkZ, true)')) {
     throw new Error('paired door update must retain a dirty-chunk fallback when either half is unsafe')
   }
@@ -879,32 +879,43 @@ function assertDeferredDoorInteractionAck () {
   for (const marker of [
     'final int sequence = wrapper.read(Types.VAR_INT)',
     'if (hand != InteractionHand.MAIN_HAND)',
+    'final boolean predictsBlockPlacement = selectedHotbarItem.blockRuntimeId() != 0',
+    'chunkTracker.shouldPredictBlockPlacement(position, clientPlayer.isSneaking())',
     'chunkTracker.shouldDeferDoorInteractionAck(position)',
     'chunkTracker.deferDoorInteractionAck(position, sequence)',
+    'chunkTracker.deferBlockPlacementAck(position, position.getRelative(face), sequence)',
     'chunkTracker.acknowledgeBlockInteraction(sequence)',
-    'final List<InventoryActionData> actions = selectedHotbarItem.equals(predictedToItem)',
+    'if (predictsBlockPlacement && clientPlayer.javaGameMode() != GameMode.CREATIVE)',
+    'final List<InventoryActionData> actions = List.of(new InventoryActionData(',
     'new BedrockInventoryTransaction(',
     'actions,'
   ]) {
     if (!useItemOn.includes(marker)) throw new Error(`USE_ITEM_ON is missing deferred-door marker: ${marker}`)
   }
   const sequenceRead = useItemOn.indexOf('final int sequence = wrapper.read(Types.VAR_INT)')
+  const placementDecision = useItemOn.indexOf('chunkTracker.shouldPredictBlockPlacement(position, clientPlayer.isSneaking())')
   const doorDecision = useItemOn.indexOf('chunkTracker.shouldDeferDoorInteractionAck(position)')
   const bedrockStart = useItemOn.indexOf('PlayerActionType.StartItemUseOn')
-  if (sequenceRead < 0 || doorDecision < sequenceRead || bedrockStart < doorDecision) {
-    throw new Error('door acknowledgement must be deferred before the Bedrock StartItemUseOn request is sent')
+  if (sequenceRead < 0 || placementDecision < sequenceRead || doorDecision < placementDecision || bedrockStart < doorDecision) {
+    throw new Error('door/placement acknowledgement must be classified and deferred before Bedrock StartItemUseOn')
   }
   if (useItemOn.includes('PacketFactory.sendJavaBlockChangedAck')) {
     throw new Error('USE_ITEM_ON must route every immediate acknowledgement through the ordered ChunkTracker gate')
   }
   if ((useItemOn.match(/chunkTracker\.acknowledgeBlockInteraction\(sequence\)/g) || []).length !== 2) {
-    throw new Error('USE_ITEM_ON must route exactly the off-hand and non-door immediate paths through the ordered gate')
+    throw new Error('USE_ITEM_ON must route exactly the off-hand and non-predicted interaction paths through the ordered gate')
   }
-  const actionFilter = useItemOn.indexOf('final List<InventoryActionData> actions = selectedHotbarItem.equals(predictedToItem)')
+  if (useItemOn.includes('List.of()')) {
+    throw new Error('USE_ITEM_ON must not omit the native selected-slot action for non-consuming interactions')
+  }
+  if ((useItemOn.match(/new InventoryActionData\(/g) || []).length !== 1) {
+    throw new Error('USE_ITEM_ON must serialize exactly one selected-slot inventory action')
+  }
+  const actionFilter = useItemOn.indexOf('final List<InventoryActionData> actions = List.of(new InventoryActionData(')
   const transaction = useItemOn.indexOf('new BedrockInventoryTransaction(', actionFilter)
   const actionArgument = useItemOn.indexOf('actions,', transaction)
   if (actionFilter < 0 || transaction < actionFilter || actionArgument < transaction) {
-    throw new Error('USE_ITEM_ON must omit identical inventory actions before serializing the Bedrock transaction')
+    throw new Error('USE_ITEM_ON must serialize the selected-slot action before the Bedrock transaction')
   }
 
   // ExperimentalFeatures is replaced as one class. Preserve the unrelated
@@ -933,16 +944,27 @@ function assertDeferredDoorInteractionAck () {
   const chunkSource = fs.readFileSync(path.join(patchRoot, 'ChunkTracker.java'), 'utf8')
   for (const marker of [
     'private static final long DOOR_INTERACTION_ACK_FALLBACK_NANOS = 5_000_000_000L',
+    'private static final long BLOCK_PLACEMENT_ACK_FALLBACK_NANOS = 1_000_000_000L',
     'public boolean shouldDeferDoorInteractionAck(final BlockPosition blockPosition)',
+    'public boolean shouldPredictBlockPlacement(final BlockPosition blockPosition, final boolean secondaryUseActive)',
+    'static boolean isAlwaysInteractiveBlockIdentifier(final String identifier)',
     'public void acknowledgeBlockInteraction(final int sequence)',
     'public void deferDoorInteractionAck(final BlockPosition blockPosition, final int sequence)',
+    'public void deferBlockPlacementAck(',
     'static long doorInteractionAckDeadlineNanos(final long nowNanos)',
+    'static long blockPlacementAckDeadlineNanos(final long nowNanos)',
     'static boolean doorInteractionAckDeadlineReached(final long nowNanos, final long deadlineNanos)',
     'static boolean tryAcquireChunkTrackerTick(final AtomicBoolean gate)',
     'static void releaseChunkTrackerTick(final AtomicBoolean gate)',
     'this.acknowledgeDoorInteractions(lowerPosition, observedTransitions)',
+    'private void resolveBlockPlacementInteraction(final BlockPosition authoritativePosition)',
+    'static boolean shouldHoldPendingDoorUpdate(final int observedTransitions, final boolean pendingInteractionAck)',
+    'static boolean placementResponseMatches(',
     'private void flushExpiredDoorInteractionAcks()',
     'private void sendAuthoritativeDoorFallbackState(final BlockPosition lowerPosition)',
+    'private void sendAuthoritativePlacementFallbackState(',
+    'timed out door block acknowledgement after 5s',
+    'timed out block placement acknowledgement after 1s',
     'private void flushReadyBlockInteractionAcks()',
     'return readySequences.lower(deferredSequences.first())'
   ]) {
@@ -969,6 +991,16 @@ function assertDeferredDoorInteractionAck () {
   if (tick.indexOf('this.flushPendingDoorUpdates()') > tick.indexOf('this.flushExpiredDoorInteractionAcks()')) {
     throw new Error('authoritative paired door updates must settle prediction before the timeout fallback runs')
   }
+  if (tick.indexOf('this.flushReadyBlockInteractionAcks()') < tick.indexOf('this.flushExpiredDoorInteractionAcks()')) {
+    throw new Error('authoritative block updates and timeout fallbacks must run before cumulative prediction acknowledgements')
+  }
+
+  const blockChangeStart = chunkSource.indexOf('public IntObjectPair<BlockEntity> handleBlockChange')
+  const blockChangeEnd = chunkSource.indexOf('public BedrockChunkSection handleBlockPalette', blockChangeStart)
+  const blockChange = chunkSource.slice(blockChangeStart, blockChangeEnd)
+  if (!blockChange.includes('if (layer == 0) this.resolveBlockPlacementInteraction(blockPosition)')) {
+    throw new Error('authoritative layer-zero updates must resolve one matching deferred placement')
+  }
 
   const doorSendStart = chunkSource.indexOf('private boolean sendPairedDoorUpdate')
   const doorSendEnd = chunkSource.indexOf('private boolean sendPairedDoorState', doorSendStart)
@@ -992,14 +1024,15 @@ function assertDeferredDoorInteractionAck () {
   const fallbackStart = chunkSource.indexOf('private void sendAuthoritativeDoorFallbackState', expiryStart)
   const expiry = chunkSource.slice(expiryStart, fallbackStart)
   const fallbackSend = expiry.indexOf('this.sendAuthoritativeDoorFallbackState(pending.lowerPosition())')
+  const placementFallbackSend = expiry.indexOf('this.sendAuthoritativePlacementFallbackState(')
   const makeReady = expiry.indexOf('this.readyBlockInteractionAcks.add(entry.getKey())')
   const flushReady = expiry.indexOf('this.flushReadyBlockInteractionAcks()')
-  if (fallbackSend < 0 || makeReady < fallbackSend || flushReady < makeReady) {
-    throw new Error('door timeout must restore authoritative paired state before making and flushing the cumulative acknowledgement')
+  if (fallbackSend < 0 || placementFallbackSend < fallbackSend || makeReady < placementFallbackSend || flushReady < makeReady) {
+    throw new Error('interaction timeout must restore authoritative state before making and flushing the cumulative acknowledgement')
   }
-  const fallbackEnd = chunkSource.indexOf('private void flushReadyBlockInteractionAcks()', fallbackStart)
-  const fallback = chunkSource.slice(fallbackStart, fallbackEnd)
-  if ((fallback.match(/PacketFactory\.sendJavaBlockUpdate/g) || []).length !== 2) {
+  const placementFallbackStart = chunkSource.indexOf('private void sendAuthoritativePlacementFallbackState', fallbackStart)
+  const doorFallback = chunkSource.slice(fallbackStart, placementFallbackStart)
+  if ((doorFallback.match(/PacketFactory\.sendJavaBlockUpdate/g) || []).length !== 2) {
     throw new Error('door timeout fallback must send exactly two authoritative Java block updates')
   }
   for (const forbidden of [
@@ -1008,7 +1041,12 @@ function assertDeferredDoorInteractionAck () {
     'flushReadyBlockInteractionAcks',
     'sendPairedDoorUpdate'
   ]) {
-    if (fallback.includes(forbidden)) throw new Error(`door timeout state resend must be acknowledgement-free: ${forbidden}`)
+    if (doorFallback.includes(forbidden)) throw new Error(`door timeout state resend must be acknowledgement-free: ${forbidden}`)
+  }
+  const fallbackEnd = chunkSource.indexOf('private void flushReadyBlockInteractionAcks()', placementFallbackStart)
+  const placementFallback = chunkSource.slice(placementFallbackStart, fallbackEnd)
+  if ((placementFallback.match(/PacketFactory\.sendJavaBlockUpdate/g) || []).length !== 2 || !placementFallback.includes('if (!clickedPosition.equals(placementPosition))')) {
+    throw new Error('placement timeout fallback must restore both distinct candidate positions without duplicating one position')
   }
 
   const lowerDoorStart = chunkSource.indexOf('private BlockPosition lowerDoorPosition')
@@ -1038,38 +1076,21 @@ function assertDeferredDoorInteractionAck () {
   }
 
   const experimentalBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(experimentalClassName)]).stdout
-  for (const marker of ['shouldDeferDoorInteractionAck', 'deferDoorInteractionAck', 'acknowledgeBlockInteraction']) {
-    if (!experimentalBytecode.includes(marker)) throw new Error(`compiled ExperimentalFeatures.class is missing deferred-door bytecode: ${marker}`)
+  for (const marker of [
+    'shouldPredictBlockPlacement',
+    'shouldDeferDoorInteractionAck',
+    'deferDoorInteractionAck',
+    'deferBlockPlacementAck',
+    'acknowledgeBlockInteraction'
+  ]) {
+    if (!experimentalBytecode.includes(marker)) throw new Error(`compiled ExperimentalFeatures.class is missing deferred interaction bytecode: ${marker}`)
   }
   for (const marker of [
-    'BedrockItem.equals',
-    'java/util/List.of:()Ljava/util/List;',
+    'java/util/List.of:(Ljava/lang/Object;)Ljava/util/List;',
     'InventoryActionData."<init>"'
   ]) {
-    if (!experimentalBytecode.includes(marker)) throw new Error(`compiled ExperimentalFeatures.class is missing no-op inventory-action filter bytecode: ${marker}`)
+    if (!experimentalBytecode.includes(marker)) throw new Error(`compiled ExperimentalFeatures.class is missing selected-slot action bytecode: ${marker}`)
   }
-  const equalsInstruction = experimentalBytecode.indexOf('BedrockItem.equals')
-  const transactionConstructor = experimentalBytecode.indexOf('BedrockInventoryTransaction."<init>"', equalsInstruction)
-  const actionBranchBytecode = experimentalBytecode.slice(equalsInstruction, transactionConstructor)
-  const branchMarkers = [
-    'ifeq',
-    'java/util/List.of:()Ljava/util/List;',
-    'class net/raphimc/viabedrock/experimental/model/inventory/InventoryActionData',
-    'InventoryActionData."<init>"',
-    'java/util/List.of:(Ljava/lang/Object;)Ljava/util/List;',
-    'class net/raphimc/viabedrock/experimental/model/inventory/BedrockInventoryTransaction'
-  ]
-  let branchCursor = 0
-  for (const marker of branchMarkers) {
-    branchCursor = actionBranchBytecode.indexOf(marker, branchCursor)
-    if (branchCursor < 0) throw new Error(`compiled USE_ITEM_ON action branch is missing ordered bytecode: ${marker}`)
-    branchCursor += marker.length
-  }
-  const storedActions = actionBranchBytecode.match(/\bastore\s+(\d+)\b/)
-  if (!storedActions || !new RegExp(`\\baload\\s+${storedActions[1]}\\b`).test(actionBranchBytecode.slice(storedActions.index + storedActions[0].length))) {
-    throw new Error('compiled USE_ITEM_ON does not feed the branched empty/singleton action list into BedrockInventoryTransaction')
-  }
-
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-door-ack-order-'))
   try {
     const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'protocol', 'storage')
@@ -1078,6 +1099,7 @@ function assertDeferredDoorInteractionAck () {
     fs.writeFileSync(sourcePath, `
 package net.raphimc.viabedrock.protocol.storage;
 
+import com.viaversion.viaversion.api.minecraft.BlockPosition;
 import java.util.List;
 import java.util.NavigableMap;
 import java.util.NavigableSet;
@@ -1144,9 +1166,51 @@ public final class DoorAckOrderSmoke {
         check(coalescedDoorAcks.isEmpty() && coalescedReadyAcks.equals(sequences(11, 12)),
                 "coalesced transition resolution moves exactly those sequences to the ready set");
 
+        check(ChunkTracker.shouldHoldPendingDoorUpdate(0, true),
+                "an upper-half-only door reply must wait while its interaction acknowledgement is pending");
+        check(!ChunkTracker.shouldHoldPendingDoorUpdate(1, true),
+                "the authoritative lower-half transition releases the paired door update");
+        check(!ChunkTracker.shouldHoldPendingDoorUpdate(0, false),
+                "an unrelated upper-half redraw must not wait for a nonexistent interaction");
+
+        final BlockPosition clicked = new BlockPosition(10, 64, 10);
+        final BlockPosition adjacent = new BlockPosition(10, 65, 10);
+        check(ChunkTracker.placementResponseMatches(clicked, adjacent, adjacent),
+                "accepted placement resolves on the adjacent authoritative target");
+        check(ChunkTracker.placementResponseMatches(clicked, adjacent, clicked),
+                "replaceable-block placement resolves on the clicked authoritative target");
+        check(!ChunkTracker.placementResponseMatches(clicked, adjacent, new BlockPosition(11, 64, 10)),
+                "an unrelated block update cannot release a placement acknowledgement");
+
+        check(ChunkTracker.isAlwaysInteractiveBlockIdentifier("furnace"),
+                "furnace interaction suppresses fake held-block consumption");
+        check(ChunkTracker.isAlwaysInteractiveBlockIdentifier("crafting_table"),
+                "crafting-table interaction suppresses fake held-block consumption");
+        check(ChunkTracker.isAlwaysInteractiveBlockIdentifier("bell"),
+                "bell interaction suppresses fake held-block consumption");
+        check(ChunkTracker.isAlwaysInteractiveBlockIdentifier("daylight_detector"),
+                "daylight-detector interaction suppresses fake held-block consumption");
+        check(ChunkTracker.isAlwaysInteractiveBlockIdentifier("lectern"),
+                "lectern interaction suppresses fake held-block consumption");
+        check(ChunkTracker.isAlwaysInteractiveBlockIdentifier("oak_door"),
+                "wooden door interaction suppresses fake held-block consumption");
+        check(ChunkTracker.isAlwaysInteractiveBlockIdentifier("waxed_weathered_copper_door"),
+                "copper door interaction suppresses fake held-block consumption");
+        check(!ChunkTracker.isAlwaysInteractiveBlockIdentifier("iron_door"),
+                "iron doors allow normal block placement because hand use does not open them");
+        check(!ChunkTracker.isAlwaysInteractiveBlockIdentifier("flower_pot"),
+                "item-consuming flower-pot behavior must not be collapsed into an old-to-same action");
+        check(!ChunkTracker.isAlwaysInteractiveBlockIdentifier("potted_oak_sapling"),
+                "potted blocks remain placement/consumption-capable");
+        check(!ChunkTracker.isAlwaysInteractiveBlockIdentifier("composter"),
+                "composters remain item-consumption-capable");
+
         final long start = 1_000_000L;
         final long deadline = ChunkTracker.doorInteractionAckDeadlineNanos(start);
         check(deadline - start == 5_000_000_000L, "door fallback uses a five-second monotonic deadline");
+        final long placementDeadline = ChunkTracker.blockPlacementAckDeadlineNanos(start);
+        check(placementDeadline - start == 1_000_000_000L,
+                "placement fallback uses a short one-second monotonic deadline");
         check(!ChunkTracker.doorInteractionAckDeadlineReached(deadline - 1L, deadline),
                 "deadline must not expire one nanosecond early");
         check(ChunkTracker.doorInteractionAckDeadlineReached(deadline, deadline),
@@ -1188,12 +1252,17 @@ public final class DoorAckOrderSmoke {
   ]).stdout
   for (const marker of [
     'doorInteractionAckDeadlineNanos',
+    'blockPlacementAckDeadlineNanos',
     'doorInteractionAckDeadlineReached',
     'tryAcquireChunkTrackerTick',
     'releaseChunkTrackerTick',
-    'sendAuthoritativeDoorFallbackState'
+    'sendAuthoritativeDoorFallbackState',
+    'sendAuthoritativePlacementFallbackState',
+    'resolveBlockPlacementInteraction',
+    'shouldHoldPendingDoorUpdate',
+    'placementResponseMatches'
   ]) {
-    if (!chunkBytecode.includes(marker)) throw new Error(`compiled ChunkTracker.class is missing door/tick bytecode: ${marker}`)
+    if (!chunkBytecode.includes(marker)) throw new Error(`compiled ChunkTracker.class is missing interaction/tick bytecode: ${marker}`)
   }
   const tickTaskBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(tickTaskClassName)]).stdout
   for (const marker of ['tryQueueTick', 'completeQueuedTick', 'ChunkTracker.tick']) {
@@ -2841,6 +2910,8 @@ function assertAuthoritativeContainerSlotCodec () {
     'private boolean bridgeApplyingBulkContent',
     'private int[] bridgeAuthoritativeStackIds',
     'public int bridgeAuthoritativeStackId(int slot)',
+    'public boolean bridgeSetPredictedItem(int slot, BedrockItem item)',
+    'public boolean bridgeSetAuthoritativeItemSilently(int slot, BedrockItem item)',
     'this.type == ContainerType.CONTAINER || this.type == ContainerType.INVENTORY',
     'if (!this.bridgeApplyingJavaClick)',
     'this.bridgeSendJavaContainerSetSlot(slot)',
@@ -3686,7 +3757,11 @@ function assertFurnaceFamilyBridge () {
   for (const marker of [
     'ItemStackRequestActionType transferActionType',
     'bridgeCanUseStackRequestSource(transferActionType, nativeSource)',
-    'this.sendItemStackRequestTransfers(\n                requestId,\n                transferActionType,'
+    'this.sendItemStackRequestTransfers(\n                requestId,\n                transferActionType,',
+    'sourceContainer.bridgeSetPredictedItem(sourceBedrockSlot, safeCopy(sourceAfter))',
+    'destination.container.bridgeSetPredictedItem(',
+    'target.bridgeSetAuthoritativeItemSilently(targetSlot, safeCopy(next))',
+    'slot.clickSlot.container.bridgeSetAuthoritativeItemSilently('
   ]) {
     if (!inventorySource.includes(marker)) throw new Error(`InventoryContainer.java is missing selectable native-transfer marker: ${marker}`)
   }
@@ -3727,6 +3802,7 @@ import net.raphimc.viabedrock.protocol.data.enums.bedrock.ContainerType;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnumName;
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ItemStackRequestActionType;
 import net.raphimc.viabedrock.protocol.model.BedrockItem;
+import net.raphimc.viabedrock.api.model.container.player.InventoryContainer;
 
 public final class FurnaceFamilySmoke {
     private static void check(boolean value, String message) {
@@ -3735,6 +3811,25 @@ public final class FurnaceFamilySmoke {
 
     private static BedrockItem item(int identifier, int amount) {
         return new BedrockItem(identifier, (short) 0, (byte) amount);
+    }
+
+    private static BedrockItem item(int identifier, int amount, int stackId) {
+        BedrockItem item = item(identifier, amount);
+        item.setNetId(Integer.valueOf(stackId));
+        return item;
+    }
+
+    private static final class RecordingContainer extends Container {
+        int javaSlotPublications;
+
+        RecordingContainer() {
+            super(null, (byte) 11, ContainerType.CONTAINER, null, null, 1, "chest");
+        }
+
+        @Override
+        protected void bridgeSendJavaContainerSetSlot(int slot) {
+            this.javaSlotPublications++;
+        }
     }
 
     public static void main(String[] args) {
@@ -3783,6 +3878,36 @@ public final class FurnaceFamilySmoke {
         Container generic = new Container(null, (byte) 10, ContainerType.CONTAINER, null, null, 3, "chest") {};
         check(FurnaceContainer.bridgeQuickMoveActionType(generic, FurnaceContainer.RESULT_SLOT) == ItemStackRequestActionType.Place,
                 "ordinary container quick-move remains Place");
+
+        BedrockItem quickMoveSource = item(3, 10, 71);
+        check(InventoryContainer.bridgeQuickMoveTransferCount(quickMoveSource, 10, BedrockItem.empty()) == 10,
+                "quick-move fills an empty destination");
+        int firstMove = InventoryContainer.bridgeQuickMoveTransferCount(quickMoveSource, 10, item(3, 60, 70));
+        check(firstMove == 4, "quick-move merges only the available room");
+        int secondMove = InventoryContainer.bridgeQuickMoveTransferCount(
+                quickMoveSource,
+                10 - firstMove,
+                BedrockItem.empty());
+        check(firstMove + secondMove == 10 && secondMove == 6,
+                "quick-move splits a multi-item result across merge and empty targets");
+        check(InventoryContainer.bridgeQuickMoveTransferCount(quickMoveSource, 10, item(4, 1, 72)) == 0,
+                "quick-move rejects an incompatible merge target");
+
+        RecordingContainer recording = new RecordingContainer();
+        recording.setItem(0, item(3, 1, 71));
+        check(recording.javaSlotPublications == 1, "ordinary authoritative update publishes one Java slot");
+        recording.javaSlotPublications = 0;
+        recording.bridgeSetPredictedItem(0, item(3, 2, -115));
+        check(recording.getItem(0).amount() == 2, "prediction updates the local item count");
+        check(recording.bridgeAuthoritativeStackId(0) == 71,
+                "prediction preserves the authoritative native stack ID");
+        check(recording.javaSlotPublications == 0,
+                "prediction suppresses per-slot Java publication");
+        recording.bridgeSetAuthoritativeItemSilently(0, item(3, 2, 72));
+        check(recording.bridgeAuthoritativeStackId(0) == 72,
+                "authoritative batch update replaces the native stack ID");
+        check(recording.javaSlotPublications == 0,
+                "authoritative batch update suppresses per-slot Java publication");
 
         check(FurnaceContainer.bridgeJavaPropertyForBedrockProperty(0) == 2, "cook progress property");
         check(FurnaceContainer.bridgeJavaPropertyForBedrockProperty(1) == 0, "lit time property");

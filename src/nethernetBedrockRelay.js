@@ -6389,10 +6389,11 @@ class ViaBedrockRelayPlayer extends Player {
       return this.queueClientboundNativeBedrock(name, params, context)
     }
 
-    // ViaBedrock's current local Bedrock codec does not register the modern
-    // camera_spline packet (wire id 338). Sending it only produces repeated
-    // unknown-packet decoder warnings; it has no Java-side consumer yet.
-    if (name === 'camera_spline') {
+    // ViaBedrock's current local Bedrock codec does not register these modern
+    // packets. Sending either through the older codec encodes an invalid packet
+    // id (observed as repeated packet-0 warnings), and neither has a Java-side
+    // consumer yet.
+    if (name === 'camera_spline' || name === 'set_player_furnace_options') {
       this.recordBridgeToViaBedrock(name, params, 'dropped', {
         context,
         translation_status: 'dropped_unsupported_local_viabedrock_packet'

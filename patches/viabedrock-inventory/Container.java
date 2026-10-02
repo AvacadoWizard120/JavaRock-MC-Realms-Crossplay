@@ -194,6 +194,32 @@ public abstract class Container {
         return true;
     }
 
+    public boolean bridgeSetPredictedItem(int slot, BedrockItem item) {
+        boolean previousApplyingJavaClick = this.bridgeApplyingJavaClick;
+        boolean previousApplyingBulkContent = this.bridgeApplyingBulkContent;
+        this.bridgeApplyingJavaClick = true;
+        this.bridgeApplyingBulkContent = true;
+        try {
+            return this.setItem(slot, item);
+        } finally {
+            this.bridgeApplyingBulkContent = previousApplyingBulkContent;
+            this.bridgeApplyingJavaClick = previousApplyingJavaClick;
+        }
+    }
+
+    public boolean bridgeSetAuthoritativeItemSilently(int slot, BedrockItem item) {
+        boolean previousApplyingJavaClick = this.bridgeApplyingJavaClick;
+        boolean previousApplyingBulkContent = this.bridgeApplyingBulkContent;
+        this.bridgeApplyingJavaClick = false;
+        this.bridgeApplyingBulkContent = true;
+        try {
+            return this.setItem(slot, item);
+        } finally {
+            this.bridgeApplyingBulkContent = previousApplyingBulkContent;
+            this.bridgeApplyingJavaClick = previousApplyingJavaClick;
+        }
+    }
+
     public boolean setItems(BedrockItem[] items) {
         if (items.length != this.items.length) {
             if (!this.bridgePromoteToDoubleChest(items.length)) {
@@ -242,7 +268,7 @@ public abstract class Container {
         }
     }
 
-    private void bridgeSendJavaContainerSetSlot(int slot) {
+    protected void bridgeSendJavaContainerSetSlot(int slot) {
         try {
             InventoryContainer inventory = this.user.get(InventoryTracker.class).getInventoryContainer();
             int stateId = inventory.bridgeNextJavaStateId();
