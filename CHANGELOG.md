@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.4 - 2026-10-05
+
+- Damaged tools, weapons, and armor now send both current damage and maximum durability, restoring the durability bar.
+- Furnace shift-clicks and crafting request chains now publish one settled visible inventory state instead of racing newer state with hidden or intermediate snapshots.
+- **View → Clean Up JavaRock Files** previews and removes old packet captures, support ZIPs, packet logs, rotated ViaProxy logs, and stale patched ViaProxy files while keeping current files and account data.
+- A stopped bridge with a reused Windows PID no longer leaves **Stop Bridge** stuck, blocks updates, or lets JavaRock terminate an unrelated process.
+
 ## 0.4.3 - 2026-10-02
 
 - Placing a block now consumes its matching Realm sound echo, so one placement plays one sound while other players' placements remain audible.

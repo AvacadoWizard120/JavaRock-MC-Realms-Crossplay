@@ -3884,6 +3884,120 @@ function assertUnsupportedCameraSplineCancelled () {
   }
 }
 
+function assertDurabilityComponents () {
+  const containerSource = fs.readFileSync(path.join(patchRoot, 'Container.java'), 'utf8')
+  for (const marker of [
+    'bridgeJava26_2MaximumDamage(javaItem.identifier())',
+    'StructuredDataKey.MAX_DAMAGE',
+    'case 949, 950, 951, 952, 953, 1327 -> 131',
+    'case 969, 970, 971, 972, 973, 1332 -> 2031'
+  ]) {
+    if (!containerSource.includes(marker)) throw new Error(`Container.java is missing explicit durability marker: ${marker}`)
+  }
+
+  const bytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
+    'net/raphimc/viabedrock/api/model/container/Container.class'
+  )]).stdout
+  for (const marker of ['bridgeJava26_2MaximumDamage', 'StructuredDataKey.MAX_DAMAGE', 'StructuredDataKey.DAMAGE']) {
+    if (!bytecode.includes(marker)) throw new Error(`compiled Container.class is missing explicit durability bytecode: ${marker}`)
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-durability-components-'))
+  try {
+    const packageDir = path.join(tmp, 'net', 'raphimc', 'viabedrock', 'api', 'model', 'container')
+    fs.mkdirSync(packageDir, { recursive: true })
+    const sourcePath = path.join(packageDir, 'DurabilityComponentSmoke.java')
+    fs.writeFileSync(sourcePath, `
+package net.raphimc.viabedrock.api.model.container;
+
+import com.viaversion.viaversion.api.minecraft.data.StructuredData;
+import com.viaversion.viaversion.api.minecraft.data.StructuredDataContainer;
+import com.viaversion.viaversion.api.minecraft.data.StructuredDataKey;
+import com.viaversion.viaversion.api.minecraft.item.Item;
+import com.viaversion.viaversion.api.minecraft.item.StructuredItem;
+import com.viaversion.viaversion.api.type.types.item.StructuredDataType;
+import com.viaversion.viaversion.api.type.types.version.VersionedTypes;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import java.lang.reflect.Field;
+
+public final class DurabilityComponentSmoke {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) throws Exception {
+        final int[] ids = {
+            887, 888, 890, 915, 918, 919, 922, 939, 940, 941, 942, 943, 944, 945,
+            946, 947, 948, 949, 950, 951, 952, 953, 954, 955, 956, 957, 958, 959,
+            960, 961, 962, 963, 964, 965, 966, 967, 968, 969, 970, 971, 972, 973,
+            982, 983, 984, 985, 986, 987, 988, 989, 990, 991, 992, 993, 994, 995,
+            996, 997, 998, 999, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007,
+            1008, 1009, 1082, 1134, 1253, 1325, 1326, 1327, 1328, 1329, 1330,
+            1331, 1332, 1362, 1370, 1457
+        };
+        final int[] maxima = {
+            25, 100, 432, 275, 64, 64, 384, 59, 59, 59, 59, 59, 190, 190, 190,
+            190, 190, 131, 131, 131, 131, 131, 32, 32, 32, 32, 32, 250, 250, 250,
+            250, 250, 1561, 1561, 1561, 1561, 1561, 2031, 2031, 2031, 2031, 2031,
+            55, 80, 75, 65, 121, 176, 165, 143, 165, 240, 225, 195, 165, 240, 225,
+            195, 363, 528, 495, 429, 77, 112, 105, 91, 407, 592, 555, 481, 64, 238,
+            500, 336, 59, 131, 190, 250, 32, 1561, 2031, 250, 465, 64
+        };
+        check(ids.length == 84 && maxima.length == ids.length, "complete Java 26.2 durability table fixture");
+        for (int i = 0; i < ids.length; i++) {
+            check(Container.bridgeJava26_2MaximumDamage(ids[i]) == maxima[i],
+                    "maximum damage for Java 26.2 item " + ids[i]);
+        }
+        int populated = 0;
+        for (int id = 0; id < 1537; id++) {
+            if (Container.bridgeJava26_2MaximumDamage(id) > 0) populated++;
+        }
+        check(populated == ids.length, "durability table has no missing or extra Java 26.2 ids");
+        check(Container.bridgeJava26_2MaximumDamage(0) == 0, "air is not damageable");
+        check(Container.bridgeJava26_2MaximumDamage(923) == 0, "ordinary item is not damageable");
+
+        // Initialize only the two serializers this isolated codec smoke reads.
+        // The production proxy initializes the complete table while loading its
+        // protocol mappings.
+        final Field typesField = StructuredDataType.class.getDeclaredField("types");
+        typesField.setAccessible(true);
+        final StructuredDataKey<?>[] keys = new StructuredDataKey<?>[122];
+        keys[2] = StructuredDataKey.MAX_DAMAGE;
+        keys[3] = StructuredDataKey.DAMAGE;
+        typesField.set(VersionedTypes.V26_2.structuredData(), keys);
+
+        final Item encoded = new StructuredItem(951, 1, new StructuredDataContainer(
+                new StructuredData<?>[] {
+                        StructuredData.of(StructuredDataKey.MAX_DAMAGE,
+                                Container.bridgeJava26_2MaximumDamage(951), 2),
+                        StructuredData.of(StructuredDataKey.DAMAGE, 95, 3)
+                }));
+        final ByteBuf buffer = Unpooled.buffer();
+        try {
+            VersionedTypes.V26_2.item().write(buffer, encoded);
+            final Item decoded = VersionedTypes.V26_2.item().read(buffer);
+            check(decoded.identifier() == 951, "stone pickaxe id survives the Java 26.2 codec");
+            check(Integer.valueOf(131).equals(decoded.dataContainer().get(StructuredDataKey.MAX_DAMAGE)),
+                    "max_damage survives the Java 26.2 codec");
+            check(Integer.valueOf(95).equals(decoded.dataContainer().get(StructuredDataKey.DAMAGE)),
+                    "damage survives the Java 26.2 codec");
+            check(!buffer.isReadable(), "durability item codec consumes the complete payload");
+        } finally {
+            buffer.release();
+        }
+    }
+}
+`)
+
+    const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
+    run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
+    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.api.model.container.DurabilityComponentSmoke'])
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
 function assertFurnaceFamilyBridge () {
   const furnaceSourceName = 'FurnaceContainer.java'
   const fuelSourceName = 'BridgeFurnaceFuelData.java'
@@ -3926,6 +4040,8 @@ function assertFurnaceFamilyBridge () {
     'container_number_key_take_from_read_only_slot',
     'ItemStackRequestActionType.Take',
     'bridgeApplyDamageComponent',
+    'bridgeJava26_2MaximumDamage',
+    'StructuredDataKey.MAX_DAMAGE',
     'StructuredDataKey.DAMAGE',
     'damage.asInt()'
   ]) {
@@ -3937,7 +4053,7 @@ function assertFurnaceFamilyBridge () {
   const containerBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
     'net/raphimc/viabedrock/api/model/container/Container.class'
   )]).stdout
-  for (const marker of ['bridgeApplyDamageComponent', 'StructuredDataKey.DAMAGE', 'NumberTag.asInt']) {
+  for (const marker of ['bridgeApplyDamageComponent', 'bridgeJava26_2MaximumDamage', 'StructuredDataKey.MAX_DAMAGE', 'StructuredDataKey.DAMAGE', 'NumberTag.asInt']) {
     if (!containerBytecode.includes(marker)) throw new Error(`compiled Container.class is missing durability-component bytecode: ${marker}`)
   }
   const inventorySource = fs.readFileSync(path.join(patchRoot, 'InventoryContainer.java'), 'utf8')
@@ -3951,6 +4067,18 @@ function assertFurnaceFamilyBridge () {
     'slot.clickSlot.container.bridgeSetAuthoritativeItemSilently('
   ]) {
     if (!inventorySource.includes(marker)) throw new Error(`InventoryContainer.java is missing selectable native-transfer marker: ${marker}`)
+  }
+  for (const marker of [
+    'boolean settledLatestRequest = false;',
+    'bridgeShouldPublishNativeResponse(',
+    'boolean needsRefresh = changedSlots || rolledBack || settledLatestRequest;',
+    'needsRefresh && (rolledBack || settledLatestRequest || pendingRequestCount <= 0)',
+    '" published=" + publishSettledState'
+  ]) {
+    if (!inventorySource.includes(marker)) throw new Error(`InventoryContainer.java is missing settled response publication marker: ${marker}`)
+  }
+  if (containerSource.includes('inventory.bridgePublishJavaInventorySnapshot(reason + ":player_inventory")')) {
+    throw new Error('external container snapshots must not precede the merged visible snapshot with a hidden window-0 update')
   }
   const fuelSource = fs.readFileSync(path.join(patchRoot, fuelSourceName), 'utf8')
   for (const marker of ['Mojang FuelValues.vanillaBurnTimes', 'minecraft:lava_bucket', 'minecraft:wooden_spear']) {
@@ -4103,6 +4231,23 @@ public final class FurnaceFamilySmoke {
         check(FurnaceContainer.bridgeDefaultCookTime(ContainerType.FURNACE) == 200, "furnace cook duration");
         check(FurnaceContainer.bridgeDefaultCookTime(ContainerType.SMOKER) == 100, "smoker cook duration");
         check(FurnaceContainer.bridgeDefaultCookTime(ContainerType.BLAST_FURNACE) == 100, "blast cook duration");
+        check(Container.bridgeJava26_2MaximumDamage(950) == 131, "stone shovel maximum durability");
+        check(Container.bridgeJava26_2MaximumDamage(951) == 131, "stone pickaxe maximum durability");
+        check(Container.bridgeJava26_2MaximumDamage(962) == 250, "iron axe maximum durability");
+        check(Container.bridgeJava26_2MaximumDamage(1457) == 64, "brush maximum durability");
+        check(Container.bridgeJava26_2MaximumDamage(Integer.MAX_VALUE) == 0, "unknown item is not made damageable");
+        check(!InventoryContainer.bridgeShouldPublishNativeResponse(true, false, false, 3),
+                "intermediate request-chain ACK must not replay a stale full screen");
+        check(InventoryContainer.bridgeShouldPublishNativeResponse(false, false, true, 3),
+                "the latest request ACK flushes the settled screen even without slot deltas");
+        check(InventoryContainer.bridgeShouldPublishNativeResponse(true, false, true, 3),
+                "the latest request ACK publishes the settled screen");
+        check(InventoryContainer.bridgeShouldPublishNativeResponse(true, false, false, 0),
+                "a lone completed request publishes its settled screen");
+        check(InventoryContainer.bridgeShouldPublishNativeResponse(false, true, false, 3),
+                "a rejected request publishes its rollback immediately");
+        check(!InventoryContainer.bridgeShouldPublishNativeResponse(false, false, false, 0),
+                "an empty unrelated response does not publish a redundant screen");
     }
 }
 `)
@@ -4159,6 +4304,7 @@ assertAuthoritativeContainerSlotCodec()
 assertMouseActionStateMachine()
 assertRenderingBehavior()
 assertCraftingTableBridge()
+assertDurabilityComponents()
 assertFurnaceFamilyBridge()
 assertUnsupportedCameraSplineCancelled()
 

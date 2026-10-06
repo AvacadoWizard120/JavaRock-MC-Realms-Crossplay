@@ -28,6 +28,7 @@ const rootFiles = [
 ]
 
 const scriptFiles = [
+  'Clear-JavaRockStorage.ps1',
   'JavaRock-Gui.ps1',
   'Install-JavaRockRequirements.ps1',
   'install-viaproxy.cjs',

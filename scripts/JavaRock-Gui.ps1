@@ -146,6 +146,7 @@ $PackageInfo = Get-Content -LiteralPath (Join-Path $ProjectRoot 'package.json') 
 $CurrentVersion = [string]$PackageInfo.version
 $UpdaterScript = Join-Path $PSScriptRoot 'Update-JavaRock.ps1'
 $SupportBundleScript = Join-Path $PSScriptRoot 'New-JavaRockSupportBundle.ps1'
+$StorageCleanupScript = Join-Path $PSScriptRoot 'Clear-JavaRockStorage.ps1'
 $DefaultSupportUploadDestination = 'https://javarock-support-inbox.support-inbox.workers.dev/v1/bundles'
 $DefaultUpstreamBedrockVersion = ''
 Push-Location $ProjectRoot
@@ -368,6 +369,76 @@ function Test-ProcessAlive {
     return $null -ne (Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue)
 }
 
+$script:TerminalBridgeStates = @(
+    'stopped',
+    'closed',
+    'exited',
+    'terminated',
+    'failed',
+    'completed',
+    'cancelled',
+    'canceled'
+)
+
+function ConvertTo-UtcDateTime {
+    param($Value)
+
+    if ($null -eq $Value -or -not ([string]$Value).Trim()) { return $null }
+    try {
+        return ([DateTimeOffset]::Parse([string]$Value)).UtcDateTime
+    } catch {
+        return $null
+    }
+}
+
+function Test-TerminalBridgeState {
+    param($Status)
+
+    $state = [string](Get-ObjectValue $Status 'state' '')
+    return $script:TerminalBridgeStates -contains $state.Trim().ToLowerInvariant()
+}
+
+function Test-StatusProcessIdentity {
+    param(
+        $Status,
+        [ValidateSet('bridge', 'viaProxy')]
+        [string]$Role
+    )
+
+    if ($null -eq $Status -or (Test-TerminalBridgeState $Status)) { return $false }
+    $roleStatus = if ($Role -eq 'bridge') { $Status } else { Get-ObjectValue $Status 'viaProxy' $null }
+    $processIdValue = Get-ObjectValue $roleStatus 'pid' $null
+    if (-not $processIdValue) { return $false }
+
+    $processId = 0
+    if (-not [int]::TryParse([string]$processIdValue, [ref]$processId) -or $processId -le 0) { return $false }
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return $false }
+
+    $allowedNames = if ($Role -eq 'bridge') { @('node', 'nodejs') } else { @('java', 'javaw') }
+    if ($allowedNames -notcontains ([string]$process.ProcessName).ToLowerInvariant()) { return $false }
+
+    $actualStartedAt = $null
+    try { $actualStartedAt = $process.StartTime.ToUniversalTime() } catch {}
+    $bridgeStartedAt = ConvertTo-UtcDateTime (Get-ObjectValue $Status 'startedAt' $null)
+    $statusUpdatedAt = ConvertTo-UtcDateTime (Get-ObjectValue $Status 'updatedAt' $null)
+    $roleStartedAt = ConvertTo-UtcDateTime (Get-ObjectValue $roleStatus 'startedAt' $null)
+    if ($null -eq $actualStartedAt -or $null -eq $bridgeStartedAt) { return $false }
+
+    if ($Role -eq 'bridge') {
+        return $actualStartedAt -ge $bridgeStartedAt.AddSeconds(-30) -and
+            $actualStartedAt -le $bridgeStartedAt.AddSeconds(2)
+    }
+    if ($null -ne $roleStartedAt) {
+        return $actualStartedAt -ge $roleStartedAt.AddSeconds(-30) -and
+            $actualStartedAt -le $roleStartedAt.AddSeconds(2)
+    }
+    if ($null -eq $statusUpdatedAt) { return $false }
+    if ($actualStartedAt -lt $bridgeStartedAt.AddSeconds(-5)) { return $false }
+    if ($actualStartedAt -gt $statusUpdatedAt.AddSeconds(5)) { return $false }
+    return $true
+}
+
 function Quote-NativeArgument {
     param([AllowEmptyString()][string]$Value)
 
@@ -526,6 +597,131 @@ function Open-LogsDirectory {
     }
 }
 
+function Format-StorageSize {
+    param([int64]$Bytes)
+
+    if ($Bytes -ge 1GB) { return '{0:N2} GiB' -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return '{0:N1} MiB' -f ($Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return '{0:N1} KiB' -f ($Bytes / 1KB) }
+    return "$Bytes bytes"
+}
+
+function Test-TrackedGuiProcess {
+    param($Process)
+
+    if ($null -eq $Process) { return $false }
+    try { return -not $Process.HasExited } catch { return $false }
+}
+
+function Get-StorageCleanupBlockReason {
+    if (Test-BridgeActivity) { return 'Stop the active bridge or recorder before cleaning JavaRock files.' }
+    if (Test-TrackedGuiProcess $script:StopProcess) { return 'Wait for JavaRock to finish stopping the bridge before cleaning files.' }
+    if (Test-TrackedGuiProcess $script:RealmProcess) { return 'Wait for the Realm refresh to finish before cleaning files.' }
+    if (Test-TrackedGuiProcess $script:SupportProcess) { return 'Wait for the support ZIP to finish before cleaning files.' }
+    if ($script:InstallingUpdate -or (Test-TrackedGuiProcess $script:UpdateInstallProcess)) { return 'Wait for the update to finish before cleaning files.' }
+    if (Test-TrackedGuiProcess $script:UpdateProcess) { return 'Wait for the update check to finish before cleaning files.' }
+    if (Test-TrackedGuiProcess $script:ChangelogProcess) { return 'Wait for the changelog request to finish before cleaning files.' }
+    return ''
+}
+
+function Invoke-StorageCleanup {
+    param([switch]$Apply)
+
+    if (-not (Test-Path -LiteralPath $StorageCleanupScript -PathType Leaf)) {
+        throw "JavaRock is missing $StorageCleanupScript."
+    }
+    $arguments = @('-ProjectRoot', $ProjectRoot)
+    if ($Apply) { $arguments += '-Apply' }
+    $output = @(& $StorageCleanupScript @arguments) -join "`n"
+    if (-not $output.Trim()) { throw 'The cleanup tool returned no result.' }
+    return $output | ConvertFrom-Json
+}
+
+function Show-StorageCleanup {
+    $blockReason = Get-StorageCleanupBlockReason
+    if ($blockReason) {
+        [void][Windows.Forms.MessageBox]::Show(
+            $blockReason,
+            'Clean Up JavaRock Files',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Information
+        )
+        return
+    }
+
+    try {
+        $preview = Invoke-StorageCleanup
+        if ([string](Get-ObjectValue $preview 'state' '') -eq 'blocked') {
+            [void][Windows.Forms.MessageBox]::Show(
+                [string](Get-ObjectValue $preview 'message' 'JavaRock files are currently in use.'),
+                'Clean Up JavaRock Files',
+                [Windows.Forms.MessageBoxButtons]::OK,
+                [Windows.Forms.MessageBoxIcon]::Information
+            )
+            return
+        }
+        if ([string](Get-ObjectValue $preview 'state' '') -ne 'ready') {
+            throw [string](Get-ObjectValue $preview 'message' 'JavaRock could not scan its files.')
+        }
+
+        $candidateCount = [int](Get-ObjectValue $preview 'candidateCount' 0)
+        [int64]$reclaimableBytes = [int64](Get-ObjectValue $preview 'reclaimableBytes' 0)
+        if ($candidateCount -le 0) {
+            [void][Windows.Forms.MessageBox]::Show(
+                'There are no old JavaRock files to clean.',
+                'Clean Up JavaRock Files',
+                [Windows.Forms.MessageBoxButtons]::OK,
+                [Windows.Forms.MessageBoxIcon]::Information
+            )
+            return
+        }
+
+        $categoryLines = @()
+        foreach ($category in @(Get-ObjectValue $preview 'categories' @())) {
+            $categoryLines += "- $([string](Get-ObjectValue $category 'label' 'Old files')): $([int](Get-ObjectValue $category 'fileCount' 0)) file(s), $(Format-StorageSize ([int64](Get-ObjectValue $category 'bytes' 0)))"
+        }
+        $previewText = "Remove $candidateCount old file(s) and free up to $(Format-StorageSize $reclaimableBytes)?`r`n`r`n$($categoryLines -join "`r`n")`r`n`r`nJavaRock keeps current files and the newest captures, support ZIPs, logs, and patched runtime. Accounts, settings, dependencies, and the packet ledger are not removed."
+        $answer = [Windows.Forms.MessageBox]::Show(
+            $previewText,
+            'Clean Up JavaRock Files',
+            [Windows.Forms.MessageBoxButtons]::YesNo,
+            [Windows.Forms.MessageBoxIcon]::Warning,
+            [Windows.Forms.MessageBoxDefaultButton]::Button2
+        )
+        if ($answer -ne [Windows.Forms.DialogResult]::Yes) { return }
+
+        $blockReason = Get-StorageCleanupBlockReason
+        if ($blockReason) { throw $blockReason }
+        $result = Invoke-StorageCleanup -Apply
+        $state = [string](Get-ObjectValue $result 'state' '')
+        if ($state -eq 'blocked') { throw [string](Get-ObjectValue $result 'message' 'JavaRock files are currently in use.') }
+        if ($state -notin @('complete', 'partial')) { throw [string](Get-ObjectValue $result 'message' 'JavaRock could not clean its files.') }
+
+        $deletedCount = [int](Get-ObjectValue $result 'deletedCount' 0)
+        [int64]$freedBytes = [int64](Get-ObjectValue $result 'freedBytes' 0)
+        $message = "Removed $deletedCount old file(s) and freed $(Format-StorageSize $freedBytes)."
+        if ($state -eq 'partial') {
+            $failures = @(Get-ObjectValue $result 'failures' @())
+            $message += "`r`n`r`n$($failures.Count) file(s) could not be removed because they were in use or unavailable."
+        }
+        Add-Log 'cleanup' $message
+        [void][Windows.Forms.MessageBox]::Show(
+            $message,
+            'Clean Up JavaRock Files',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            $(if ($state -eq 'partial') { [Windows.Forms.MessageBoxIcon]::Warning } else { [Windows.Forms.MessageBoxIcon]::Information })
+        )
+    } catch {
+        Add-Log 'cleanup' "Cleanup failed: $($_.Exception.Message)"
+        [void][Windows.Forms.MessageBox]::Show(
+            $_.Exception.Message,
+            'Clean Up JavaRock Files',
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Error
+        )
+    }
+}
+
 function Add-Log {
     param(
         [string]$Source,
@@ -647,10 +843,13 @@ $darkMenuItem.CheckOnClick = $true
 $darkMenuItem.Checked = $script:DarkMode
 $openLogsFolderMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Open Logs Folder')
 $clearConsoleMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Clear Console Output')
+$cleanupStorageMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Clean Up JavaRock Files...')
 [void]$viewMenu.DropDownItems.Add($darkMenuItem)
 [void]$viewMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$viewMenu.DropDownItems.Add($openLogsFolderMenuItem)
 [void]$viewMenu.DropDownItems.Add($clearConsoleMenuItem)
+[void]$viewMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$viewMenu.DropDownItems.Add($cleanupStorageMenuItem)
 $diagnosticsMenu = New-Object System.Windows.Forms.ToolStripMenuItem('Diagnostics')
 $createSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Create support ZIP...')
 $configureSupportMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem('Support upload settings...')
@@ -998,7 +1197,7 @@ function Set-DarkTheme {
     $menu.ForeColor = $foreground
     $menuRenderer = [JavaRockNativeWindow]::CreateMenuRenderer($Enabled)
     $menu.Renderer = $menuRenderer
-    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $openLogsFolderMenuItem, $clearConsoleMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $changelogMenuItem, $versionMenuItem)) {
+    foreach ($menuItem in @($accountMenu, $loginMenuItem, $logoutMenuItem, $refreshMenuItem, $viewMenu, $darkMenuItem, $openLogsFolderMenuItem, $clearConsoleMenuItem, $cleanupStorageMenuItem, $diagnosticsMenu, $createSupportMenuItem, $configureSupportMenuItem, $helpMenu, $checkUpdatesMenuItem, $changelogMenuItem, $versionMenuItem)) {
         $menuItem.BackColor = $panel
         $menuItem.ForeColor = $foreground
     }
@@ -1289,23 +1488,32 @@ function Update-ModeControls {
 }
 
 function Test-BridgeActivity {
-    if ($null -ne $script:BridgeProcess -and -not $script:BridgeProcess.HasExited) { return $true }
     $status = Read-JsonFile -Path $StatusFile
-    $bridgePid = Get-ObjectValue $status 'pid' $null
-    $viaProxy = Get-ObjectValue $status 'viaProxy' $null
-    $viaPid = Get-ObjectValue $viaProxy 'pid' $null
-    return (Test-ProcessAlive $bridgePid) -or (Test-ProcessAlive $viaPid)
+    $ownedLaunchActive = $null -ne $script:BridgeProcess -and -not $script:BridgeProcess.HasExited
+    if ($ownedLaunchActive) {
+        if (-not (Test-TerminalBridgeState $status)) { return $true }
+
+        # A freshly launched wrapper can briefly coexist with the previous
+        # run's terminal status file. It is active only when it started after
+        # that terminal snapshot; an old wrapper winding down is not.
+        $statusUpdatedAt = ConvertTo-UtcDateTime (Get-ObjectValue $status 'updatedAt' $null)
+        if ($null -eq $statusUpdatedAt) { return $true }
+        try {
+            if ($script:BridgeProcess.StartTime.ToUniversalTime() -gt $statusUpdatedAt) { return $true }
+        } catch {}
+        return $false
+    }
+    if (Test-TerminalBridgeState $status) { return $false }
+    return (Test-StatusProcessIdentity -Status $status -Role bridge) -or
+        (Test-StatusProcessIdentity -Status $status -Role viaProxy)
 }
 
 function Update-JoinReadiness {
     param($Status = $null)
 
     if ($null -eq $Status) { $Status = Read-JsonFile -Path $StatusFile }
-    $bridgePid = Get-ObjectValue $Status 'pid' $null
-    $viaProxy = Get-ObjectValue $Status 'viaProxy' $null
-    $viaPid = Get-ObjectValue $viaProxy 'pid' $null
-    $bridgeAlive = Test-ProcessAlive $bridgePid
-    $viaAlive = Test-ProcessAlive $viaPid
+    $bridgeAlive = Test-StatusProcessIdentity -Status $Status -Role bridge
+    $viaAlive = Test-StatusProcessIdentity -Status $Status -Role viaProxy
     $recorder = $modeCombo.Text -eq 'Bedrock packet recorder'
     $script:JoinReady = if ($recorder) { $bridgeAlive } else { $bridgeAlive -and $viaAlive }
     $clientName = if ($recorder) { 'Bedrock' } else { 'Java' }
@@ -2154,6 +2362,7 @@ $refreshButton.Add_Click({ Refresh-Realms })
 $refreshMenuItem.Add_Click({ Refresh-Realms })
 $openLogsFolderMenuItem.Add_Click({ Open-LogsDirectory })
 $clearConsoleMenuItem.Add_Click({ Clear-LogDisplay -Control $logBox })
+$cleanupStorageMenuItem.Add_Click({ Show-StorageCleanup })
 $startButton.Add_Click({
     if (Test-BridgeActivity) { Stop-BridgeOrRecorder } else { Start-BridgeOrRecorder }
     Update-PrimaryActionButton
@@ -2269,8 +2478,8 @@ $timer.Add_Tick({
     $bridgePid = Get-ObjectValue $status 'pid' $null
     $viaProxy = Get-ObjectValue $status 'viaProxy' $null
     $viaPid = Get-ObjectValue $viaProxy 'pid' $null
-    $bridgeText = if ($bridgePid) { "$bridgePid $(if (Test-ProcessAlive $bridgePid) { 'running' } else { 'stopped' })" } else { '-' }
-    $viaText = if ($viaPid) { "$viaPid $(if (Test-ProcessAlive $viaPid) { 'running' } else { 'stopped' })" } else { '-' }
+    $bridgeText = if ($bridgePid) { "$bridgePid $(if (Test-StatusProcessIdentity -Status $status -Role bridge) { 'running' } else { 'stopped' })" } else { '-' }
+    $viaText = if ($viaPid) { "$viaPid $(if (Test-StatusProcessIdentity -Status $status -Role viaProxy) { 'running' } else { 'stopped' })" } else { '-' }
     $pidStatus.Text = "Bridge: $bridgeText   ViaProxy: $viaText"
     Update-JoinReadiness $status
     Update-PrimaryActionButton
@@ -2345,12 +2554,52 @@ if ($SmokeTest) {
     if ($joinReadyLabel.Text -notmatch 'wait|join now') {
         throw 'Connection readiness status is missing.'
     }
-    Update-JoinReadiness ([pscustomobject]@{
-        pid = $PID
-        viaProxy = [pscustomobject]@{ pid = $PID }
-    })
-    if (-not $script:JoinReady -or $joinReadyLabel.Text -ne 'Java: join now') {
-        throw 'Connection readiness did not turn green when both relay processes were running.'
+    $identitySmokePath = Join-Path ([IO.Path]::GetTempPath()) "javarock-identity-smoke-$([Guid]::NewGuid().ToString('N')).cjs"
+    $identitySmokeProcess = $null
+    $originalModeIndex = $modeCombo.SelectedIndex
+    try {
+        [IO.File]::WriteAllText($identitySmokePath, "'use strict'; setInterval(() => {}, 1000)`r`n", [Text.UTF8Encoding]::new($false))
+        $identitySmokeProcess = Start-Process -FilePath 'node.exe' -ArgumentList @($identitySmokePath, 'bedrock-packet-recorder') -WindowStyle Hidden -PassThru
+        $identitySmokeProcess.Refresh()
+        $identityStartedAt = $identitySmokeProcess.StartTime.ToUniversalTime()
+        $modeCombo.SelectedIndex = 1
+        $activeIdentityStatus = [pscustomobject]@{
+            state = 'ready_for_bedrock_client'
+            pid = $identitySmokeProcess.Id
+            startedAt = $identityStartedAt.ToString('o')
+            updatedAt = [DateTime]::UtcNow.ToString('o')
+        }
+        Update-JoinReadiness $activeIdentityStatus
+        if (-not $script:JoinReady -or $joinReadyLabel.Text -ne 'Bedrock: join now') {
+            throw 'Connection readiness did not accept a matching live bridge process identity.'
+        }
+
+        Update-JoinReadiness ([pscustomobject]@{
+            state = 'stopped'
+            pid = $identitySmokeProcess.Id
+            startedAt = $identityStartedAt.ToString('o')
+            updatedAt = [DateTime]::UtcNow.ToString('o')
+        })
+        if ($script:JoinReady) {
+            throw 'A terminal bridge status reused a live PID and was still treated as active.'
+        }
+
+        Update-JoinReadiness ([pscustomobject]@{
+            state = 'ready_for_bedrock_client'
+            pid = $identitySmokeProcess.Id
+            startedAt = $identityStartedAt.AddHours(-1).ToString('o')
+            updatedAt = $identityStartedAt.AddHours(-1).AddMinutes(1).ToString('o')
+        })
+        if ($script:JoinReady) {
+            throw 'A reused PID with a mismatched process start time was still treated as active.'
+        }
+    } finally {
+        $modeCombo.SelectedIndex = $originalModeIndex
+        if ($null -ne $identitySmokeProcess) {
+            Stop-Process -Id $identitySmokeProcess.Id -Force -ErrorAction SilentlyContinue
+            $identitySmokeProcess.Dispose()
+        }
+        Remove-Item -LiteralPath $identitySmokePath -Force -ErrorAction SilentlyContinue
     }
     Set-DarkTheme $false
     if ($manualRealm.BackColor.ToArgb() -ne ([Drawing.SystemColors]::Window).ToArgb()) {

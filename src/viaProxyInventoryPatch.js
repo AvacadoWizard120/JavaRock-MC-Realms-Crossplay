@@ -6,7 +6,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const PATCH_ID = 'v0.4.3-viaproxy-3.4.13-placement-particles-durability'
+const PATCH_ID = 'v0.4.4-viaproxy-3.4.13-durability-inventory-settle'
 const CLASS_RELATIVE_PATHS = [
   'net/raphimc/viabedrock/protocol/rewriter/BlockStateRewriter.class',
   'net/raphimc/viabedrock/protocol/packet/JoinPackets.class',
