@@ -12,6 +12,29 @@ function assertNotIncludes (file, needle) {
   if (text.includes(needle)) throw new Error(`${file} still contains stale text: ${needle}`)
 }
 
+function assertCraftOutputQuickMoveIgnoresCursor () {
+  const file = 'patches/viabedrock-inventory/InventoryContainer.java'
+  const source = fs.readFileSync(file, 'utf8')
+  const methodStart = source.indexOf('private boolean handleCraftingOutputClick(')
+  const methodEnd = source.indexOf('private boolean handleCraftingOutputSwap(', methodStart)
+  if (methodStart < 0 || methodEnd < 0) throw new Error(`${file} is missing crafting-output click handling`)
+
+  const method = source.slice(methodStart, methodEnd)
+  const quickMoveStart = method.indexOf('if (input == ContainerInput.QUICK_MOVE) {')
+  const ordinaryCursorStart = method.indexOf('if (!isEmpty(this.carriedItem))', quickMoveStart)
+  if (quickMoveStart < 0 || ordinaryCursorStart < 0) throw new Error(`${file} is missing the QUICK_MOVE or ordinary cursor branch`)
+
+  const quickMoveBranch = method.slice(quickMoveStart, ordinaryCursorStart)
+  if (!quickMoveBranch.includes('bridgeCommitCraftDirectToInventory(recipe,')) {
+    throw new Error('crafting-output QUICK_MOVE must retain the authoritative direct-to-inventory flow')
+  }
+  if (quickMoveBranch.includes('carriedItem') || quickMoveBranch.includes('cursor_busy')) {
+    throw new Error('crafting-output QUICK_MOVE must work with a nonempty carried cursor')
+  }
+}
+
+assertCraftOutputQuickMoveIgnoresCursor()
+
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'bridgePickupCraftResultToCursor')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'craft_2x2_pickup_to_cursor')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'sendNativeCraftItemStackRequest')
@@ -39,6 +62,7 @@ assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'BridgeRe
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'bridgeLocalPredictionForContainerSlot')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'bridgeSyncCarriedItemFromHud')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'quick_move_blocked_with_cursor')
+assertNotIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'craft_output_quick_move_cursor_busy')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'cursorAfter.setNetId(Integer.valueOf(requestId))')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'bridgeLastKnownCraftingGrid')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'bridgeCraftingGridItemForReturn')
@@ -71,7 +95,7 @@ assertIncludes('run-bedrock-packet-recorder-latest.ps1', '[string]$RealmId')
 assertIncludes('run-bedrock-packet-recorder-latest.ps1', '[int]$RealmIndex')
 assertIncludes('run-bedrock-packet-recorder-latest.ps1', '--bridge-status-file')
 assertIncludes('package.json', 'bedrock:packet-recorder')
-assertIncludes('src/viaProxyInventoryPatch.js', 'v0.4.4-viaproxy-3.4.13-durability-inventory-settle')
+assertIncludes('src/viaProxyInventoryPatch.js', 'v0.4.5-viaproxy-3.4.13-nbt-durability-craft-quickmove')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'writeItemStackRequestResultDescriptor(wrapper, result)')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'ItemStackRequestInstanceDescriptor')
 assertIncludes('patches/viabedrock-inventory/InventoryContainer.java', 'wrapper.write(BedrockTypes.STRING, identifier)')

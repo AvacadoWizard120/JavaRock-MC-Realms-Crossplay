@@ -24,7 +24,7 @@ function roundTrip (version, name, params) {
 }
 
 const emptyExtra = {
-  has_nbt: 'false',
+  has_nbt: false,
   can_place_on: [],
   can_destroy: []
 }
@@ -59,7 +59,7 @@ assert.strictEqual(camelItem.stack_id, 123)
 assert.strictEqual(camelItem.block_runtime_id, 456)
 assert.deepStrictEqual(camelItem.extra.can_place_on, ['minecraft:grass_block'])
 assert.deepStrictEqual(camelItem.extra.can_destroy, ['minecraft:dirt'])
-assert.strictEqual(camelItem.extra.has_nbt, 'false')
+assert.strictEqual(camelItem.extra.has_nbt, false)
 assert.strictEqual(camelItem.networkId, undefined)
 
 // inventory_slot switched to ItemV4 in 1.26.20. The default local 1.26.45
@@ -109,6 +109,39 @@ assert.deepStrictEqual(decodedContent45.input[4].extra.can_place_on, ['minecraft
 assert.deepStrictEqual(decodedContent45.input[4].extra.can_destroy, ['minecraft:dirt'])
 assert.strictEqual(decodedContent45.container.container_id, 'hotbar_and_inventory')
 assert.strictEqual(decodedContent45.storage_item.network_id, 0)
+
+// A string "true" satisfies the u16 mapper but misses protodef's boolean
+// choice arm, producing an empty compound on the wire. Exercise the complete
+// local packet codec so Bedrock Damage NBT must reach ViaBedrock intact.
+const damagedTool45 = normalizeClientboundForLocalViaBedrock('inventory_slot', {
+  window_id: 'inventory',
+  slot: 6,
+  item: {
+    network_id: 316,
+    count: 1,
+    metadata: 0,
+    has_stack_id: true,
+    stack_id: 19,
+    block_runtime_id: 0,
+    extra: {
+      has_nbt: true,
+      nbt: {
+        version: 1,
+        nbt: {
+          type: 'compound',
+          name: '',
+          value: { Damage: { type: 'int', value: 102 } }
+        }
+      },
+      can_place_on: [],
+      can_destroy: []
+    }
+  }
+})
+assert.strictEqual(damagedTool45.item.extra.has_nbt, true)
+const decodedDamagedTool45 = roundTrip('1.26.45', 'inventory_slot', damagedTool45)
+assert.strictEqual(decodedDamagedTool45.item.extra.has_nbt, true)
+assert.strictEqual(decodedDamagedTool45.item.extra.nbt.nbt.value.Damage.value, 102)
 
 // The 0.3.99 support capture contained this exact native cursor Take request,
 // but the Java patch omitted the 1.26.40+ legacy_type_id byte and encoded each
@@ -177,7 +210,7 @@ assert.deepStrictEqual(craftResultDescriptor45, {
   metadata: 0,
   count: 4,
   block_runtime_id: 1921718966,
-  extra: { has_nbt: 0, can_place_on: [], can_destroy: [] }
+  extra: { has_nbt: false, can_place_on: [], can_destroy: [] }
 })
 const craftResultRequest45 = {
   requests: [{
@@ -254,7 +287,7 @@ const preItemV4Content = normalizeClientboundForLocalViaBedrock('inventory_conte
 }, { localBedrockVersion: '1.26.20' })
 assert.deepStrictEqual(preItemV4Content.storage_item, { network_id: 0 })
 assert.deepStrictEqual(preItemV4Content.input[0], { network_id: 0 })
-assert.strictEqual(preItemV4Content.input[1].extra.has_nbt, 'false')
+assert.strictEqual(preItemV4Content.input[1].extra.has_nbt, false)
 assert.strictEqual(roundTrip('1.26.20', 'inventory_content', preItemV4Content).input[1].stack_id, 91)
 
 const itemNewShape = {
@@ -277,7 +310,7 @@ assert.strictEqual(equipment45.item.network_id, 12)
 assert.strictEqual(equipment45.item.has_stack_id, true)
 assert.strictEqual(equipment45.item.stack_id, 321)
 assert.strictEqual(equipment45.item.block_runtime_id, 777)
-assert.strictEqual(equipment45.item.extra.has_nbt, 'false')
+assert.strictEqual(equipment45.item.extra.has_nbt, false)
 assert.strictEqual(roundTrip('1.26.45', 'mob_equipment', equipment45).item.stack_id, 321)
 
 const normalizedEquipmentViaMainPath = normalizeClientboundForLocalViaBedrock('mob_equipment', {

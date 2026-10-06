@@ -197,11 +197,10 @@ function normalizeItemExtraForLocalViaBedrock (extra) {
   const source = extra && typeof extra === 'object' ? extra : {}
   const hasNbt = isTruthyProtocolFlag(source.has_nbt) || source.nbt != null
   const out = {
-    // The protodef mapper for this field serializes the string values
-    // "true"/"false" to 0xffff/0. Boolean('false') was previously
-    // turning parsed empty items into NBT-bearing items, which corrupts the
-    // local ViaBedrock inventory view.
-    has_nbt: hasNbt ? 'true' : 'false',
+    // Keep this boolean. The protocol mapper writes true as 0xffff, and the
+    // following switch only serializes the NBT payload for boolean true.
+    // Passing the string "true" writes the flag but silently drops the NBT.
+    has_nbt: hasNbt,
     can_place_on: normalizeStringArray(source.can_place_on || source.canPlaceOn),
     can_destroy: normalizeStringArray(source.can_destroy || source.canDestroy)
   }
@@ -219,7 +218,10 @@ function normalizeItemExtraForUpstreamItemStackRequest (extra) {
   const source = extra && typeof extra === 'object' ? extra : {}
   const hasNbt = isTruthyProtocolFlag(source.has_nbt) || source.nbt != null
   const out = {
-    has_nbt: hasNbt ? 1 : 0,
+    // This uses the same u16 mapper plus boolean-keyed choice as ordinary
+    // Item extra data. Numeric/string truthy values write a presence marker
+    // but skip the following NBT payload.
+    has_nbt: hasNbt,
     can_place_on: normalizeStringArray(source.can_place_on || source.canPlaceOn),
     can_destroy: normalizeStringArray(source.can_destroy || source.canDestroy)
   }

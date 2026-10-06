@@ -796,7 +796,7 @@ assert(craftResultItem.count === 4, 'craft result item must preserve the output 
 assert(craftResultItem.block_runtime_id === 1921718966, 'craft result item must preserve the output block runtime id')
 assert(craftResultItem.has_stack_id == null, 'Realm-bound craft result items must not include local ViaBedrock has_stack_id')
 assert(craftResultItem.stack_id == null, 'Realm-bound craft result items must not include local ViaBedrock stack_id')
-assert(craftResultItem.extra?.has_nbt === 0, 'Realm-bound craft result item extra.has_nbt must be numeric 0 for non-NBT items')
+assert(craftResultItem.extra?.has_nbt === false, 'Realm-bound craft result item extra.has_nbt must be boolean false for non-NBT items')
 assert(craft[0].followUpPlace == null, 'direct craft placement must not invent a cursor follow-up place')
 assert(craftOwner.bridgePredictedItemStackIds.get('hotbar:1') === craft[0].params.requests[0].request_id, 'direct craft placement should predict the destination stack from the craft request until the Realm response arrives')
 

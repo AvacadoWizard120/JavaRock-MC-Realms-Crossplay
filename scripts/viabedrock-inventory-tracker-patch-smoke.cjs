@@ -3612,6 +3612,22 @@ function assertCraftingInteractionSemantics () {
   ]) {
     if (!inventorySource.includes(marker)) throw new Error(`crafting interaction implementation is missing marker: ${marker}`)
   }
+  const outputClickStart = inventorySource.indexOf('private boolean handleCraftingOutputClick(')
+  const outputClickEnd = inventorySource.indexOf('private boolean handleCraftingOutputSwap(', outputClickStart)
+  const outputClickMethod = inventorySource.slice(outputClickStart, outputClickEnd)
+  const quickMoveStart = outputClickMethod.indexOf('if (input == ContainerInput.QUICK_MOVE) {')
+  const ordinaryCursorStart = outputClickMethod.indexOf('if (!isEmpty(this.carriedItem))', quickMoveStart)
+  if (outputClickStart < 0 || outputClickEnd < 0 || quickMoveStart < 0 || ordinaryCursorStart < 0) {
+    throw new Error('crafting-output QUICK_MOVE and ordinary cursor paths must remain independently testable')
+  }
+  const quickMoveBranch = outputClickMethod.slice(quickMoveStart, ordinaryCursorStart)
+  if (!quickMoveBranch.includes('bridgeCommitCraftDirectToInventory(recipe,') ||
+      quickMoveBranch.includes('carriedItem') || quickMoveBranch.includes('cursor_busy')) {
+    throw new Error('crafting-output QUICK_MOVE must preserve a nonempty cursor and use authoritative direct-to-inventory crafting')
+  }
+  if (inventorySource.includes('craft_output_quick_move_cursor_busy')) {
+    throw new Error('crafting-output QUICK_MOVE regressed to rejecting a nonempty cursor')
+  }
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-crafting-interactions-'))
   try {
@@ -3910,23 +3926,72 @@ function assertDurabilityComponents () {
     fs.writeFileSync(sourcePath, `
 package net.raphimc.viabedrock.api.model.container;
 
-import com.viaversion.viaversion.api.minecraft.data.StructuredData;
-import com.viaversion.viaversion.api.minecraft.data.StructuredDataContainer;
+import com.viaversion.nbt.tag.CompoundTag;
+import com.viaversion.viaversion.api.Via;
 import com.viaversion.viaversion.api.minecraft.data.StructuredDataKey;
 import com.viaversion.viaversion.api.minecraft.item.Item;
-import com.viaversion.viaversion.api.minecraft.item.StructuredItem;
-import com.viaversion.viaversion.api.type.types.item.StructuredDataType;
+import com.viaversion.viaversion.api.type.Type;
 import com.viaversion.viaversion.api.type.types.version.VersionedTypes;
+import com.viaversion.viaversion.connection.UserConnectionImpl;
+import com.viaversion.viaversion.protocols.v26_1to26_2.Protocol26_1To26_2;
+import com.viaversion.viaversion.protocols.v26_2to26_3.Protocol26_2To26_3;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import java.io.File;
 import java.lang.reflect.Field;
+import net.raphimc.viabedrock.protocol.BedrockProtocol;
+import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ItemVersion;
+import net.raphimc.viabedrock.protocol.model.BedrockItem;
+import net.raphimc.viabedrock.protocol.model.ItemEntry;
+import net.raphimc.viabedrock.protocol.rewriter.ItemRewriter;
+import net.raphimc.viaproxy.ViaProxy;
+import net.raphimc.viaproxy.protocoltranslator.ProtocolTranslator;
 
 public final class DurabilityComponentSmoke {
     private static void check(boolean value, String message) {
         if (!value) throw new AssertionError(message);
     }
 
-    public static void main(String[] args) throws Exception {
+    private static void checkComponents(final Item item, final int identifier,
+                                        final int maximumDamage, final int damage,
+                                        final String stage) {
+        check(item.identifier() == identifier, stage + " item id");
+        check(Integer.valueOf(maximumDamage).equals(
+                item.dataContainer().get(StructuredDataKey.MAX_DAMAGE)),
+                stage + " max_damage value");
+        check(Integer.valueOf(damage).equals(
+                item.dataContainer().get(StructuredDataKey.DAMAGE)),
+                stage + " damage value");
+        check(item.dataContainer().data().get(StructuredDataKey.MAX_DAMAGE).id() == 2,
+                stage + " max_damage serializer id");
+        check(item.dataContainer().data().get(StructuredDataKey.DAMAGE).id() == 3,
+                stage + " damage serializer id");
+    }
+
+    private static Item roundTrip(final Type<Item> type, final Item item,
+                                  final String stage) throws Exception {
+        final ByteBuf buffer = Unpooled.buffer();
+        try {
+            type.write(buffer, item);
+            final Item decoded = type.read(buffer);
+            check(!buffer.isReadable(), stage + " codec consumes the complete payload");
+            return decoded;
+        } finally {
+            buffer.release();
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            run(args);
+            System.exit(0);
+        } catch (Throwable error) {
+            error.printStackTrace();
+            System.exit(1);
+        }
+    }
+
+    private static void run(String[] args) throws Exception {
         final int[] ids = {
             887, 888, 890, 915, 918, 919, 922, 939, 940, 941, 942, 943, 944, 945,
             946, 947, 948, 949, 950, 951, 952, 953, 954, 955, 956, 957, 958, 959,
@@ -3957,42 +4022,59 @@ public final class DurabilityComponentSmoke {
         check(Container.bridgeJava26_2MaximumDamage(0) == 0, "air is not damageable");
         check(Container.bridgeJava26_2MaximumDamage(923) == 0, "ordinary item is not damageable");
 
-        // Initialize only the two serializers this isolated codec smoke reads.
-        // The production proxy initializes the complete table while loading its
-        // protocol mappings.
-        final Field typesField = StructuredDataType.class.getDeclaredField("types");
-        typesField.setAccessible(true);
-        final StructuredDataKey<?>[] keys = new StructuredDataKey<?>[122];
-        keys[2] = StructuredDataKey.MAX_DAMAGE;
-        keys[3] = StructuredDataKey.DAMAGE;
-        typesField.set(VersionedTypes.V26_2.structuredData(), keys);
+        // Start the bundled ViaProxy stack so this exercises the real component
+        // tables and mappings instead of manufacturing a two-entry serializer.
+        final Field cwd = ViaProxy.class.getDeclaredField("CWD");
+        cwd.setAccessible(true);
+        cwd.set(null, new File(args[0]));
+        ProtocolTranslator.init();
+        final var manager = Via.getManager();
+        manager.getProtocolManager().completeMappingDataLoading(Protocol26_1To26_2.class);
+        manager.getProtocolManager().completeMappingDataLoading(Protocol26_2To26_3.class);
+        manager.getProtocolManager().completeMappingDataLoading(BedrockProtocol.class);
 
-        final Item encoded = new StructuredItem(951, 1, new StructuredDataContainer(
-                new StructuredData<?>[] {
-                        StructuredData.of(StructuredDataKey.MAX_DAMAGE,
-                                Container.bridgeJava26_2MaximumDamage(951), 2),
-                        StructuredData.of(StructuredDataKey.DAMAGE, 95, 3)
-                }));
-        final ByteBuf buffer = Unpooled.buffer();
-        try {
-            VersionedTypes.V26_2.item().write(buffer, encoded);
-            final Item decoded = VersionedTypes.V26_2.item().read(buffer);
-            check(decoded.identifier() == 951, "stone pickaxe id survives the Java 26.2 codec");
-            check(Integer.valueOf(131).equals(decoded.dataContainer().get(StructuredDataKey.MAX_DAMAGE)),
-                    "max_damage survives the Java 26.2 codec");
-            check(Integer.valueOf(95).equals(decoded.dataContainer().get(StructuredDataKey.DAMAGE)),
-                    "damage survives the Java 26.2 codec");
-            check(!buffer.isReadable(), "durability item codec consumes the complete payload");
-        } finally {
-            buffer.release();
-        }
+        // Use the production Bedrock runtime id and NBT shape that arrives from
+        // a real inventory packet, then run ViaBedrock's actual item rewriter.
+        final UserConnectionImpl conversionUser = new UserConnectionImpl(null, false);
+        final ItemRewriter rewriter = new ItemRewriter(conversionUser, new ItemEntry[] {
+                new ItemEntry("minecraft:stone_pickaxe", 316, false, ItemVersion.Legacy, null)
+        });
+        final CompoundTag tag = new CompoundTag();
+        tag.putInt("Damage", 102);
+        final BedrockItem bedrockItem = new BedrockItem(316, (short) 0, (byte) 1, tag);
+        final Item java26_2 = rewriter.javaItem(bedrockItem);
+        check(java26_2.identifier() == 951,
+                "runtime id 316 maps to the Java 26.2 stone pickaxe");
+
+        Container.bridgeApplyDamageComponent(bedrockItem, java26_2);
+        checkComponents(java26_2, 951, 131, 102, "ViaBedrock conversion");
+
+        final Item decoded26_2 = roundTrip(
+                VersionedTypes.V26_2.item(), java26_2, "Java 26.2 item");
+        checkComponents(decoded26_2, 951, 131, 102, "Java 26.2 codec");
+
+        // Follow the same ViaVersion 26.2 -> 26.3 rewrite used by production,
+        // then prove both components survive the final client wire codec.
+        final Protocol26_2To26_3 protocol = manager.getProtocolManager()
+                .getProtocol(Protocol26_2To26_3.class);
+        final Item java26_3 = protocol.getItemRewriter().handleItemToClient(
+                new UserConnectionImpl(null, false), decoded26_2);
+        checkComponents(java26_3, 1037, 131, 102, "ViaVersion 26.3 rewrite");
+
+        final Item decoded26_3 = roundTrip(
+                VersionedTypes.V26_3.item(), java26_3, "Java 26.3 item");
+        checkComponents(decoded26_3, 1037, 131, 102, "Java 26.3 codec");
     }
 }
 `)
 
     const classPath = `${patchRoot}${path.delimiter}${viaProxyJar}`
     run('javac', ['-cp', classPath, '-d', tmp, sourcePath])
-    run('java', ['-cp', `${tmp}${path.delimiter}${classPath}`, 'net.raphimc.viabedrock.api.model.container.DurabilityComponentSmoke'])
+    run('java', [
+      '-cp', `${tmp}${path.delimiter}${classPath}`,
+      'net.raphimc.viabedrock.api.model.container.DurabilityComponentSmoke',
+      tmp
+    ])
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
