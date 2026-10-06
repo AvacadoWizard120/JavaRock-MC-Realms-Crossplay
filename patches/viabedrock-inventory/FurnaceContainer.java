@@ -121,7 +121,8 @@ public final class FurnaceContainer extends Container {
                     destinationContainerIds,
                     destinationSlots,
                     true,
-                    true);
+                    true,
+                    sourceSlot == RESULT_SLOT);
         } else if (this.bridgeCanSmelt(inventory, moving)) {
             bridgeAppendTarget(
                     this,
@@ -148,6 +149,7 @@ public final class FurnaceContainer extends Container {
                     destinationContainerIds,
                     destinationSlots,
                     true,
+                    false,
                     false);
         } else {
             bridgeAppendPlayerTargets(
@@ -157,7 +159,8 @@ public final class FurnaceContainer extends Container {
                     destinationContainerIds,
                     destinationSlots,
                     false,
-                    true);
+                    true,
+                    false);
         }
 
         int moved = inventory.bridgeTrySendNativeContainerQuickMove(
@@ -293,39 +296,41 @@ public final class FurnaceContainer extends Container {
             List<Integer> containerIds,
             List<Integer> slots,
             boolean includeMain,
-            boolean includeHotbar) {
-        if (includeMain) {
-            bridgeAppendPlayerRange(inventory, moving, containers, containerIds, slots, 9, 36, false);
-        }
-        if (includeHotbar) {
-            bridgeAppendPlayerRange(inventory, moving, containers, containerIds, slots, 0, 9, false);
-        }
-        if (includeMain) {
-            bridgeAppendPlayerRange(inventory, moving, containers, containerIds, slots, 9, 36, true);
-        }
-        if (includeHotbar) {
-            bridgeAppendPlayerRange(inventory, moving, containers, containerIds, slots, 0, 9, true);
+            boolean includeHotbar,
+            boolean reverse) {
+        int[] scanOrder = bridgePlayerQuickMoveSlotOrder(includeMain, includeHotbar, reverse);
+        for (boolean emptyPass : new boolean[] { false, true }) {
+            for (int slot : scanOrder) {
+                BedrockItem target = inventory.getItem(slot);
+                boolean empty = isEmpty(target);
+                if (empty != emptyPass) continue;
+                if (!empty && (!canStack(moving, target) || target.amount() >= bridgeMaxStackSize(target))) continue;
+                containers.add(inventory);
+                containerIds.add(Integer.valueOf(inventory.containerId() & 0xFF));
+                slots.add(Integer.valueOf(slot));
+            }
         }
     }
 
-    private static void bridgeAppendPlayerRange(
-            InventoryContainer inventory,
-            BedrockItem moving,
-            List<Container> containers,
-            List<Integer> containerIds,
-            List<Integer> slots,
-            int start,
-            int end,
-            boolean emptyPass) {
-        for (int slot = start; slot < end; slot++) {
-            BedrockItem target = inventory.getItem(slot);
-            boolean empty = isEmpty(target);
-            if (empty != emptyPass) continue;
-            if (!empty && (!canStack(moving, target) || target.amount() >= bridgeMaxStackSize(target))) continue;
-            containers.add(inventory);
-            containerIds.add(Integer.valueOf(inventory.containerId() & 0xFF));
-            slots.add(Integer.valueOf(slot));
+    static int[] bridgePlayerQuickMoveSlotOrder(boolean includeMain, boolean includeHotbar, boolean reverse) {
+        int[] order = new int[(includeMain ? 27 : 0) + (includeHotbar ? 9 : 0)];
+        int index = 0;
+        if (reverse) {
+            if (includeHotbar) {
+                for (int slot = 8; slot >= 0; slot--) order[index++] = slot;
+            }
+            if (includeMain) {
+                for (int slot = 35; slot >= 9; slot--) order[index++] = slot;
+            }
+        } else {
+            if (includeMain) {
+                for (int slot = 9; slot < 36; slot++) order[index++] = slot;
+            }
+            if (includeHotbar) {
+                for (int slot = 0; slot < 9; slot++) order[index++] = slot;
+            }
         }
+        return order;
     }
 
     private static void bridgeAppendTarget(

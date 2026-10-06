@@ -76,6 +76,7 @@ public class InventoryContainer extends Container {
     private BedrockItem[] bridgeLastKnownCraftingGrid;
     private int bridgeNextItemStackRequestId;
     private int bridgeLatestNativeRequestId;
+    private int bridgeLatestNativeCursorRequestId;
     private final Map<Integer, BridgePendingNativeRequest> bridgePendingNativeRequests;
     private final Map<String, Integer> bridgeLatestNativeRequestBySlot;
 
@@ -88,6 +89,7 @@ public class InventoryContainer extends Container {
         this.bridgeJavaStateId = 0;
         this.bridgeNextItemStackRequestId = -3;
         this.bridgeLatestNativeRequestId = 0;
+        this.bridgeLatestNativeCursorRequestId = 0;
         this.bridgePendingNativeRequests = new HashMap<>();
         this.bridgeLatestNativeRequestBySlot = new HashMap<>();
         this.bridgeLastKnownCraftingGrid = emptyCraftingMemory();
@@ -115,6 +117,7 @@ public class InventoryContainer extends Container {
         this.bridgeJavaStateId = this.bridgeCanonicalInventory.bridgeJavaStateId;
         this.bridgeNextItemStackRequestId = this.bridgeCanonicalInventory.bridgeNextItemStackRequestId;
         this.bridgeLatestNativeRequestId = this.bridgeCanonicalInventory.bridgeLatestNativeRequestId;
+        this.bridgeLatestNativeCursorRequestId = this.bridgeCanonicalInventory.bridgeLatestNativeCursorRequestId;
         this.bridgePendingNativeRequests = this.bridgeCanonicalInventory.bridgePendingNativeRequests;
         this.bridgeLatestNativeRequestBySlot = this.bridgeCanonicalInventory.bridgeLatestNativeRequestBySlot;
         this.bridgeCarriedSourceContainer = this.bridgeCanonicalInventory.bridgeCarriedSourceContainer;
@@ -503,13 +506,6 @@ public class InventoryContainer extends Container {
     }
 
     private boolean handleQuickMoveClick(int javaSlot) {
-        if (!isEmpty(this.carriedItem)) {
-            this.publishJavaInventorySnapshot("quick_move_blocked_with_cursor");
-            ViaBedrock.getPlatform().getLogger().log(Level.INFO,
-                    "[BedrockRealmBridge] blocked player quick_move while cursor is non-empty; waiting for server-authoritative cursor state");
-            return true;
-        }
-
         ClickSlot from = this.clickSlotFromJavaSlot(javaSlot);
         if (from == null) return false;
         BedrockItem fromBefore = safeCopy(from.container.getItem(from.bedrockSlot));
@@ -568,9 +564,10 @@ public class InventoryContainer extends Container {
         }
 
         int requestId = this.nextItemStackRequestId();
-        // This request changes two item slots but never the cursor. Do not
-        // advance the cursor-response watermark: an older pending cursor ACK
-        // still owns the carried-item state and must be allowed to apply.
+        // This request advances overall settlement ordering, but not the
+        // cursor-response watermark. An older pending cursor ACK still owns
+        // the carried-item state and must be allowed to apply.
+        this.bridgeObserveNativeRequest(requestId, false);
         if (!isEmpty(sourceAfter)) sourceAfter.setNetId(Integer.valueOf(requestId));
         if (!isEmpty(destinationAfter)) destinationAfter.setNetId(Integer.valueOf(requestId));
         this.bridgeRememberPendingNativeRequest(
@@ -691,6 +688,7 @@ public class InventoryContainer extends Container {
         predictedItems.add(0, sourceAfter);
 
         int requestId = this.nextItemStackRequestId();
+        this.bridgeObserveNativeRequest(requestId, false);
         if (!isEmpty(sourceAfter)) sourceAfter.setNetId(Integer.valueOf(requestId));
         for (BedrockItem destinationAfter : destinationAfterItems) {
             if (!isEmpty(destinationAfter)) destinationAfter.setNetId(Integer.valueOf(requestId));
@@ -755,6 +753,7 @@ public class InventoryContainer extends Container {
         if (sourceAfter.amount() <= 0) sourceAfter = BedrockItem.empty();
 
         int requestId = this.nextItemStackRequestId();
+        this.bridgeObserveNativeRequest(requestId, false);
         if (!isEmpty(sourceAfter)) sourceAfter.setNetId(Integer.valueOf(requestId));
         this.bridgeRememberPendingNativeRequest(
                 requestId,
@@ -1008,7 +1007,7 @@ public class InventoryContainer extends Container {
 
         if (moved <= 0) return 0;
         int requestId = this.nextItemStackRequestId();
-        this.bridgeSetLatestNativeRequestId(requestId);
+        this.bridgeObserveNativeRequest(requestId, true);
         BedrockItem cursorAfter = isEmpty(cursorBefore) ? safeCopy(target) : cursorBefore.copy();
         cursorAfter.setAmount(amountOrZero(cursorBefore) + moved);
         cursorAfter.setNetId(Integer.valueOf(requestId));
@@ -1070,7 +1069,10 @@ public class InventoryContainer extends Container {
         }
 
         if (!isEmpty(this.carriedItem)) {
-            if (canStack(this.carriedItem, recipe.output) && this.carriedItem.amount() + recipe.output.amount() <= 64) {
+            if (bridgeCanCraftResultIntoDestination(
+                    this.carriedItem,
+                    recipe.output,
+                    recipe.outputMaxStackSize)) {
                 return this.bridgePickupCraftResultToCursor(recipe, true);
             }
             this.publishJavaInventorySnapshot("craft_output_cursor_busy");
@@ -1137,6 +1139,10 @@ public class InventoryContainer extends Container {
     }
 
     static boolean bridgeCanCraftResultIntoHotbar(BedrockItem destination, BedrockItem output, int outputMaxStackSize) {
+        return bridgeCanCraftResultIntoDestination(destination, output, outputMaxStackSize);
+    }
+
+    static boolean bridgeCanCraftResultIntoDestination(BedrockItem destination, BedrockItem output, int outputMaxStackSize) {
         if (isEmpty(output)) return false;
         if (isEmpty(destination)) return true;
         if (outputMaxStackSize <= 0) return false;
@@ -1163,7 +1169,7 @@ public class InventoryContainer extends Container {
     }
 
     private boolean bridgeCommitCraftDirectToInventory(CraftRecipe recipe, String reason) {
-        ClickSlot dest = this.findCraftResultTarget(recipe.output);
+        ClickSlot dest = this.findCraftResultTarget(recipe.output, recipe.outputMaxStackSize);
         if (dest == null) {
             this.publishJavaInventorySnapshot(reason + ":no_inventory_space");
             return true;
@@ -1196,7 +1202,10 @@ public class InventoryContainer extends Container {
             craftCount = Math.min(craftCount, amountOrZero(hud.getItem(uiBase + i)) / consume);
         }
         int destinationAmount = isEmpty(destinationBefore) ? 0 : destinationBefore.amount();
-        craftCount = Math.min(craftCount, (64 - destinationAmount) / recipe.output.amount());
+        int maxStackSize = recipe.outputMaxStackSize > 0
+                ? Math.min(64, recipe.outputMaxStackSize)
+                : (isEmpty(destinationBefore) ? recipe.output.amount() : 0);
+        craftCount = Math.min(craftCount, (maxStackSize - destinationAmount) / recipe.output.amount());
         return Math.max(0, craftCount);
     }
 
@@ -1281,7 +1290,7 @@ public class InventoryContainer extends Container {
             predictedItems.add(predictedResult);
         }
 
-        this.bridgeSetLatestNativeRequestId(requestId);
+        this.bridgeObserveNativeRequest(requestId, resultDestination == null);
         this.bridgeRememberPendingNativeRequest(
                 requestId,
                 changedSlots,
@@ -1331,13 +1340,17 @@ public class InventoryContainer extends Container {
 
         BedrockItem cursorBefore = safeCopy(this.carriedItem);
         if (isEmpty(cursorBefore)) return false;
+        CraftRecipe recipe = this.bridgePendingCraftRecipe;
 
         BedrockItem destAfter;
         BedrockItem cursorAfter;
         if (isEmpty(destBefore)) {
             destAfter = cursorBefore.copy();
             cursorAfter = BedrockItem.empty();
-        } else if (canStack(destBefore, cursorBefore) && destBefore.amount() + cursorBefore.amount() <= 64) {
+        } else if (bridgeCanCraftResultIntoDestination(
+                destBefore,
+                cursorBefore,
+                recipe.outputMaxStackSize)) {
             destAfter = destBefore.copy();
             destAfter.setAmount(destBefore.amount() + cursorBefore.amount());
             cursorAfter = BedrockItem.empty();
@@ -1351,7 +1364,6 @@ public class InventoryContainer extends Container {
         actions.add(rawContainerAction(dest.container, dest.sourceContainerId, dest.bedrockSlot, destBefore, destAfter));
         dest.container.setItem(dest.bedrockSlot, destAfter.copy());
         this.bridgeSetSharedCarriedItem(cursorAfter);
-        CraftRecipe recipe = this.bridgePendingCraftRecipe;
         this.bridgeClearPendingCraft();
         this.bridgeClearCarriedSource();
         this.sendNormalInventoryTransaction(actions, "craft_2x2_result_place");
@@ -1364,20 +1376,41 @@ public class InventoryContainer extends Container {
         return true;
     }
 
-    private ClickSlot findCraftResultTarget(BedrockItem output) {
-        for (int i = 0; i < 36; i++) {
-            BedrockItem existing = safeCopy(this.getItem(i));
-            if (!isEmpty(existing) && canStack(existing, output) && existing.amount() + output.amount() <= 64) {
-                return this.playerInventorySlot(i);
+    private ClickSlot findCraftResultTarget(BedrockItem output, int outputMaxStackSize) {
+        int targetSlot = bridgeFindCraftResultTargetSlot(this.getItems(), output, outputMaxStackSize);
+        return targetSlot < 0 ? null : this.playerInventorySlot(targetSlot);
+    }
+
+    static int bridgeFindCraftResultTargetSlot(BedrockItem[] inventory, BedrockItem output, int outputMaxStackSize) {
+        if (inventory == null || isEmpty(output)) return -1;
+        int inventorySize = Math.min(36, inventory.length);
+        int maxStackSize = outputMaxStackSize > 0 ? Math.min(64, outputMaxStackSize) : 0;
+        // InventoryMenu and CraftingMenu both call moveItemStackTo(..., true)
+        // for their result slot. Match AbstractContainerMenu's reverse scan:
+        // hotbar 8..0, then main inventory 35..9, for both merge and empty
+        // passes. Any other order lets Java predict one slot before the Realm
+        // response moves the result somewhere else.
+        for (int i = Math.min(8, inventorySize - 1); i >= 0; i--) {
+            BedrockItem existing = safeCopy(inventory[i]);
+            if (maxStackSize > 0 && !isEmpty(existing) && canStack(existing, output) &&
+                    existing.amount() + output.amount() <= maxStackSize) {
+                return i;
             }
         }
-        for (int i = 9; i < 36; i++) {
-            if (isEmpty(this.getItem(i))) return this.playerInventorySlot(i);
+        for (int i = inventorySize - 1; i >= 9; i--) {
+            BedrockItem existing = safeCopy(inventory[i]);
+            if (maxStackSize > 0 && !isEmpty(existing) && canStack(existing, output) &&
+                    existing.amount() + output.amount() <= maxStackSize) {
+                return i;
+            }
         }
-        for (int i = 0; i < 9; i++) {
-            if (isEmpty(this.getItem(i))) return this.playerInventorySlot(i);
+        for (int i = Math.min(8, inventorySize - 1); i >= 0; i--) {
+            if (isEmpty(inventory[i])) return i;
         }
-        return null;
+        for (int i = inventorySize - 1; i >= 9; i--) {
+            if (isEmpty(inventory[i])) return i;
+        }
+        return -1;
     }
 
     private BedrockItem bridgeCraftingOutput() {
@@ -1695,7 +1728,7 @@ public class InventoryContainer extends Container {
             if (!isEmpty(sourceAfter)) sourceAfter.setNetId(Integer.valueOf(requestId));
             if (!isEmpty(destinationAfter)) destinationAfter.setNetId(Integer.valueOf(requestId));
 
-            this.bridgeSetLatestNativeRequestId(requestId);
+            this.bridgeObserveNativeRequest(requestId, false);
             this.bridgeRememberPendingNativeRequest(
                     requestId,
                     List.of(move.source, move.destination),
@@ -2035,7 +2068,7 @@ public class InventoryContainer extends Container {
         }
 
         int requestId = this.nextItemStackRequestId();
-        this.bridgeSetLatestNativeRequestId(requestId);
+        this.bridgeObserveNativeRequest(requestId, true);
         // Native Bedrock refers to a cursor stack produced or changed by this
         // request through the request id, including a partial Take followed by Place.
         if (!isEmpty(cursorAfter)) {
@@ -2102,6 +2135,7 @@ public class InventoryContainer extends Container {
         BedrockItem firstAfter = safeCopy(secondBefore);
         BedrockItem secondAfter = safeCopy(firstBefore);
         int requestId = this.nextItemStackRequestId();
+        this.bridgeObserveNativeRequest(requestId, false);
         this.bridgeRememberPendingNativeRequest(
                 requestId,
                 List.of(first, second),
@@ -2205,6 +2239,32 @@ public class InventoryContainer extends Container {
     private void bridgeSetLatestNativeRequestId(int requestId) {
         this.bridgeLatestNativeRequestId = requestId;
         this.bridgeCanonicalInventory.bridgeLatestNativeRequestId = requestId;
+    }
+
+    private void bridgeObserveNativeRequest(int requestId, boolean changesCursor) {
+        this.bridgeSetLatestNativeRequestId(requestId);
+        InventoryContainer owner = this.bridgeCanonicalInventory;
+        int cursorRequestId = bridgeCursorResponseWatermarkAfterRequest(
+                owner.bridgeLatestNativeCursorRequestId,
+                requestId,
+                changesCursor);
+        this.bridgeLatestNativeCursorRequestId = cursorRequestId;
+        owner.bridgeLatestNativeCursorRequestId = cursorRequestId;
+    }
+
+    private int bridgeLatestNativeCursorRequestId() {
+        return this.bridgeCanonicalInventory.bridgeLatestNativeCursorRequestId;
+    }
+
+    static int bridgeCursorResponseWatermarkAfterRequest(
+            int currentRequestId,
+            int requestId,
+            boolean changesCursor) {
+        return changesCursor ? requestId : currentRequestId;
+    }
+
+    static boolean bridgeNativeResponseOwnsCursor(int requestId, int latestCursorRequestId) {
+        return requestId == latestCursorRequestId;
     }
 
     private void bridgeObserveJavaStateId(int stateId) {
@@ -2475,7 +2535,9 @@ public class InventoryContainer extends Container {
 
                         if (status != 0) continue;
                         ContainerEnumName name = containerName == null ? null : containerName.name();
-                        boolean applyCursor = requestId == this.bridgeLatestNativeRequestId;
+                        boolean applyCursor = bridgeNativeResponseOwnsCursor(
+                                requestId,
+                                this.bridgeLatestNativeCursorRequestId());
                         if (name == ContainerEnumName.CursorContainer && !applyCursor) {
                             skippedStaleCursorSlots++;
                             continue;
@@ -2531,7 +2593,8 @@ public class InventoryContainer extends Container {
                             " skippedStaleCursorSlots=" + skippedStaleCursorSlots +
                             " skippedStaleItemSlots=" + skippedStaleItemSlots +
                             " published=" + publishSettledState +
-                            " latestRequestId=" + this.bridgeLatestNativeRequestId);
+                            " latestRequestId=" + this.bridgeLatestNativeRequestId +
+                            " latestCursorRequestId=" + this.bridgeLatestNativeCursorRequestId());
         } catch (Throwable t) {
             ViaBedrock.getPlatform().getLogger().log(Level.WARNING,
                     "[BedrockRealmBridge] failed to decode native item_stack_response; keeping local cursor prediction", t);
@@ -2745,7 +2808,7 @@ public class InventoryContainer extends Container {
             restored = true;
         }
 
-        if (requestId == this.bridgeLatestNativeRequestId &&
+        if (bridgeNativeResponseOwnsCursor(requestId, this.bridgeLatestNativeCursorRequestId()) &&
                 bridgeSameItemState(this.carriedItem, pending.cursorAfter)) {
             this.bridgeSetSharedCarriedItem(pending.cursorBefore);
             this.user.get(InventoryTracker.class).getHudContainer().bridgeSetAuthoritativeItemSilently(
