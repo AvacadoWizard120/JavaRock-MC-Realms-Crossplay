@@ -102,6 +102,7 @@ public class ClientPlayerEntity extends PlayerEntity {
     private int lastMiningHitSoundTick = Integer.MIN_VALUE;
     private BlockBreakingInfo blockBreakingInfo;
     private final Deque<Pair<BlockBreakingInfo, Integer>> pendingPredictedBlockBreakCompletions = new ArrayDeque<>();
+    private final Deque<Pair<BlockBreakingInfo, Integer>> pendingPredictedBlockBreakSounds = new ArrayDeque<>();
 
     public ClientPlayerEntity(final UserConnection user, final long runtimeId, final UUID javaUuid, final PlayerAbilities abilities) {
         super(user, runtimeId, JAVA_ENTITY_ID, javaUuid, abilities);
@@ -672,6 +673,25 @@ public class ClientPlayerEntity extends PlayerEntity {
                 );
     }
 
+    static boolean bridgePredictedBlockBreakSoundMatches(final BlockBreakingInfo pending, final int expiresAtTick,
+                                                          final String soundEvent, final BlockPosition position,
+                                                          final int bedrockBlockState, final int javaBlockState,
+                                                          final int currentTick) {
+        if (!"break".equals(soundEvent) || currentTick > expiresAtTick
+                || !bridgeSameBlockPosition(pending.position(), position)) {
+            return false;
+        }
+
+        // Some Bedrock servers omit the block runtime id on the generic break
+        // sound. Position plus the short-lived local completion record is
+        // enough in that case; when a state is present, keep the stricter
+        // palette-aware check so a nearby unrelated sound is never hidden.
+        return bedrockBlockState < 0 || bridgePredictedBlockBreakStatesMatch(
+                pending.bedrockBlockState(), pending.javaBlockState(),
+                bedrockBlockState, javaBlockState
+        );
+    }
+
     static boolean bridgePredictedBlockBreakParticleMatches(final BlockBreakingInfo active,
                                                              final BlockPosition position, final int bedrockBlockState,
                                                              final int javaBlockState) {
@@ -714,13 +734,41 @@ public class ClientPlayerEntity extends PlayerEntity {
         return false;
     }
 
-    public void rememberPredictedBlockBreakCompletion(final BlockPosition position) {
+    static boolean bridgeConsumePredictedBlockBreakSound(final Deque<Pair<BlockBreakingInfo, Integer>> pendingSounds,
+                                                          final String soundEvent, final BlockPosition position,
+                                                          final int bedrockBlockState, final int javaBlockState,
+                                                          final int currentTick) {
+        final Iterator<Pair<BlockBreakingInfo, Integer>> iterator = pendingSounds.iterator();
+        while (iterator.hasNext()) {
+            final Pair<BlockBreakingInfo, Integer> entry = iterator.next();
+            if (currentTick > entry.value()) {
+                iterator.remove();
+                continue;
+            }
+            if (!bridgePredictedBlockBreakSoundMatches(
+                    entry.key(), entry.value(), soundEvent, position,
+                    bedrockBlockState, javaBlockState, currentTick
+            )) {
+                continue;
+            }
+
+            iterator.remove();
+            return true;
+        }
+        return false;
+    }
+
+    public boolean rememberPredictedBlockBreakCompletion(final BlockPosition position) {
         if (this.blockBreakingInfo == null || !bridgeSameBlockPosition(this.blockBreakingInfo.position(), position)) {
-            return;
+            return false;
         }
         bridgeRememberPredictedBlockBreakCompletion(
                 this.pendingPredictedBlockBreakCompletions, this.blockBreakingInfo, this.age()
         );
+        bridgeRememberPredictedBlockBreakCompletion(
+                this.pendingPredictedBlockBreakSounds, this.blockBreakingInfo, this.age()
+        );
+        return true;
     }
 
     public boolean consumePredictedBlockBreakCompletion(final BlockPosition position, final int bedrockBlockState,
@@ -728,6 +776,14 @@ public class ClientPlayerEntity extends PlayerEntity {
         return bridgeConsumePredictedBlockBreakCompletion(
                 this.pendingPredictedBlockBreakCompletions,
                 position, bedrockBlockState, javaBlockState, this.age()
+        );
+    }
+
+    public boolean consumePredictedBlockBreakSound(final String soundEvent, final BlockPosition position,
+                                                    final int bedrockBlockState, final int javaBlockState) {
+        return bridgeConsumePredictedBlockBreakSound(
+                this.pendingPredictedBlockBreakSounds,
+                soundEvent, position, bedrockBlockState, javaBlockState, this.age()
         );
     }
 
@@ -744,7 +800,10 @@ public class ClientPlayerEntity extends PlayerEntity {
 
     public void setBlockBreakingInfo(final BlockBreakingInfo blockBreakingInfo) {
         this.blockBreakingInfo = blockBreakingInfo;
-        this.lastMiningHitSoundTick = Integer.MIN_VALUE;
+        // Java 26.3 plays the initial hit locally from
+        // ClientLevel.addBreakingBlockEffects. Start the bridge cadence now so
+        // the first relayed SWING does not replay that same hit sound.
+        this.lastMiningHitSoundTick = blockBreakingInfo == null ? Integer.MIN_VALUE : this.age();
     }
 
     public void setRequestedDismount(final boolean requestedDismount) {

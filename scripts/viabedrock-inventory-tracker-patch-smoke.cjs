@@ -394,7 +394,8 @@ function assertCanonicalInventoryInteractionState () {
     'this.bridgePendingNativeRequests = this.bridgeCanonicalInventory.bridgePendingNativeRequests',
     'this.bridgeLatestNativeRequestBySlot = this.bridgeCanonicalInventory.bridgeLatestNativeRequestBySlot',
     'this.bridgeNextItemStackRequestId = this.bridgeCanonicalInventory.bridgeNextItemStackRequestId',
-    'this.bridgeLatestNativeRequestId = this.bridgeCanonicalInventory.bridgeLatestNativeRequestId'
+    'this.bridgeLatestNativeRequestId = this.bridgeCanonicalInventory.bridgeLatestNativeRequestId',
+    'this.bridgeLatestNativeCursorRequestId = this.bridgeCanonicalInventory.bridgeLatestNativeCursorRequestId'
   ]) {
     if (!clone.includes(marker)) throw new Error(`server-open inventory clone does not share canonical interaction state: ${marker}`)
   }
@@ -405,6 +406,8 @@ function assertCanonicalInventoryInteractionState () {
   for (const marker of [
     'private final InventoryContainer bridgeCanonicalInventory',
     'this.bridgeSetLatestNativeRequestId(requestId)',
+    'bridgeCursorResponseWatermarkAfterRequest(',
+    'bridgeNativeResponseOwnsCursor(',
     'private void bridgeSetSharedCarriedItem(BedrockItem item)',
     'InventoryContainer owner = this.bridgeCanonicalInventory',
     'owner.bridgeNextItemStackRequestId -= 2',
@@ -415,7 +418,7 @@ function assertCanonicalInventoryInteractionState () {
 
   const inventoryClass = bundledPatchedClassPath('net/raphimc/viabedrock/api/model/container/player/InventoryContainer.class')
   const bytecode = run('javap', ['-c', '-p', inventoryClass]).stdout
-  for (const marker of ['bridgeCanonicalInventory', 'bridgeLatestNativeRequestBySlot', 'bridgeSetLatestNativeRequestId', 'bridgeSetSharedCarriedItem', 'bridgeObserveJavaStateId']) {
+  for (const marker of ['bridgeCanonicalInventory', 'bridgeLatestNativeRequestBySlot', 'bridgeLatestNativeCursorRequestId', 'bridgeSetLatestNativeRequestId', 'bridgeSetSharedCarriedItem', 'bridgeObserveJavaStateId']) {
     if (!bytecode.includes(marker)) throw new Error(`patched InventoryContainer.class is missing canonical state bytecode: ${marker}`)
   }
 }
@@ -1692,12 +1695,15 @@ function assertMiningSwingSuppression () {
   const stopEnd = source.indexOf('case DROP_ALL_ITEMS, DROP_ITEM ->', stopStart)
   const stopHandler = source.slice(stopStart, stopEnd)
   const completedSwingSuppression = stopHandler.indexOf('clientPlayer.suppressCompletedMiningSwings()')
+  const captureCompletedBreak = stopHandler.indexOf('final ClientPlayerEntity.BlockBreakingInfo completedBreak = clientPlayer.blockBreakingInfo()')
   const rememberPredictedCompletion = stopHandler.indexOf('clientPlayer.rememberPredictedBlockBreakCompletion(position)')
+  const sendPredictedBreakEffect = stopHandler.indexOf('WorldEffectPackets.bridgeSendJavaBlockBreakEffect(')
   const clearBreakingState = stopHandler.indexOf('clientPlayer.setBlockBreakingInfo(null)')
   const predictAir = stopHandler.indexOf('chunkTracker.handleBlockChange(position, 0, chunkTracker.bedrockAirId())')
-  if (completedSwingSuppression < 0 || rememberPredictedCompletion < completedSwingSuppression ||
-      clearBreakingState < rememberPredictedCompletion || predictAir < clearBreakingState) {
-    throw new Error('STOP_DESTROY_BLOCK must remember the predicted completion before clearing mining state and applying local air')
+  if (completedSwingSuppression < 0 || captureCompletedBreak < completedSwingSuppression ||
+      rememberPredictedCompletion < captureCompletedBreak || sendPredictedBreakEffect < rememberPredictedCompletion ||
+      clearBreakingState < sendPredictedBreakEffect || predictAir < clearBreakingState) {
+    throw new Error('STOP_DESTROY_BLOCK must synthesize one Java break effect and remember its echoes before clearing mining state')
   }
 
   for (const marker of [
@@ -1708,28 +1714,38 @@ function assertMiningSwingSuppression () {
     'private int completedMiningSwingSuppressionThroughTick = Integer.MIN_VALUE',
     'private int lastMiningHitSoundTick = Integer.MIN_VALUE',
     'pendingPredictedBlockBreakCompletions = new ArrayDeque<>()',
+    'pendingPredictedBlockBreakSounds = new ArrayDeque<>()',
     'static boolean bridgeShouldSuppressCompletedMiningSwing',
     'static boolean bridgeShouldPlayMiningHitSound',
     'static boolean bridgePredictedBlockBreakStatesMatch',
     'static boolean bridgePredictedBlockBreakParticleMatches',
     'static boolean bridgePredictedBlockBreakCompletionMatches',
+    'static boolean bridgePredictedBlockBreakSoundMatches',
     'static void bridgeRememberPredictedBlockBreakCompletion',
     'static boolean bridgeConsumePredictedBlockBreakCompletion',
-    'public void rememberPredictedBlockBreakCompletion',
+    'static boolean bridgeConsumePredictedBlockBreakSound',
+    'public boolean rememberPredictedBlockBreakCompletion',
     'public boolean consumePredictedBlockBreakCompletion',
+    'public boolean consumePredictedBlockBreakSound',
     'public boolean isPredictedBlockBreakParticleEcho',
     'public boolean consumeMiningHitSoundCadence()',
     'this.completedMiningSwingSuppressionThroughTick = this.age() + COMPLETED_MINING_SWING_SUPPRESSION_TICKS',
-    'this.clearCompletedMiningSwingSuppression()'
+    'this.clearCompletedMiningSwingSuppression()',
+    'blockBreakingInfo == null ? Integer.MIN_VALUE : this.age()'
   ]) {
     if (!entitySource.includes(marker)) throw new Error(`completed-mining swing suppression is missing marker: ${marker}`)
   }
-  for (const forbidden of ['LevelEvent.PARTICLES_DESTROY_BLOCK.getValue()', 'bridgeSendJavaBlockBreakParticles', 'sendJavaLevelParticles']) {
-    if (source.includes(forbidden)) {
-      throw new Error(`predicted block completion must rely on Java's local event 2001 instead of duplicating it through ${forbidden}`)
-    }
-  }
   const worldEffectSource = fs.readFileSync(path.join(patchRoot, 'WorldEffectPackets.java'), 'utf8')
+  for (const marker of [
+    'static void bridgeSendJavaBlockBreakEffect',
+    'static void bridgeWriteJavaBlockBreakEffect',
+    'LevelEvent.PARTICLES_DESTROY_BLOCK.getValue()',
+    'effect.write(Types.BLOCK_POSITION1_14, position)',
+    'effect.write(Types.INT, javaBlockState)',
+    'effect.send(BedrockProtocol.class)'
+  ]) {
+    if (!worldEffectSource.includes(marker)) throw new Error(`local Java block-break completion effect is missing marker: ${marker}`)
+  }
   const completionGate = worldEffectSource.indexOf('if (levelEvent == LevelEvent.ParticlesDestroyBlock)')
   const hitParticleGate = worldEffectSource.indexOf('if (bridgeIsBlockHitParticle(levelEvent))')
   const genericLevelEventMapping = worldEffectSource.indexOf('switch (levelEvent)', completionGate)
@@ -1740,6 +1756,16 @@ function assertMiningSwingSuppression () {
   }
   if (worldEffectSource.slice(completionGate, genericLevelEventMapping).includes('ParticlesDestroyBlockNoSound')) {
     throw new Error('the local completion gate must not suppress the semantically distinct ParticlesDestroyBlockNoSound event')
+  }
+  const levelSoundHandler = worldEffectSource.slice(
+    worldEffectSource.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.LEVEL_SOUND_EVENT'),
+    worldEffectSource.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.LEVEL_EVENT',
+      worldEffectSource.indexOf('protocol.registerClientbound(ClientboundBedrockPackets.LEVEL_SOUND_EVENT') + 1)
+  )
+  const breakSoundGate = levelSoundHandler.indexOf('clientPlayer.consumePredictedBlockBreakSound(')
+  const genericSoundMapping = levelSoundHandler.indexOf('configuredSound = tryFindSound(')
+  if (breakSoundGate < 0 || genericSoundMapping < breakSoundGate) {
+    throw new Error('a correlated Realm break-sound echo must be consumed before generic sound translation')
   }
   for (const marker of [
     'static void bridgeSendJavaBlockHitSound',
@@ -1770,6 +1796,17 @@ function assertMiningSwingSuppression () {
       throw new Error(`${blockIdentifier} mining hits must resolve through its Bedrock material to ${expectedJavaSound}; got ${actualJavaSound}`)
     }
   }
+  for (const [blockIdentifier, expectedJavaSound] of [
+    ['minecraft:oak_log', 'minecraft:block.wood.break'],
+    ['minecraft:stone', 'minecraft:block.stone.break']
+  ]) {
+    const blockMaterial = blockSounds[blockIdentifier]
+    const configuredBreak = levelSoundEvents.break?.[`block:${blockMaterial}`]
+    const actualJavaSound = configuredBreak == null ? null : soundMappings[configuredBreak.sound]
+    if (actualJavaSound !== expectedJavaSound) {
+      throw new Error(`${blockIdentifier} completion must resolve through its Bedrock material to ${expectedJavaSound}; got ${actualJavaSound}`)
+    }
+  }
 
   const swingStart = source.indexOf('protocol.registerServerbound(ServerboundPackets26_1.SWING')
   const swingEnd = source.indexOf('\n    }\n\n    private static void writeItemFrameInteraction', swingStart)
@@ -1789,8 +1826,10 @@ function assertMiningSwingSuppression () {
   if ((handler.match(/PlayerAuthInputPacketPayload_InputData\.MissedSwing/g) || []).length !== 1) {
     throw new Error('only a genuine non-mining Java swing should set Bedrock MissedSwing')
   }
-  if ((source.match(/clientPlayer\.consumeMiningHitSoundCadence\(\)/g) || []).length !== 2) {
-    throw new Error('mining hit-sound cadence must run once at START and during active mining SWING packets')
+  const startHandler = source.slice(source.indexOf('case START_DESTROY_BLOCK ->'), abortStart)
+  if (startHandler.includes('bridgeSendJavaBlockHitSound') ||
+      (source.match(/clientPlayer\.consumeMiningHitSoundCadence\(\)/g) || []).length !== 1) {
+    throw new Error('Java plays the initial mining hit locally; bridge hit-sound cadence must begin only on later active SWING packets')
   }
 
   const entityBytecode = run('javap', ['-c', '-p', bundledPatchedClassPath(
@@ -1802,7 +1841,9 @@ function assertMiningSwingSuppression () {
     'clearCompletedMiningSwingSuppression',
     'rememberPredictedBlockBreakCompletion',
     'consumePredictedBlockBreakCompletion',
-    'bridgeConsumePredictedBlockBreakCompletion'
+    'bridgeConsumePredictedBlockBreakCompletion',
+    'consumePredictedBlockBreakSound',
+    'bridgeConsumePredictedBlockBreakSound'
   ]) {
     if (!entityBytecode.includes(marker)) throw new Error(`compiled ClientPlayerEntity.class is missing mining-tail bytecode: ${marker}`)
   }
@@ -1813,7 +1854,8 @@ function assertMiningSwingSuppression () {
     'checkCompletedMiningSwingSuppression',
     'consumeMiningHitSoundCadence',
     'bridgeSendJavaBlockHitSound',
-    'rememberPredictedBlockBreakCompletion'
+    'rememberPredictedBlockBreakCompletion',
+    'bridgeSendJavaBlockBreakEffect'
   ]) {
     if (!packetsBytecode.includes(marker)) throw new Error(`compiled ClientPlayerPackets.class is missing mining sound/suppression bytecode: ${marker}`)
   }
@@ -1824,10 +1866,13 @@ function assertMiningSwingSuppression () {
     'bridgeSendJavaBlockHitSound',
     'bridgeJavaMiningHitVolume',
     'bridgeJavaMiningHitPitch',
+    'bridgeSendJavaBlockBreakEffect',
+    'PARTICLES_DESTROY_BLOCK',
     'bridgeIsBlockHitParticle',
     'getBedrockBlockSounds',
     'getBedrockToJavaSounds',
     'consumePredictedBlockBreakCompletion',
+    'consumePredictedBlockBreakSound',
     'isPredictedBlockBreakParticleEcho'
   ]) {
     if (!worldEffectBytecode.includes(marker)) throw new Error(`compiled WorldEffectPackets.class is missing mining hit-sound bytecode: ${marker}`)
@@ -1895,6 +1940,34 @@ public final class MiningTailSmoke {
         check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakCompletion(
                         pending, oakPosition, 101, 5, 106
                 ), "a completion record must be one-shot");
+
+        final Deque<Pair<ClientPlayerEntity.BlockBreakingInfo, Integer>> pendingSounds = new ArrayDeque<>();
+        ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pendingSounds, oak, 100);
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakSound(
+                        pendingSounds, "hit", oakPosition, 101, 5, 105
+                ), "a mining hit must never consume the final break-sound prediction");
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakSound(
+                        pendingSounds, "break", new BlockPosition(11, 64, -4), 101, 5, 105
+                ), "another block's break sound must remain audible");
+        check(ClientPlayerEntity.bridgeConsumePredictedBlockBreakSound(
+                        pendingSounds, "break", oakPosition, 101, 5, 105
+                ), "a matching Realm break-sound echo must be consumed");
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakSound(
+                        pendingSounds, "break", oakPosition, 101, 5, 106
+                ), "a break-sound prediction must be one-shot");
+
+        ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pendingSounds, oak, 110);
+        check(ClientPlayerEntity.bridgeConsumePredictedBlockBreakSound(
+                        pendingSounds, "break", oakPosition, -1, -1, 115
+                ), "a generic break sound with no block runtime id must correlate by position");
+        ClientPlayerEntity.bridgeRememberPredictedBlockBreakCompletion(pendingSounds, oak, 120);
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakSound(
+                        pendingSounds, "break", oakPosition, 102, 6, 125
+                ), "a different resolved block state must not consume the local break-sound prediction");
+        check(!ClientPlayerEntity.bridgeConsumePredictedBlockBreakSound(
+                        pendingSounds, "break", oakPosition, 101, 5, 161
+                ), "an expired break-sound prediction must not hide a later sound");
+        check(pendingSounds.isEmpty(), "expired break-sound predictions must be discarded");
 
         final ClientPlayerEntity.BlockBreakingInfo paletteAlias = new ClientPlayerEntity.BlockBreakingInfo(
                 oakPosition, null, 201, 17
@@ -1966,6 +2039,11 @@ public final class MiningTailSmoke {
 package net.raphimc.viabedrock.protocol.packet;
 
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.LevelEvent;
+import com.viaversion.viaversion.api.minecraft.BlockPosition;
+import com.viaversion.viaversion.api.protocol.packet.PacketWrapper;
+import com.viaversion.viaversion.api.type.Types;
+import com.viaversion.viaversion.protocols.v1_21_11to26_1.packet.ClientboundPackets26_1;
+import com.viaversion.viaversion.protocol.packet.PacketWrapperImpl;
 
 public final class MiningHitSoundSmoke {
     private static void check(float actual, float expected, String message) {
@@ -1989,6 +2067,20 @@ public final class MiningHitSoundSmoke {
                 "metal hit pitch must retain its SoundType pitch scaling");
         check(WorldEffectPackets.bridgeJavaMiningHitPitch("twisting_vines"), 0.25F,
                 "twisting-vines hit pitch must retain its SoundType pitch scaling");
+
+        final PacketWrapper breakEffect = new PacketWrapperImpl(
+                ClientboundPackets26_1.LEVEL_EVENT, null, null);
+        final BlockPosition breakPosition = new BlockPosition(12, 70, -3);
+        WorldEffectPackets.bridgeWriteJavaBlockBreakEffect(breakEffect, breakPosition, 4567);
+        final int breakEventId = breakEffect.get(Types.INT, 0);
+        final BlockPosition encodedPosition = breakEffect.get(Types.BLOCK_POSITION1_14, 0);
+        final int encodedBlockState = breakEffect.get(Types.INT, 1);
+        final boolean global = breakEffect.get(Types.BOOLEAN, 0);
+        if (breakEffect.getPacketType() != ClientboundPackets26_1.LEVEL_EVENT ||
+                breakEventId != 2001 || !encodedPosition.equals(breakPosition) ||
+                encodedBlockState != 4567 || global) {
+            throw new AssertionError("local completion must encode one Java 2001 block-state effect");
+        }
     }
 }
 `)
@@ -3169,6 +3261,8 @@ function assertMouseActionStateMachine () {
     'quick_craft_blocked_no_native_stack_request',
     'public void bridgeHandleItemStackResponse(PacketWrapper wrapper)',
     'requestId == this.bridgeLatestNativeRequestId',
+    'this.bridgeLatestNativeCursorRequestId',
+    'bridgeNativeResponseOwnsCursor(',
     'clickSlot.container.bridgeAuthoritativeStackId(clickSlot.bedrockSlot)',
     'bridgeRememberPendingNativeRequest(',
     'bridgeLatestNativeRequestBySlot',
@@ -3257,11 +3351,29 @@ function assertMouseActionStateMachine () {
   const nativeQuickMoveEnd = inventorySource.indexOf('private static boolean bridgeIsCraftingInputSlot(', nativeQuickMoveStart)
   const nativeQuickMovePath = inventorySource.slice(nativeQuickMoveStart, nativeQuickMoveEnd)
   if (nativeQuickMoveStart < 0 || nativeQuickMoveEnd < 0 ||
-      !nativeQuickMovePath.includes('bridgeRememberPendingNativeRequest(')) {
+      !nativeQuickMovePath.includes('bridgeRememberPendingNativeRequest(') ||
+      !nativeQuickMovePath.includes('bridgeObserveNativeRequest(requestId, false)')) {
     throw new Error('crafting-grid QUICK_MOVE must retain per-slot request ownership and rollback tracking')
   }
   if (nativeQuickMovePath.includes('bridgeSetLatestNativeRequestId(')) {
-    throw new Error('non-cursor crafting-grid QUICK_MOVE must not make an older pending cursor ACK stale')
+    throw new Error('non-cursor crafting-grid QUICK_MOVE must update settlement and cursor ownership separately')
+  }
+  const nativeCraftStart = inventorySource.indexOf('private boolean bridgeSendNativeCraftRequest(')
+  const nativeCraftEnd = inventorySource.indexOf('private boolean bridgeCommitPendingCraftToContainerSlot(', nativeCraftStart)
+  const nativeCraftPath = inventorySource.slice(nativeCraftStart, nativeCraftEnd)
+  if (nativeCraftStart < 0 || nativeCraftEnd < 0 ||
+      !nativeCraftPath.includes('this.bridgeObserveNativeRequest(requestId, resultDestination == null)') ||
+      nativeCraftPath.includes('this.bridgeSetLatestNativeRequestId(requestId)')) {
+    throw new Error('direct-to-inventory craft requests must preserve the cursor-response watermark')
+  }
+  const requestAllocations = inventorySource.match(/int requestId = this\.nextItemStackRequestId\(\);/g) || []
+  const observedRequests = inventorySource.match(/this\.bridgeObserveNativeRequest\(requestId,/g) || []
+  const nonCursorRequests = inventorySource.match(/this\.bridgeObserveNativeRequest\(requestId, false\);/g) || []
+  const cursorRequests = inventorySource.match(/this\.bridgeObserveNativeRequest\(requestId, true\);/g) || []
+  if (requestAllocations.length !== 8 || observedRequests.length !== requestAllocations.length ||
+      nonCursorRequests.length !== 5 || cursorRequests.length !== 2 ||
+      !inventorySource.includes('this.bridgeObserveNativeRequest(requestId, resultDestination == null);')) {
+    throw new Error('every native request allocation must declare whether it changes the cursor')
   }
   for (const marker of [
     'ClientboundBedrockPackets.ITEM_STACK_RESPONSE',
@@ -3601,10 +3713,12 @@ public final class BridgeItemTagOrientationSmoke {
 
 function assertCraftingInteractionSemantics () {
   const inventorySource = fs.readFileSync(path.join(patchRoot, 'InventoryContainer.java'), 'utf8')
+  const containerSource = fs.readFileSync(path.join(patchRoot, 'Container.java'), 'utf8')
   for (const marker of [
     'javaSlot == 0 && input == ContainerInput.SWAP',
     'handleCraftingOutputSwap(button)',
     'bridgeCanCraftResultIntoHotbar(destinationBefore, recipe.output, recipe.outputMaxStackSize)',
+    'bridgeCanCraftResultIntoDestination(',
     'craft_2x2_number_key_to_hotbar',
     'craft_3x3_number_key_to_hotbar',
     'jsonBoolean(object, "assume_symmetry", false)',
@@ -3625,8 +3739,35 @@ function assertCraftingInteractionSemantics () {
       quickMoveBranch.includes('carriedItem') || quickMoveBranch.includes('cursor_busy')) {
     throw new Error('crafting-output QUICK_MOVE must preserve a nonempty cursor and use authoritative direct-to-inventory crafting')
   }
+  const ordinaryCursorBranch = outputClickMethod.slice(ordinaryCursorStart)
+  if (!ordinaryCursorBranch.includes('bridgeCanCraftResultIntoDestination(') ||
+      ordinaryCursorBranch.includes('recipe.output.amount() <= 64')) {
+    throw new Error('ordinary crafting-output pickup must honor the recipe result stack limit')
+  }
+  const pendingCraftStart = inventorySource.indexOf('private boolean bridgeCommitPendingCraftToContainerSlot(')
+  const pendingCraftEnd = inventorySource.indexOf('private ClickSlot findCraftResultTarget(', pendingCraftStart)
+  const pendingCraftMethod = inventorySource.slice(pendingCraftStart, pendingCraftEnd)
+  if (pendingCraftStart < 0 || pendingCraftEnd < 0 ||
+      !pendingCraftMethod.includes('bridgeCanCraftResultIntoDestination(') ||
+      pendingCraftMethod.includes('cursorBefore.amount() <= 64')) {
+    throw new Error('deferred crafted-result placement must honor the recipe result stack limit')
+  }
   if (inventorySource.includes('craft_output_quick_move_cursor_busy')) {
     throw new Error('crafting-output QUICK_MOVE regressed to rejecting a nonempty cursor')
+  }
+  const playerQuickMoveStart = inventorySource.indexOf('private boolean handleQuickMoveClick(')
+  const playerQuickMoveEnd = inventorySource.indexOf('private boolean bridgeTrySendNativeQuickMove(', playerQuickMoveStart)
+  const playerQuickMove = inventorySource.slice(playerQuickMoveStart, playerQuickMoveEnd)
+  if (playerQuickMoveStart < 0 || playerQuickMoveEnd < 0 ||
+      playerQuickMove.includes('carriedItem') || playerQuickMove.includes('quick_move_blocked_with_cursor')) {
+    throw new Error('player-inventory QUICK_MOVE must not reject an unrelated carried cursor')
+  }
+  const containerQuickMoveStart = containerSource.indexOf('private boolean bridgeHandleQuickMoveClick(')
+  const containerQuickMoveEnd = containerSource.indexOf('private boolean bridgeHandleQuickCraftClick(', containerQuickMoveStart)
+  const containerQuickMove = containerSource.slice(containerQuickMoveStart, containerQuickMoveEnd)
+  if (containerQuickMoveStart < 0 || containerQuickMoveEnd < 0 ||
+      containerQuickMove.includes('bridgeGetCarriedItem') || containerQuickMove.includes('quick_move_blocked_with_cursor')) {
+    throw new Error('generic-container and furnace QUICK_MOVE must not reject an unrelated carried cursor')
   }
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'viabedrock-crafting-interactions-'))
@@ -3699,6 +3840,92 @@ public final class BridgeCraftingInteractionSmoke {
                 "unknown stack limit must not merge");
         check(InventoryContainer.bridgeCanCraftResultIntoHotbar(BedrockItem.empty(), item(3, 1), 0),
                 "unknown stack limit may still craft into an empty destination");
+
+        check(!InventoryContainer.bridgeCanCraftResultIntoDestination(item(3, 1), item(3, 1), 1),
+                "max-one craft output cannot append to an occupied cursor or destination");
+        check(InventoryContainer.bridgeCanCraftResultIntoDestination(item(3, 15), item(3, 1), 16),
+                "max-sixteen craft output can fill the final destination slot");
+        check(!InventoryContainer.bridgeCanCraftResultIntoDestination(item(3, 16), item(3, 1), 16),
+                "max-sixteen craft output cannot overfill its destination");
+        check(InventoryContainer.bridgeCanCraftResultIntoDestination(item(3, 60), item(3, 4), 64),
+                "multi-item craft output may exactly fill a max-sixty-four destination");
+        check(!InventoryContainer.bridgeCanCraftResultIntoDestination(item(3, 61), item(3, 4), 64),
+                "multi-item craft output cannot overfill a max-sixty-four destination");
+        check(!InventoryContainer.bridgeCanCraftResultIntoDestination(item(3, 1), item(3, 1), 0),
+                "unknown craft stack limit never merges into an occupied cursor or destination");
+        check(InventoryContainer.bridgeCanCraftResultIntoDestination(BedrockItem.empty(), item(3, 1), 0),
+                "unknown craft stack limit still permits one result in an empty destination");
+
+        final int cursorRequest = -47;
+        final int quickMoveRequest = -49;
+        final int directCraftRequest = -51;
+        int cursorWatermark = InventoryContainer.bridgeCursorResponseWatermarkAfterRequest(
+                0, cursorRequest, true);
+        check(cursorWatermark == cursorRequest,
+                "a cursor-changing request owns subsequent cursor acceptance and rollback");
+        cursorWatermark = InventoryContainer.bridgeCursorResponseWatermarkAfterRequest(
+                cursorWatermark, quickMoveRequest, false);
+        check(cursorWatermark == cursorRequest,
+                "a quick-move request preserves the older cursor-response watermark");
+        check(!InventoryContainer.bridgeNativeResponseOwnsCursor(quickMoveRequest, cursorWatermark),
+                "a quick-move ACK cannot steal an older cursor ACK or rollback");
+        check(InventoryContainer.bridgeShouldPublishNativeResponse(true, false, true, 1),
+                "a newer quick-move ACK settles and publishes while the older cursor request remains pending");
+        check(InventoryContainer.bridgeNativeResponseOwnsCursor(cursorRequest, cursorWatermark),
+                "the older cursor response still owns acceptance and rejection after quick-move settlement");
+        cursorWatermark = InventoryContainer.bridgeCursorResponseWatermarkAfterRequest(
+                cursorWatermark, directCraftRequest, false);
+        check(cursorWatermark == cursorRequest,
+                "a direct-to-inventory craft preserves the older cursor-response watermark");
+        check(!InventoryContainer.bridgeNativeResponseOwnsCursor(directCraftRequest, cursorWatermark),
+                "an out-of-order direct-craft ACK cannot overwrite the carried cursor");
+        check(InventoryContainer.bridgeNativeResponseOwnsCursor(cursorRequest, cursorWatermark),
+                "the older accepted cursor ACK remains authoritative after direct craft");
+        check(InventoryContainer.bridgeNativeResponseOwnsCursor(cursorRequest, cursorWatermark),
+                "the older rejected cursor request still owns rollback after direct craft");
+        check(InventoryContainer.bridgeShouldPublishNativeResponse(true, false, true, 1),
+                "a newer direct-craft ACK settles and publishes without taking cursor ownership");
+        check(!InventoryContainer.bridgeShouldPublishNativeResponse(true, false, false, 1),
+                "an older cursor ACK waits for a newer direct craft when it arrives first");
+        check(InventoryContainer.bridgeShouldPublishNativeResponse(true, false, false, 0),
+                "an older cursor ACK publishes when it arrives after the direct craft settles");
+        check(InventoryContainer.bridgeShouldPublishNativeResponse(false, true, false, 1),
+                "an older rejected cursor request publishes its rollback immediately");
+        cursorWatermark = InventoryContainer.bridgeCursorResponseWatermarkAfterRequest(
+                cursorWatermark, -53, true);
+        check(!InventoryContainer.bridgeNativeResponseOwnsCursor(cursorRequest, cursorWatermark) &&
+                        InventoryContainer.bridgeNativeResponseOwnsCursor(-53, cursorWatermark),
+                "a genuinely newer cursor request supersedes the older cursor owner");
+
+        final BedrockItem[] existingStackTarget = new BedrockItem[36];
+        existingStackTarget[14] = item(3, 60);
+        existingStackTarget[6] = item(3, 59);
+        check(InventoryContainer.bridgeFindCraftResultTargetSlot(existingStackTarget, result, 64) == 6,
+                "craft quick-move scans compatible hotbar stacks before main inventory stacks");
+
+        final BedrockItem[] hotbarTarget = new BedrockItem[36];
+        for (int slot = 0; slot < 9; slot++) hotbarTarget[slot] = item(100 + slot, 1);
+        hotbarTarget[2] = BedrockItem.empty();
+        hotbarTarget[7] = BedrockItem.empty();
+        check(InventoryContainer.bridgeFindCraftResultTargetSlot(hotbarTarget, result, 64) == 7,
+                "craft quick-move scans empty hotbar slots in Java's reverse order");
+
+        hotbarTarget[7] = item(107, 1);
+        check(InventoryContainer.bridgeFindCraftResultTargetSlot(hotbarTarget, result, 64) == 2,
+                "craft quick-move keeps scanning the hotbar before main inventory");
+        hotbarTarget[2] = item(102, 1);
+        check(InventoryContainer.bridgeFindCraftResultTargetSlot(hotbarTarget, result, 64) == 35,
+                "craft quick-move scans main inventory in reverse after a full hotbar");
+
+        final BedrockItem[] nonStackableTarget = new BedrockItem[36];
+        nonStackableTarget[0] = item(3, 1);
+        check(InventoryContainer.bridgeFindCraftResultTargetSlot(nonStackableTarget, item(3, 1), 1) == 8,
+                "non-stackable craft output never merges with an existing item");
+
+        final BedrockItem[] fullInventory = new BedrockItem[36];
+        for (int slot = 0; slot < fullInventory.length; slot++) fullInventory[slot] = item(100 + slot, 64);
+        check(InventoryContainer.bridgeFindCraftResultTargetSlot(fullInventory, result, 64) == -1,
+                "craft quick-move reports no target for a full incompatible inventory");
 
         final InventoryContainer.BridgeIngredient wildcardItem =
                 InventoryContainer.BridgeIngredient.fromJson(JsonParser.parseString(
@@ -4200,6 +4427,7 @@ import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ContainerEnu
 import net.raphimc.viabedrock.protocol.data.enums.bedrock.generated.ItemStackRequestActionType;
 import net.raphimc.viabedrock.protocol.model.BedrockItem;
 import net.raphimc.viabedrock.api.model.container.player.InventoryContainer;
+import java.lang.reflect.Method;
 
 public final class FurnaceFamilySmoke {
     private static void check(boolean value, String message) {
@@ -4226,6 +4454,36 @@ public final class FurnaceFamilySmoke {
         @Override
         protected void bridgeSendJavaContainerSetSlot(int slot) {
             this.javaSlotPublications++;
+        }
+    }
+
+    private static final class CursorQuickMoveContainer extends Container {
+        boolean customQuickMoveInvoked;
+
+        CursorQuickMoveContainer() {
+            super(null, (byte) 12, ContainerType.FURNACE, null, null, 3, "furnace");
+        }
+
+        @Override
+        protected boolean bridgeUsesCustomQuickMove() {
+            return true;
+        }
+
+        @Override
+        protected boolean bridgeHandleCustomQuickMove(int javaSlot, InventoryContainer inventory) {
+            this.customQuickMoveInvoked = true;
+            return !isEmpty(inventory.bridgeGetCarriedItem());
+        }
+
+        boolean invokeQuickMove(int javaSlot, InventoryContainer inventory) {
+            try {
+                final Method method = Container.class.getDeclaredMethod(
+                        "bridgeHandleQuickMoveClick", int.class, InventoryContainer.class);
+                method.setAccessible(true);
+                return ((Boolean) method.invoke(this, javaSlot, inventory)).booleanValue();
+            } catch (ReflectiveOperationException exception) {
+                throw new AssertionError(exception);
+            }
         }
     }
 
@@ -4275,6 +4533,25 @@ public final class FurnaceFamilySmoke {
         Container generic = new Container(null, (byte) 10, ContainerType.CONTAINER, null, null, 3, "chest") {};
         check(FurnaceContainer.bridgeQuickMoveActionType(generic, FurnaceContainer.RESULT_SLOT) == ItemStackRequestActionType.Place,
                 "ordinary container quick-move remains Place");
+
+        final int[] furnaceResultOrder = FurnaceContainer.bridgePlayerQuickMoveSlotOrder(true, true, true);
+        check(furnaceResultOrder.length == 36 && furnaceResultOrder[0] == 8 &&
+                        furnaceResultOrder[8] == 0 && furnaceResultOrder[9] == 35 && furnaceResultOrder[35] == 9,
+                "furnace result quick-move matches Java's reverse hotbar-then-main prediction");
+        final int[] furnaceInputOrder = FurnaceContainer.bridgePlayerQuickMoveSlotOrder(true, true, false);
+        check(furnaceInputOrder.length == 36 && furnaceInputOrder[0] == 9 &&
+                        furnaceInputOrder[26] == 35 && furnaceInputOrder[27] == 0 && furnaceInputOrder[35] == 8,
+                "furnace input quick-move keeps Java's forward main-then-hotbar order");
+
+        final InventoryContainer occupiedCursorInventory = new InventoryContainer(null);
+        occupiedCursorInventory.bridgeSetCarriedItem(item(99, 5, 900));
+        final CursorQuickMoveContainer cursorQuickMove = new CursorQuickMoveContainer();
+        check(cursorQuickMove.invokeQuickMove(2, occupiedCursorInventory),
+                "container quick-move dispatches while another stack is carried");
+        check(cursorQuickMove.customQuickMoveInvoked,
+                "furnace custom quick-move receives an occupied-cursor click");
+        check(occupiedCursorInventory.bridgeGetCarriedItem().amount() == 5,
+                "container quick-move leaves the unrelated cursor stack untouched");
 
         BedrockItem quickMoveSource = item(3, 10, 71);
         check(InventoryContainer.bridgeQuickMoveTransferCount(quickMoveSource, 10, BedrockItem.empty()) == 10,

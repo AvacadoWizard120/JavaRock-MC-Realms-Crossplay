@@ -721,13 +721,6 @@ public abstract class Container {
     }
 
     private boolean bridgeHandleQuickMoveClick(int javaSlot, InventoryContainer inventory) {
-        if (!isEmpty(inventory.bridgeGetCarriedItem())) {
-            bridgePublishJavaContainerSnapshot(inventory, "container_quick_move_blocked_with_cursor");
-            ViaBedrock.getPlatform().getLogger().log(Level.INFO,
-                    "[BedrockRealmBridge] blocked generic container quick_move while cursor is non-empty; waiting for server-authoritative cursor state");
-            return true;
-        }
-
         if (this.bridgeUsesCustomQuickMove()) {
             return this.bridgeHandleCustomQuickMove(javaSlot, inventory);
         }

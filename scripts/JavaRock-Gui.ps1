@@ -630,9 +630,14 @@ function Invoke-StorageCleanup {
     if (-not (Test-Path -LiteralPath $StorageCleanupScript -PathType Leaf)) {
         throw "JavaRock is missing $StorageCleanupScript."
     }
-    $arguments = @('-ProjectRoot', $ProjectRoot)
-    if ($Apply) { $arguments += '-Apply' }
-    $output = @(& $StorageCleanupScript @arguments) -join "`n"
+    # Array splatting binds each entry positionally; it does not reinterpret
+    # strings such as '-ProjectRoot' as named parameters. Use a hashtable so a
+    # project path can never slide into the integer retention parameters.
+    $cleanupArguments = @{
+        ProjectRoot = $ProjectRoot
+    }
+    if ($Apply) { $cleanupArguments.Apply = $true }
+    $output = @(& $StorageCleanupScript @cleanupArguments) -join "`n"
     if (-not $output.Trim()) { throw 'The cleanup tool returned no result.' }
     return $output | ConvertFrom-Json
 }
@@ -2513,6 +2518,47 @@ Set-DarkTheme $script:DarkMode
 Add-Log 'gui' 'Windows-native JavaRock launcher ready.'
 
 if ($SmokeTest) {
+    $originalProjectRoot = $ProjectRoot
+    $originalStorageCleanupScript = $StorageCleanupScript
+    $cleanupBindingSmokeRoot = Join-Path ([IO.Path]::GetTempPath()) "javarock cleanup binding $([Guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.Directory]::CreateDirectory($cleanupBindingSmokeRoot) | Out-Null
+        $ProjectRoot = Join-Path $cleanupBindingSmokeRoot 'JavaRock Install With Spaces'
+        [IO.Directory]::CreateDirectory($ProjectRoot) | Out-Null
+        $StorageCleanupScript = Join-Path $cleanupBindingSmokeRoot 'Fake Cleanup.ps1'
+        [IO.File]::WriteAllText($StorageCleanupScript, @'
+param(
+    [string]$ProjectRoot,
+    [int]$KeepPacketRuns = 3,
+    [switch]$Apply
+)
+[ordered]@{
+    projectRoot = $ProjectRoot
+    keepPacketRuns = $KeepPacketRuns
+    applied = [bool]$Apply
+} | ConvertTo-Json -Compress
+'@, [Text.UTF8Encoding]::new($false))
+
+        $cleanupPreview = Invoke-StorageCleanup
+        if ($cleanupPreview.projectRoot -ne $ProjectRoot -or
+            [int]$cleanupPreview.keepPacketRuns -ne 3 -or
+            [bool]$cleanupPreview.applied) {
+            throw 'Cleanup preview did not preserve named arguments through the GUI helper.'
+        }
+        $cleanupApplied = Invoke-StorageCleanup -Apply
+        if ($cleanupApplied.projectRoot -ne $ProjectRoot -or
+            [int]$cleanupApplied.keepPacketRuns -ne 3 -or
+            -not [bool]$cleanupApplied.applied) {
+            throw 'Cleanup apply did not preserve named arguments through the GUI helper.'
+        }
+    } finally {
+        $ProjectRoot = $originalProjectRoot
+        $StorageCleanupScript = $originalStorageCleanupScript
+        if ([IO.Directory]::Exists($cleanupBindingSmokeRoot)) {
+            [IO.Directory]::Delete($cleanupBindingSmokeRoot, $true)
+        }
+    }
+
     Set-DarkTheme $true
     $expectedField = ([Drawing.Color]::FromArgb(51, 55, 61)).ToArgb()
     $expectedFieldText = ([Drawing.Color]::FromArgb(198, 203, 211)).ToArgb()

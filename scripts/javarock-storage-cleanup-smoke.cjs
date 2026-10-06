@@ -7,7 +7,9 @@ const os = require('os')
 const path = require('path')
 
 const cleanupScript = path.join(__dirname, 'Clear-JavaRockStorage.ps1')
-const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'javarock-storage-cleanup-smoke-'))
+// Keep a space in every fixture path so GUI/PowerShell argument binding cannot
+// regress by treating the project root as a positional retention-count value.
+const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'javarock storage cleanup smoke-'))
 
 function write (root, relative, contents = 'fixture\n') {
   const target = path.join(root, ...relative.split('/'))

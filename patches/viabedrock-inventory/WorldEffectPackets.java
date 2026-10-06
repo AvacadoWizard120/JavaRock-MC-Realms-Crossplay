@@ -204,6 +204,22 @@ public class WorldEffectPackets {
             wrapper.read(BedrockTypes.OPTIONAL_POSITION_3F); // fire at position
 
             final ChunkTracker chunkTracker = wrapper.user().get(ChunkTracker.class);
+            final EntityTracker entityTracker = wrapper.user().get(EntityTracker.class);
+            final ClientPlayerEntity clientPlayer = entityTracker != null ? entityTracker.getClientPlayer() : null;
+            if (!isGlobal && clientPlayer != null && "break".equals(soundEvent)) {
+                final int javaBlockState = data >= 0
+                        ? wrapper.user().get(BlockStateRewriter.class).javaId(data)
+                        : -1;
+                final BlockPosition soundPosition = new BlockPosition(
+                        MathUtil.floor(position.x()), MathUtil.floor(position.y()), MathUtil.floor(position.z())
+                );
+                if (clientPlayer.consumePredictedBlockBreakSound(
+                        soundEvent, soundPosition, data, javaBlockState
+                )) {
+                    wrapper.cancel();
+                    return;
+                }
+            }
             if (!isGlobal && chunkTracker != null && (
                     chunkTracker.consumePredictedDoorSound(soundEvent, position)
                             || chunkTracker.consumePredictedBlockPlacementSound(soundEvent, position)
@@ -792,6 +808,27 @@ public class WorldEffectPackets {
         sound.write(Types.FLOAT, bridgeJavaMiningHitPitch(blockSound)); // pitch
         sound.write(Types.LONG, ThreadLocalRandom.current().nextLong()); // seed
         sound.send(BedrockProtocol.class);
+    }
+
+    static void bridgeSendJavaBlockBreakEffect(final UserConnection user, final BlockPosition position,
+                                               final int javaBlockState) {
+        if (javaBlockState < 0) return;
+
+        // MultiPlayerGameMode.destroyBlock removes the predicted client block,
+        // but it does not run the final level event. Sending the canonical Java
+        // event lets the client select the exact block-state break sound and
+        // shape-aware debris instead of approximating either in the bridge.
+        final PacketWrapper effect = PacketWrapper.create(ClientboundPackets26_1.LEVEL_EVENT, user);
+        bridgeWriteJavaBlockBreakEffect(effect, position, javaBlockState);
+        effect.send(BedrockProtocol.class);
+    }
+
+    static void bridgeWriteJavaBlockBreakEffect(final PacketWrapper effect, final BlockPosition position,
+                                                final int javaBlockState) {
+        effect.write(Types.INT, net.raphimc.viabedrock.protocol.data.enums.java.LevelEvent.PARTICLES_DESTROY_BLOCK.getValue());
+        effect.write(Types.BLOCK_POSITION1_14, position);
+        effect.write(Types.INT, javaBlockState);
+        effect.write(Types.BOOLEAN, false); // global
     }
 
     static float bridgeJavaMiningHitVolume(final String blockSound) {

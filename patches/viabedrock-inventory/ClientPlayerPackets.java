@@ -508,9 +508,6 @@ public class ClientPlayerPackets {
                     clientPlayer.setBlockBreakingInfo(new ClientPlayerEntity.BlockBreakingInfo(
                             position, direction, bedrockBlockState, javaBlockState
                     ));
-                    if (clientPlayer.consumeMiningHitSoundCadence()) {
-                        WorldEffectPackets.bridgeSendJavaBlockHitSound(wrapper.user(), position, bedrockBlockState);
-                    }
                     // TODO: Handle instant breaking
                     // TODO: Handle creative mode mining
                     // TODO: Test breaking fire
@@ -533,11 +530,17 @@ public class ClientPlayerPackets {
                     // completing a survival break. They belong to the completed
                     // mining lifecycle, not new attacks against empty air.
                     clientPlayer.suppressCompletedMiningSwings();
-                    // Java already rendered level event 2001 locally while
-                    // predicting this break. Remember it before clearing the
-                    // active target so the matching Bedrock actor echo can be
-                    // consumed without hiding other players' break effects.
-                    clientPlayer.rememberPredictedBlockBreakCompletion(position);
+                    // Java 26.3 removes its predicted block before sending
+                    // STOP, but does not play the final break sound or debris.
+                    // Emit the normal Java 2001 event once, then remember the
+                    // completion so either form of a later Realm echo can be
+                    // consumed without hiding another player's break.
+                    final ClientPlayerEntity.BlockBreakingInfo completedBreak = clientPlayer.blockBreakingInfo();
+                    if (clientPlayer.rememberPredictedBlockBreakCompletion(position) && completedBreak != null) {
+                        WorldEffectPackets.bridgeSendJavaBlockBreakEffect(
+                                wrapper.user(), position, completedBreak.javaBlockState()
+                        );
+                    }
                     clientPlayer.setBlockBreakingInfo(null);
 
                     if (!gameSession.isBlockBreakingServerAuthoritative()) {
@@ -550,9 +553,6 @@ public class ClientPlayerPackets {
                         clientPlayer.addAuthInputBlockAction(new ClientPlayerEntity.AuthInputBlockAction(PlayerActionType.AbortDestroyBlock, position, 0));
                     }
 
-                    // Java's predicted destroy path already runs local level
-                    // event 2001, including its shape-aware debris and final
-                    // sound. Do not echo that effect from the bridge.
                     chunkTracker.handleBlockChange(position, 0, chunkTracker.bedrockAirId());
                     PacketFactory.sendJavaBlockUpdate(wrapper.user(), position, ProtocolConstants.JAVA_AIR_ID);
                 }

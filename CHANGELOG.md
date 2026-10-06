@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.6 - 2026-10-06
+
+- **View → Clean Up JavaRock Files** now passes the JavaRock folder correctly instead of treating it as a retention count.
+- Shift-clicking works in player inventories, storage, furnaces, smokers, and blast furnaces while another stack is held on the cursor.
+- Shift-clicked crafting and furnace output follows Java's exact hotbar-to-inventory order, so it no longer jumps to a different slot after the Realm responds.
+- Block breaking plays its material-correct hit and completion sounds once, even when the Realm omits its break sound.
+
 ## 0.4.5 - 2026-10-06
 
 - Bedrock item NBT, including `Damage`, now survives local wire serialization, restoring durability bars for damaged tools, weapons, and armor.
