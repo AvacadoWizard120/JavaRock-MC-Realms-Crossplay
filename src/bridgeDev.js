@@ -126,6 +126,7 @@ async function runViaBedrockRelay (config, runtimeStatus) {
     viaProxy: {
       available: proxy.available,
       pid: proxy.child?.pid,
+      startedAt: proxy.startedAt,
       bindAddress: proxy.command?.bindAddress,
       targetAddress: proxy.command?.targetAddress,
       targetVersion: proxy.command?.targetVersion

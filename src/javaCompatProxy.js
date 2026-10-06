@@ -206,6 +206,7 @@ function startJavaCompatProxy (config, backendConfig, options = {}) {
     stdio: 'inherit',
     windowsHide: true
   })
+  const startedAt = new Date().toISOString()
 
   const announcer = options.announceLan
     ? startLanAnnouncer({
@@ -241,6 +242,7 @@ function startJavaCompatProxy (config, backendConfig, options = {}) {
     lanAdvertised: Boolean(announcer),
     lanAnnouncePort: announcer ? config.javaLan.port : undefined,
     child,
+    startedAt,
     command,
     viaBedrockConfigPath,
     close

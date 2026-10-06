@@ -29,6 +29,7 @@ try {
     'README-FIRST.txt',
     'LICENSE',
     'LICENSES/GPL-3.0-or-later.txt',
+    'scripts/Clear-JavaRockStorage.ps1',
     'scripts/Start-JavaRock.ps1',
     'scripts/JavaRock-Gui.ps1',
     'scripts/New-JavaRockSupportBundle.ps1',
@@ -75,6 +76,7 @@ try {
   assert.strictEqual(releaseManifest.product, 'JavaRock')
   assert.strictEqual(releaseManifest.version, runtimePackage.version)
   assert(releaseManifest.files.includes('javarock-release-manifest.json'))
+  assert(releaseManifest.files.includes('scripts/Clear-JavaRockStorage.ps1'))
   assert(releaseManifest.files.includes('scripts/Update-JavaRock.ps1'))
   assert(releaseManifest.files.includes('scripts/New-JavaRockSupportBundle.ps1'))
   assert(releaseManifest.files.includes('scripts/support-envelope.cjs'))

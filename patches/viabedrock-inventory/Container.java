@@ -176,11 +176,66 @@ public abstract class Container {
     static Item bridgeApplyDamageComponent(final BedrockItem bedrockItem, final Item javaItem) {
         if (bedrockItem.tag() != null && bedrockItem.tag().get("Damage") instanceof NumberTag damage) {
             // Damage is standard Bedrock item data, not an experimental custom
-            // item feature. Java needs the component on every damageable stack
-            // to render its durability bar and update it as the Realm wears it.
+            // item feature. Java 26.2 only treats a stack as damageable when
+            // both components are present in the effective component patch.
+            // ViaBedrock-created stacks do not reliably inherit the Java item
+            // defaults, so publish the vanilla maximum explicitly as well.
+            final int maximumDamage = bridgeJava26_2MaximumDamage(javaItem.identifier());
+            if (maximumDamage > 0) {
+                javaItem.dataContainer().set(StructuredDataKey.MAX_DAMAGE, maximumDamage);
+            }
             javaItem.dataContainer().set(StructuredDataKey.DAMAGE, Math.max(0, damage.asInt()));
         }
         return javaItem;
+    }
+
+    static int bridgeJava26_2MaximumDamage(final int javaItemId) {
+        // Generated from the bundled Java 26.2 item registry's default
+        // minecraft:max_damage components. Keep this version-locked: these are
+        // protocol registry ids, not stable item identifiers.
+        return switch (javaItemId) {
+            case 887 -> 25; // carrot_on_a_stick
+            case 888 -> 100; // warped_fungus_on_a_stick
+            case 890 -> 432; // elytra
+            case 915 -> 275; // turtle_helmet
+            case 918, 919, 1082, 1457 -> 64; // wolf armor, flint and steel, fishing rod, brush
+            case 922 -> 384; // bow
+            case 939, 940, 941, 942, 943, 1326 -> 59; // wooden tools and spear
+            case 944, 945, 946, 947, 948, 1328 -> 190; // copper tools and spear
+            case 949, 950, 951, 952, 953, 1327 -> 131; // stone tools and spear
+            case 954, 955, 956, 957, 958, 1330 -> 32; // golden tools and spear
+            case 959, 960, 961, 962, 963, 1329, 1362 -> 250; // iron tools/spear and trident
+            case 964, 965, 966, 967, 968, 1331 -> 1561; // diamond tools and spear
+            case 969, 970, 971, 972, 973, 1332 -> 2031; // netherite tools and spear
+            case 982 -> 55; // leather helmet
+            case 983 -> 80; // leather chestplate
+            case 984 -> 75; // leather leggings
+            case 985 -> 65; // leather boots
+            case 986 -> 121; // copper helmet
+            case 987 -> 176; // copper chestplate
+            case 988, 990, 994 -> 165; // copper leggings; chainmail/iron helmets
+            case 989 -> 143; // copper boots
+            case 991, 995 -> 240; // chainmail/iron chestplates
+            case 992, 996 -> 225; // chainmail/iron leggings
+            case 993, 997 -> 195; // chainmail/iron boots
+            case 998 -> 363; // diamond helmet
+            case 999 -> 528; // diamond chestplate
+            case 1000 -> 495; // diamond leggings
+            case 1001 -> 429; // diamond boots
+            case 1002 -> 77; // golden helmet
+            case 1003 -> 112; // golden chestplate
+            case 1004 -> 105; // golden leggings
+            case 1005 -> 91; // golden boots
+            case 1006 -> 407; // netherite helmet
+            case 1007 -> 592; // netherite chestplate
+            case 1008 -> 555; // netherite leggings
+            case 1009 -> 481; // netherite boots
+            case 1134 -> 238; // shears
+            case 1253 -> 500; // mace
+            case 1325 -> 336; // shield
+            case 1370 -> 465; // crossbow
+            default -> 0;
+        };
     }
 
     public BedrockItem getItem(int slot) {
@@ -830,7 +885,10 @@ public abstract class Container {
 
     public void bridgePublishJavaContainerSnapshot(InventoryContainer inventory, String reason) {
         try {
-            inventory.bridgePublishJavaInventorySnapshot(reason + ":player_inventory");
+            // The open-container snapshot already contains all 36 player inventory
+            // slots. Sending a window-0 snapshot immediately before it gives the
+            // Java client two competing state IDs for one click and can leave the
+            // furnace/crafting screen rendering the older one.
             bridgeSendJavaContainerSetContentWithState(inventory.bridgeNextJavaStateId());
             ViaBedrock.getPlatform().getLogger().log(Level.INFO,
                     "[BedrockRealmBridge] sent Java container snapshot reason=" + reason +
