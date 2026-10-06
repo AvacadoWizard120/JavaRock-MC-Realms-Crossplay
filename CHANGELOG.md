@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.5 - 2026-10-06
+
+- Bedrock item NBT, including `Damage`, now survives local wire serialization, restoring durability bars for damaged tools, weapons, and armor.
+- Shift-clicking crafted output moves it into inventory even while the cursor carries another stack.
+
 ## 0.4.4 - 2026-10-05
 
 - Damaged tools, weapons, and armor now send both current damage and maximum durability, restoring the durability bar.

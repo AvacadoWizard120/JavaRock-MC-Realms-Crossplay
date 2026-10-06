@@ -19,6 +19,7 @@ const { makeBedrockPlayerAuthInputPacket } = require('../src/bedrockPuppetContro
 const { simplifyCraftingDataForBridge2x2 } = require('../src/bridgeCraftingRecipes')
 const {
   normalizeClientboundForLocalViaBedrock,
+  normalizeItemStackRequestResultDescriptorForUpstream,
   normalizeServerboundForUpstreamRealm
 } = require('../src/nethernetBedrockRelay')
 const data = minecraftData(`bedrock_${BEDROCK_26_50_VERSION}`)
@@ -141,6 +142,48 @@ const transaction = roundTrip('inventory_transaction', {
 })
 assert.strictEqual(transaction.transaction.transaction_type, 'normal')
 assert.deepStrictEqual(transaction.transaction.actions, [])
+
+// Item extra data uses a u16 mapper followed by a choice keyed on the mapped
+// boolean. A numeric/string truthy flag writes 0xffff but silently skips the
+// NBT choice arm, so exercise the complete Realm-bound craft-result packet.
+const damagedCraftResult = normalizeItemStackRequestResultDescriptorForUpstream({
+  bridgeItemNameByNetworkId: new Map([['316', 'minecraft:stone_pickaxe']])
+}, {
+  network_id: 316,
+  count: 1,
+  metadata: 0,
+  block_runtime_id: 0,
+  extra: {
+    has_nbt: true,
+    nbt: {
+      version: 1,
+      nbt: {
+        type: 'compound',
+        name: '',
+        value: { Damage: { type: 'int', value: 102 } }
+      }
+    },
+    can_place_on: [],
+    can_destroy: []
+  }
+})
+assert.strictEqual(damagedCraftResult.extra.has_nbt, true)
+const damagedCraftRequest = roundTrip('item_stack_request', {
+  requests: [{
+    request_id: -101,
+    actions: [{
+      type_id: 'results_deprecated',
+      legacy_type_id: 19,
+      result_items: [damagedCraftResult],
+      times_crafted: 1
+    }],
+    custom_names: [],
+    cause: -1
+  }]
+})
+const decodedDamagedCraftResult = damagedCraftRequest.requests[0].actions[0].result_items[0]
+assert.strictEqual(decodedDamagedCraftResult.extra.has_nbt, true)
+assert.strictEqual(decodedDamagedCraftResult.extra.nbt.nbt.value.Damage.value, 102)
 
 const emptyLegacyItemExtra = {
   has_nbt: 'false',

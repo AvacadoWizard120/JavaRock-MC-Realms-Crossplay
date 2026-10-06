@@ -28,7 +28,7 @@ function normalizeItemExtraForLocalViaBedrock (extra) {
   const source = extra && typeof extra === 'object' ? extra : {}
   const hasNbt = isTruthyProtocolFlag(source.has_nbt) || source.nbt != null
   const out = {
-    has_nbt: hasNbt ? 'true' : 'false',
+    has_nbt: hasNbt,
     can_place_on: normalizeStringArray(source.can_place_on || source.canPlaceOn),
     can_destroy: normalizeStringArray(source.can_destroy || source.canDestroy)
   }

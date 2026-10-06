@@ -229,7 +229,7 @@ const newItem = normalizeItemForLocalViaBedrock({
 assert.strictEqual(newItem.network_id, 351)
 assert.strictEqual(newItem.has_stack_id, true)
 assert.strictEqual(newItem.stack_id, 12345)
-assert.strictEqual(newItem.extra.has_nbt, 'false')
+assert.strictEqual(newItem.extra.has_nbt, false)
 
 const mainSlot = normalizeClientboundForLocalViaBedrock('inventory_slot', {
   window_id: 0,
@@ -248,7 +248,7 @@ assert.deepStrictEqual(mainSlot.storage_item, {
   metadata: 0,
   has_stack_id: false,
   block_runtime_id: 0,
-  extra: { has_nbt: 'false', can_place_on: [], can_destroy: [] }
+  extra: { has_nbt: false, can_place_on: [], can_destroy: [] }
 })
 assert.strictEqual(mainSlot.item.network_id, 351)
 assert.strictEqual(mainSlot.item.has_stack_id, false)

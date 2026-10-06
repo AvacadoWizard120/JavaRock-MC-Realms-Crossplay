@@ -1063,10 +1063,9 @@ public class InventoryContainer extends Container {
         }
 
         if (input == ContainerInput.QUICK_MOVE) {
-            if (!isEmpty(this.carriedItem)) {
-                this.publishJavaInventorySnapshot("craft_output_quick_move_cursor_busy");
-                return true;
-            }
+            // Java shift-click routes the crafted result directly into inventory;
+            // an unrelated carried stack is neither its source nor destination and
+            // must remain untouched while the Realm authoritatively handles craft.
             return this.bridgeCommitCraftDirectToInventory(recipe, this.bridgeCraftingTable ? "craft_3x3_quick_move" : "craft_2x2_quick_move");
         }
 
