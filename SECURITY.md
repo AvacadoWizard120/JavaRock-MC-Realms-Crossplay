@@ -1,5 +1,18 @@
 # Security and Privacy
 
+## Native tester releases
+
+The Fabric tester build ships without accounts, private keys, access codes,
+support bundles or captured logs. Its release audit checks the standalone JAR,
+nested JARs, embedded backend, distribution ZIP and corresponding source ZIP.
+Public verification keys and licensed dependency resources are included.
+
+Update reads are public; publishing requires private authorization and an
+Ed25519 signature. Support uploads are optional, encrypted and subject to upload
+and retention limits. A per-upload receipt key confirms that upload without
+granting inbox listing or download access. Inbox administration and support
+decryption keys remain private. See [native testing](docs/NATIVE_TESTERS.md).
+
 JavaRock authenticates to Microsoft/Xbox services and can record raw protocol traffic. Treat its local runtime data as sensitive.
 
 ## Data That Must Stay Private

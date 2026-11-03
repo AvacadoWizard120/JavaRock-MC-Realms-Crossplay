@@ -1,5 +1,12 @@
 # JavaRock
 
+The [native tester build, 0.5.0-dev.16](https://github.com/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/releases/tag/v0.5.0-dev.16),
+is a Fabric mod for Minecraft Java 26.3 and Bedrock 1.26.60. Its Windows ZIP
+includes the required mods. Updates and encrypted support uploads need no access
+code. See [native installation and testing](docs/NATIVE_TESTERS.md).
+
+The desktop 0.4.6 release and its instructions remain below.
+
 JavaRock lets Minecraft Java Edition connect to a Bedrock Realm. It runs on your Windows PC, signs in to Realms with your Microsoft account, and opens a local Java server at `localhost:25565`.
 
 JavaRock is still experimental. Inventory actions, crafting, entity translation, lighting, and movement can break or desync. Use it only with accounts and Realms you are allowed to access, and avoid testing with items you cannot afford to lose.
