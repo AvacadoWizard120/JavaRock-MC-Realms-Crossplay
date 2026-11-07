@@ -1,6 +1,6 @@
 # Native tester build
 
-[Download JavaRock 0.5.0-dev.17](https://github.com/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/releases/tag/v0.5.0-dev.17).
+[Download JavaRock 0.5.0-dev.18](https://github.com/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/releases/tag/v0.5.0-dev.18).
 
 This is a Fabric client mod for Minecraft Java Edition 26.3, connecting to Bedrock
 1.26.60 Realms and servers. It replaces the desktop bridge for this test version.
@@ -14,7 +14,7 @@ This is a Fabric client mod for Minecraft Java Edition 26.3, connecting to Bedro
 4. Open JavaRock from the title screen, sign in to Microsoft, select a Realm and join.
 
 The ZIP includes Fabric API 0.165.2+26.3 and ViaFabricPlus 5.1.3. A working
-dev.16 install can update from the title screen. For an older build or an
+dev.16 or dev.17 install can update from the title screen. For an older build or an
 instance that fails to start, close Minecraft and replace the three JARs
 together from the ZIP. Your saved sign-in stays in `config/javarock`.
 

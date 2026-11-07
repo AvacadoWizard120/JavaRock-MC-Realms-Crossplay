@@ -1,6 +1,6 @@
 # JavaRock
 
-The [native tester build, 0.5.0-dev.17](https://github.com/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/releases/tag/v0.5.0-dev.17),
+The [native tester build, 0.5.0-dev.18](https://github.com/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/releases/tag/v0.5.0-dev.18),
 is a Fabric mod for Minecraft Java 26.3 and Bedrock 1.26.60. Its Windows ZIP
 includes the required mods. Updates and encrypted support uploads need no access
 code. See [native installation and testing](docs/NATIVE_TESTERS.md).
