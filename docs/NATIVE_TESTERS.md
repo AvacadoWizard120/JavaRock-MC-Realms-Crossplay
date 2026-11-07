@@ -1,6 +1,6 @@
 # Native tester build
 
-[Download JavaRock 0.5.0-dev.16](https://github.com/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/releases/tag/v0.5.0-dev.16).
+[Download JavaRock 0.5.0-dev.17](https://github.com/AvacadoWizard120/JavaRock-MC-Realms-Crossplay/releases/tag/v0.5.0-dev.17).
 
 This is a Fabric client mod for Minecraft Java Edition 26.3, connecting to Bedrock
 1.26.60 Realms and servers. It replaces the desktop bridge for this test version.
@@ -13,16 +13,17 @@ This is a Fabric client mod for Minecraft Java Edition 26.3, connecting to Bedro
    old standalone ViaFabricPlus Bedrock addon; JavaRock contains its patched copy.
 4. Open JavaRock from the title screen, sign in to Microsoft, select a Realm and join.
 
-The ZIP includes Fabric API 0.165.2+26.3 and ViaFabricPlus 5.1.3. Use the full ZIP
-when moving from an older private build so those dependencies are updated too.
-Your saved sign-in stays in `config/javarock`; it is not included in the download.
+The ZIP includes Fabric API 0.165.2+26.3 and ViaFabricPlus 5.1.3. A working
+dev.16 install can update from the title screen. For an older build or an
+instance that fails to start, close Minecraft and replace the three JARs
+together from the ZIP. Your saved sign-in stays in `config/javarock`.
 
 ## Updates and support
 
-Update checks and downloads need no access code. They verify signed release
-metadata and the downloaded JAR before installation. Installation replaces
-JavaRock only, preserving other mods, worlds and account data. Automatic checks
-and downloads can be turned off in JavaRock's update settings.
+Update checks and downloads need no access code. On Windows, the updater
+verifies the signed release and installs JavaRock with any required Fabric API
+and ViaFabricPlus changes. It keeps the previous JARs for rollback. Automatic
+checks and downloads can be turned off in JavaRock's update settings.
 
 Open **Support ZIP** in JavaRock to collect diagnostics and add an optional note.
 Uploading is optional and needs no access code. The ZIP includes your profile
